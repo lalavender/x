@@ -113,8 +113,23 @@ def prepare_env(host: str) -> dict:
     return env
 
 
+def module_has_tests(module: str) -> bool:
+    """模块是否含 .test.yh（按文件头 module 名匹配，兼容嵌套目录）。"""
+    for f in COMPILER.rglob("*.test.yh"):
+        try:
+            head = f.read_text(encoding="utf-8", errors="replace")[:200]
+        except OSError:
+            continue
+        if re.search(r"^module\s+" + re.escape(module) + r"\s*$", head, re.M):
+            return True
+    return False
+
+
 def run_module(compiler: Path, module: str, timeout: int, env: dict) -> int:
     """运行一个模块的内建测试，返回失败数（0 或 1）。"""
+    if not module_has_tests(module):
+        print(f"SKIP compiler-tests/{module}: 无 .test.yh 测试文件")
+        return 0
     proc = subprocess.run(
         [str(compiler), "test", module, "--timeout", str(timeout)],
         cwd=COMPILER, capture_output=True, text=True, env=env, timeout=1800)

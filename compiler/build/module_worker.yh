@@ -1,6 +1,7 @@
 module build
 import errors
 import support
+import table
 import parse
 import comptime
 import ast
@@ -33,12 +34,10 @@ fn mb_verify_checked_snapshot(unit *check.CheckedModule) int {
 // mb_llvm_module_paths：算出本模块的 LLVM 对象、文本与汇编路径。
 // 对象放在 obj/<tag>.o，文本放在 llvm/<tag>.ll，汇编放在 asm/<tag>.s；
 // 三者都用 proj.mod_tag 生成的项目+模块标记防同名冲突。
+// build_off/build_len 由任务携带（父进程已解析），本函数不再重算构建目录。
 // asm_out/text_out 传 0 表示不需要该路径。返回 0 成功；标记失败返回 -1。
-fn mb_llvm_module_paths(m int, main_off int, main_len int,
+fn mb_llvm_module_paths(m int, build_off int, build_len int,
     obj_out *u8, text_out *u8, asm_out *u8) int {
-    let build_len int = 0
-    let build_off int = proj.build_dir(main_off, main_len, &build_len)
-    if (build_off < 0) { return -1 }
     let tag_off int = -1
     let tag_len int = 0
     if (proj.mod_tag(m, &tag_off, &tag_len) != 0) { return -1 }
@@ -69,14 +68,14 @@ fn mb_llvm_module_paths(m int, main_off int, main_len int,
 // 本函数只保留模块前端、快照校验与接口/缓存编排；受检快照 → 模块 IR →
 // LLVM 文本 → 内嵌桥 → 原子对象发布由 llvm_pipeline 统一承担。
 // 返回 0 成功、-1 失败（诊断已写 stderr）。
-fn mb_llvm_emit_module(m int, main_off int, main_len int,
+fn mb_llvm_emit_module(m int, build_off int, build_len int,
     cache_in *ir.IRFunctionCacheSet, cache_out *ir.IRFunctionCacheSet,
     env_key u64, lower_stats *lower.CheckedLowerStats, check_dir *char,
     check_env u64) int {
     let obj_path [700]u8
     let text_path [700]u8
     let asm_path [700]u8
-    if (mb_llvm_module_paths(m, main_off, main_len, &obj_path[0],
+    if (mb_llvm_module_paths(m, build_off, build_len, &obj_path[0],
             &text_path[0], &asm_path[0]) != 0) {
         return -1
     }
@@ -86,7 +85,7 @@ fn mb_llvm_emit_module(m int, main_off int, main_len int,
         return errors.fail("内部错误：受检 AST 上下文校验失败")
     }
     let checked check.CheckedModule
-    if (support.front_checked_verify() != 0
+    if (check.front_checked_verify() != 0
         || check.checked_module_capture(&checked) != 0) {
         return -1
     }
@@ -132,31 +131,31 @@ fn mb_worker_parent_alive() int {
     return getppid() == mb_worker_parent ? 1 : 0
 }
 
-// mb_emit_indexed_module：复用父进程已扫描的项目、词法 token 与顶层声明索引，
+// mb_emit_job：复用已扫描的项目、词法 token 与顶层声明索引，编译 job.mod 一个模块。
+// 输入全部来自 job（模式、依赖接口、符号后缀、构建目录与汇编输出目录）；
 // 只在当前子进程建立语义表、检查模块并发布 LLVM 对象与本轮私有接口。
-// 参数 out_dir/ir_cache_salt 是旧按文件汇编路径的遗留，待 C2 清理调用链。
-fn mb_emit_indexed_module(m int, main_off int, main_len int,
-    out_dir *char, ir_cache_salt u64) int {
+// 返回 0 = 成功；-1 = 失败（诊断已写 stderr）。
+fn mb_emit_job(job *ModuleJob) int {
     if (mb_worker_parent_alive() == 0) { return -1 }
     // worker 只走受检前端：check 与 LLVM 发射共用同一条语义遍历。
-    if (support.front_checked_begin() != 0) {
+    if (check.front_checked_begin() != 0) {
         return -1
     }
     comptime.ct_reset()
     support.ctl().front_cache = 1
     support.session().ast_capture = 0
-    support.ctl().ir_cache_salt = ir_cache_salt
+    support.ctl().ir_cache_salt = job.ir_cache_salt
     errors.diag().errors = 0
-    let sfx_off int = -1
-    let sfx_len int = 0
-    if (m < 0 || m >= proj.mod_count()
-        || pj_mod_suffix(proj.mod_at(m).proj, m, &sfx_off, &sfx_len) != 0) {
-        return -1
-    }
+    let m int = job.mod
+    if (m < 0 || m >= proj.mod_count()) { return -1 }
+    // B0 过渡：job.mode 是 worker 边界的权威模式，落回会话开关供下游既有读点使用；
+    // B1 把这些读点切到 job.mode 后删除这两行。
+    support.session().check_only = (job.mode & JOB_CHECK) != 0 ? 1 : 0
+    support.session().test_mode = (job.mode & JOB_TEST) != 0 ? 1 : 0
     proj.cfg().module_mode = 1
     proj.cfg().is_entry_mod = proj.mod_at(m).is_entry
-    support.fs().sym_sfx_off = sfx_off
-    support.fs().sym_sfx_len = sfx_len
+    support.msym().off = job.sym_sfx_off
+    support.msym().len = job.sym_sfx_len
     if (check.sem_init_tables() != 0) {
         return -1
     }
@@ -165,25 +164,20 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
     if (builtin.front_prepare() != 0) {
         return -1
     }
-    let build_len int = 0
-    let build_off int = proj.build_dir(main_off, main_len, &build_len)
-    if (build_off < 0) {
-        return -1
-    }
+    let build_off int = job.build_off
+    let build_len int = job.build_len
     // RS3b：按文件汇编目录（父进程只创建到 asm/ 一级）
-    if (support.session().check_only == 0 && link.cmd_mkdirs(out_dir) != 0) {
-        return errors.fail_path("无法创建汇编目录: ", out_dir)
-    }
-    if (mb_module_iface_deps(m, build_off, build_len) < 0) {
-        return -1
+    if (support.session().check_only == 0 && link.cmd_mkdirs(job.out_dir) != 0) {
+        return errors.fail_path("无法创建汇编目录: ", job.out_dir)
     }
     let di int = 0
-    for di < bdep_count() {
-        if (support.set_source_path(proj.pool_str(bdep_at(di).ifoff)) != 0) {
+    for di < mb_job_dep_count(job) {
+        let dep *BDep = mb_job_dep_at(job, di)
+        if (support.set_source_path(proj.pool_str(dep.ifoff)) != 0) {
             return -1
         }
-        if (parse.iface_load(proj.pool_str(bdep_at(di).ifoff),
-                bdep_at(di).bind_off, bdep_at(di).bind_len) < 0) {
+        if (parse.iface_load(proj.pool_str(dep.ifoff),
+                dep.bind_off, dep.bind_len) < 0) {
             return -1
         }
         di += 1
@@ -195,10 +189,11 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
     ast.ast_decl_reset()
     ast.ast_function_reset()
     let cti int = 0
-    for cti < bdep_count() {
-        if (support.set_source_path(proj.pool_str(bdep_at(cti).ctoff)) != 0
-            || parse.iface_ct_load(proj.pool_str(bdep_at(cti).ctoff),
-                bc().dep_base + cti) != 0) {
+    for cti < mb_job_dep_count(job) {
+        let dep *BDep = mb_job_dep_at(job, cti)
+        if (support.set_source_path(proj.pool_str(dep.ctoff)) != 0
+            || parse.iface_ct_load(proj.pool_str(dep.ctoff),
+                job.dep_base + cti) != 0) {
             return -1
         }
         cti += 1
@@ -245,8 +240,8 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
         }
         return 0
     }
-    let sym_base int = support.ms().sym_n
-    let tname_base int = support.ms().name_n
+    let sym_base int = table.ms().sym_n
+    let tname_base int = table.ms().name_n
     support.session().compile = 1
     support.session().pass = 1
     let fi int = 0
@@ -292,7 +287,7 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
     for fi_ct < proj.mod_file_count(m) {
         let file_ct int = proj.mod_file_at(m, fi_ct)
         if (mb_pass2_file(proj.pool_str(proj.file(file_ct).path_off),
-                file_ct, 2) != 0) { return -1 }
+                file_ct, MB_PASS2_CT_FNS) != 0) { return -1 }
         fi_ct += 1
     }
     if (errors.diag().errors > 0) { return -1 }
@@ -300,7 +295,7 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
     for fi_ct_layout < proj.mod_file_count(m) {
         let file_id int = proj.mod_file_at(m, fi_ct_layout)
         if (mb_pass2_file(proj.pool_str(proj.file(file_id).path_off),
-                file_id, 3) != 0) { return -1 }
+                file_id, MB_PASS2_LAYOUT_REGISTER) != 0) { return -1 }
         fi_ct_layout += 1
     }
     for 1 {
@@ -312,7 +307,7 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
         for fi_layout_eval < proj.mod_file_count(m) {
             let file_id int = proj.mod_file_at(m, fi_layout_eval)
             if (mb_pass2_file(proj.pool_str(proj.file(file_id).path_off),
-                    file_id, 4) != 0) { return -1 }
+                    file_id, MB_PASS2_LAYOUT_EVAL) != 0) { return -1 }
             if (mb_restore_front_file(proj.pool_str(proj.file(file_id).path_off),
                     file_id) != 0 || mb_file_head_bind(file_id) != 0
                 || parse.parse_source_ct_layout_exprs() != 0) { return -1 }
@@ -340,7 +335,7 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
     for fi2 < proj.mod_file_count(m) {
         let file_id int = proj.mod_file_at(m, fi2)
         if (mb_pass2_file(proj.pool_str(proj.file(file_id).path_off),
-                file_id, 1) != 0) {
+                file_id, MB_PASS2_GLOBALS) != 0) {
             return -1
         }
         fi2 += 1
@@ -387,7 +382,7 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
     for fi3 < proj.mod_file_count(m) {
         let file_id int = proj.mod_file_at(m, fi3)
         if (mb_pass2_file(proj.pool_str(proj.file(file_id).path_off),
-                file_id, 0) != 0) {
+                file_id, MB_PASS2_FN_BODY) != 0) {
             if (check_cache_on != 0) { check.checked_check_cache_end() }
             ir.ir_function_cache_set_release(&check_in)
             return -1
@@ -407,7 +402,7 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
             let fit_file int = proj.mod_file_at(m, fit)
             if (proj.ctx().test_file_filter < 0 || proj.ctx().test_file_filter == fit_file) {
                 if (mb_pass2_file(proj.pool_str(proj.file(fit_file).path_off),
-                        fit_file, 5) != 0) {
+                        fit_file, MB_PASS2_TEST_BODY) != 0) {
                     return -1
                 }
             }
@@ -464,12 +459,12 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
     // LLVM 编译继续 lowering 并发布对象；check 只验证受检快照，不触发后端发射。
     if (support.session().check_only != 0) {
         let checked check.CheckedModule
-        if (support.front_checked_verify() != 0
+        if (check.front_checked_verify() != 0
             || check.checked_module_capture(&checked) != 0) { return -1 }
         let checked_ok int = mb_verify_checked_snapshot(&checked)
         check.checked_module_release(&checked)
         if (checked_ok != 0) { return checked_ok }
-        if (support.front_checked_end() != 0) { return -1 }
+        if (check.front_checked_end() != 0) { return -1 }
         return 0
     }
     // LA3：函数级 IR 缓存。缓存目录按模块隔离；装载失败按 miss 处理，
@@ -490,7 +485,7 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
     let cache_out_p *ir.IRFunctionCacheSet = support.ctl().firc_write_off != 0 ?
         0.to_type(*ir.IRFunctionCacheSet) : &cache_out
     // LLVM 后端：受检快照 → 模块 IR（可复用函数 IR）→ LLVM 文本 → 内嵌桥发布对象。
-    let emitted int = mb_llvm_emit_module(m, main_off, main_len, &cache_in,
+    let emitted int = mb_llvm_emit_module(m, build_off, build_len, &cache_in,
         cache_out_p, env_key, &lower_stats, support.arr_cstr(&firc_dir[0]),
         check_cache_on != 0 ? check_env : 0)
     if (emitted == 0 && support.session().test_mode == 0 && cache_out_p != 0) {
@@ -499,6 +494,6 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
     ir.ir_function_cache_set_release(&cache_in)
     ir.ir_function_cache_set_release(&cache_out)
     if (emitted != 0) { return -1 }
-    if (support.front_checked_end() != 0) { return -1 }
+    if (check.front_checked_end() != 0) { return -1 }
     return 0
 }

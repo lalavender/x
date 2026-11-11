@@ -1,5 +1,7 @@
 module proj
 
+import support
+
 // ============================================================================
 //
 // 项目发现/索引的**数据层**：项目/模块/文件三张表 + 每文件导入的平行数组，
@@ -13,9 +15,242 @@ module proj
 // 子进程禁止写这里的路径游标（pj_canon 的隐式出参是已知遗留，B1-2 改显式）。
 //
 // 文件编译顺序（同模块按文件名序）：本文件只放类型与单例，写者在
-// proj_10_table.yh，路径/窄口读在 proj_20_path.yh。
+// table.yh，路径/窄口读在 path.yh。
 // ============================================================================
 
 // g_proj：proj 模块私有单例（BSS 零初始化，非零初值由 init 设置）。
 let g_proj ProjectCtx
+
+// ============================================================================
+// 文件作用域（2026-11-10 自 support 迁入，ADR-0024）
+//
+// FileScope 是「当前编译文件」的模块归属、导入表与已加载接口缓存：属于项目
+// 解析数据，不属 support 的基础设施。生命周期 = 一个编译单元（换文件时
+// fscope_reset），堆缓冲由导入推送路径扩容。
+// ============================================================================
+
+// ImportEnt：源文件的一条 import 声明。
+pub struct ImportEnt {
+    name_off int       // 查找名（模块名）名字池偏移；点分导入时为末段
+    name_len int
+    path_off int       // 完整点分原文（a.b.c）名字池偏移；用于目录路径解析
+    path_len int
+    proj_key_off int   // 跨项目导入首段的依赖键池偏移；不适用时 -1
+    proj_key_len int
+    alias_off int      // 绑定名（限定调用用的标识符）池偏移
+    alias_len int
+    line int           // 1 基行号（诊断用）
+    col int            // 1 基列号
+}
+
+// ModNsEnt：已加载接口的一个导出名字条目。
+// sym/type_id 恰有一个 >= 0：值/函数/常量走 sym，纯类型名走 type_id。
+pub struct ModNsEnt {
+    name_off int       // 短名（源码名）名字池偏移
+    name_len int
+    sym int            // 值/函数/常量符号下标；纯类型名为 -1
+    tid int            // 类型编号（类型名条目）；值条目 -1
+}
+
+// ModInfo：一个已绑定导入模块（每份接口一条，含导出名字表）。
+pub struct ModInfo {
+    bind_off int       // 绑定名（=模块名）池偏移
+    bind_len int
+    prefix_off int     // 接口头宣布的符号后缀（__proj__mod）池偏移
+    prefix_len int
+    home int           // 模块编号（ms().home 归属标记用）
+    ns *ModNsEnt       // 导出名字表（堆分配）
+    ns_n int
+    ns_cap int
+}
+
+// FileScope：单文件的模块归属 + 导入表 + 已加载接口集合。
+// 符号后缀（sym_sfx_*）是模块构建态，2026-11-10 拆到 support.msym()。
+pub struct FileScope {
+    has_module int // 1 = 文件带 module 归属声明（模块模式）
+    name_off int // 模块名名字池偏移（has_module 时有效）
+    name_len int
+    imports *ImportEnt // 本文件导入表（堆分配，import_push 扩容）
+    import_n int
+    import_cap int
+    import_mod *int // 与 imports 平行：导入绑定的 ModInfo 下标
+    import_used *int // 与 imports 平行：本文件是否用到该导入
+    mods *ModInfo // 当前编译单元已加载的导入模块
+    mod_n int
+    mod_cap int
+    mod_home_next int // 下一个模块编号（home 分配计数）
+}
+
+// g_fscope：文件作用域单例（零初始化；非零初值由 fscope_reset 设置）。
+let g_fscope FileScope
+
+// fs：文件作用域窄口。
+pub fn fs() *FileScope {
+    return &g_fscope
+}
+
+// fscope_reset：把归属与导入表清零（proj.init 调用；旧缓冲由持有方先释放）。
+pub fn fscope_reset() void {
+    g_fscope.has_module = 0
+    g_fscope.name_off = -1
+    g_fscope.name_len = 0
+    g_fscope.imports = 0
+    g_fscope.import_n = 0
+    g_fscope.import_cap = 0
+    g_fscope.import_mod = 0
+    g_fscope.import_used = 0
+    g_fscope.mods = 0
+    g_fscope.mod_n = 0
+    g_fscope.mod_cap = 0
+    g_fscope.mod_home_next = 0
+}
+
+// mod_file_binding：当前文件导入表中查绑定名，返回 ModInfo 下标；无 -1。
+pub fn mod_file_binding(start int, n int) int {
+    if (fs().import_mod == 0) {
+        return -1
+    }
+    // 按绑定名（别名）匹配：限定调用的第一段标识符是别名
+    let i int = 0
+    for i < fs().import_n {
+        if (fs().import_mod[i] >= 0 && fs().imports[i].alias_len == n) {
+            let match int = 1
+            let j int = 0
+            for j < n {
+                if (support.pool_ctx().data[fs().imports[i].alias_off + j]
+                    != support.src_ctx().data[start + j]) {
+                    match = 0
+                    break
+                }
+                j += 1
+            }
+            if (match != 0) {
+                return fs().import_mod[i]
+            }
+        }
+        i += 1
+    }
+    return -1
+}
+
+// mod_file_binding_pool：按名字池偏移查当前文件导入绑定；语义同 mod_file_binding。
+pub fn mod_file_binding_pool(off int, n int) int {
+    if (fs().import_mod == 0) {
+        return -1
+    }
+    let i int = 0
+    for i < fs().import_n {
+        let ent ImportEnt = fs().imports[i]
+        if (fs().import_mod[i] >= 0 && ent.alias_len == n) {
+            let match int = 1
+            let j int = 0
+            for j < n {
+                if (support.pool_ctx().data[ent.alias_off + j]
+                    != support.pool_ctx().data[off + j]) {
+                    match = 0
+                    break
+                }
+                j += 1
+            }
+            if (match != 0) {
+                return fs().import_mod[i]
+            }
+        }
+        i += 1
+    }
+    return -1
+}
+
+// mod_ns_lookup：模块命名空间查条目下标。want_type=1 查类型名，否则查值。
+pub fn mod_ns_lookup(mi int, start int, n int, want_type int) int {
+    let i int = 0
+    for i < fs().mods[mi].ns_n {
+        if (fs().mods[mi].ns[i].name_len == n) {
+            let match int = 1
+            let j int = 0
+            for j < n {
+                if (support.pool_ctx().data[fs().mods[mi].ns[i].name_off + j]
+                    != support.src_ctx().data[start + j]) {
+                    match = 0
+                    break
+                }
+                j += 1
+            }
+            if (match != 0) {
+                if (want_type != 0) {
+                    if (fs().mods[mi].ns[i].tid >= 0) {
+                        return i
+                    }
+                    return -1
+                }
+                if (fs().mods[mi].ns[i].sym >= 0) {
+                    return i
+                }
+                return -1
+            }
+        }
+        i += 1
+    }
+    return -1
+}
+
+// mod_ns_lookup_pool：按名字池中的名字查模块导出；语义同 mod_ns_lookup。
+// 供编译器合成的 fmt 调用使用（名字不来自源码 token）。
+pub fn mod_ns_lookup_pool(mi int, off int, n int, want_type int) int {
+    if (mi < 0 || mi >= fs().mod_n) {
+        return -1
+    }
+    let i int = 0
+    for i < fs().mods[mi].ns_n {
+        let ent ModNsEnt = fs().mods[mi].ns[i]
+        if (ent.name_len == n) {
+            let match int = 1
+            let j int = 0
+            for j < n {
+                if (support.pool_ctx().data[ent.name_off + j]
+                    != support.pool_ctx().data[off + j]) {
+                    match = 0
+                    break
+                }
+                j += 1
+            }
+            if (match != 0) {
+                if (want_type != 0) {
+                    return ent.tid >= 0 ? i : -1
+                }
+                return ent.sym >= 0 ? i : -1
+            }
+        }
+        i += 1
+    }
+    return -1
+}
+
+// mod_import_find：按绑定名（别名）在文件导入表里查找模块；找不到返回 -1。
+// 供插值降级定位 fmt 的导入绑定，不依赖源码中的 token 位置。
+pub fn mod_import_find(name *char, n int) int {
+    if (fs().import_mod == 0) {
+        return -1
+    }
+    let i int = 0
+    for i < fs().import_n {
+        let ent ImportEnt = fs().imports[i]
+        if (fs().import_mod[i] >= 0 && ent.alias_len == n) {
+            let match int = 1
+            let j int = 0
+            for j < n {
+                if (support.pool_ctx().data[ent.alias_off + j] != name[j].to_type(u8)) {
+                    match = 0
+                    break
+                }
+                j += 1
+            }
+            if (match != 0) {
+                return fs().import_mod[i]
+            }
+        }
+        i += 1
+    }
+    return -1
+}
 

@@ -1,6 +1,7 @@
 module main;
 import token;
 import support
+import table
 import errors
 import proj;
 import core.ast;
@@ -20,10 +21,10 @@ import core.parse;
 // 状态下交出 check.CheckedModule 快照，供 lower.lower_module 消费。
 //
 // 与编译器自身单文件检查路径（cmd/driver.yh 的 run_file_check）一致的调用顺序：
-//   support.front_checked_begin() → support.read_source() → check.sem_init_tables()
+//   check.front_checked_begin() → support.read_source() → check.sem_init_tables()
 //   → lex.lex_all() → support.session().compile = 1 → check.ty_register_builtins()
-//   → check.scope_push() → builtin.sem_register_prelude() → 两遍语义
-//   → support.front_checked_end()
+//   → table.scope_push() → builtin.sem_register_prelude() → 两遍语义
+//   → check.front_checked_end()
 // 差别只有三处，且都是「让 AST arena 活到快照生成之后」所必需：
 //   1) 语义遍历前就置 support.session().ast_capture = 1 并清空四个 arena。cmd/compile.yh 的
 //      sem_compile 只在 capture == 0 时临时打开捕获、并在返回前清空 arena；
@@ -169,14 +170,15 @@ fn lower_fixture_capture(path *char, out *check.CheckedModule) int {
     // 会话复位：c_active_file / c_file_decl_i 的 -1 初值与宿主目标身份
     // （快照的 target 由 proj.cfg().target 经 target_resolve 得到）都来自这里。
     support.session_reset();
+    proj.fscope_reset();
     lex.reset();
     proj.init();
     support.bind_cfg(proj.cfg());
     // 与 `yh check <file.yh>` 相同的开关：只做语义检查，不发射旧汇编。
-    // 两点都是本门需要的：front_checked_verify 要求四类旧缓冲为空；输入文件是
+    // 两点都是本门需要的：check.front_checked_verify 要求四类旧缓冲为空；输入文件是
     // 库形态（入口 main 不带 argc/argv），不做入口签名检查。
     support.session().check_only = 1;
-    if (support.front_checked_begin() != 0) { return 1; }
+    if (check.front_checked_begin() != 0) { return 1; }
     // 读源 → 语义表 → 词法；路径先进固定缓冲，解析期诊断才有文件名。
     if (support.set_source_path(path) != 0 || support.read_source(path) != 0) { return 1; }
     if (check.sem_init_tables() != 0) { return 1; }
@@ -189,11 +191,11 @@ fn lower_fixture_capture(path *char, out *check.CheckedModule) int {
     if (lower_fixture_capture_begin(tk) != 0) { return 1; }
     // 编译模式与 prelude 登记：与 run_file_check 同序，晚于词法、早于语义。
     support.session().compile = 1;
-    if (check.ty_register_builtins() != 0 || check.scope_push() != 0
+    if (check.ty_register_builtins() != 0 || table.scope_push() != 0
         || builtin.sem_register_prelude() != 0) { return 1; }
     if (lower_fixture_semantics(tk) != 0) { return 1; }
     // 阶段收尾仍要求旧汇编缓冲为零；快照捕获放在最后一步，保证失败时 out 不变。
-    if (support.front_checked_verify() != 0 || support.front_checked_end() != 0) { return 1; }
+    if (check.front_checked_verify() != 0 || check.front_checked_end() != 0) { return 1; }
     if (check.checked_module_capture(out) != 0) { return 1; }
     return 0;
 }

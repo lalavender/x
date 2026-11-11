@@ -2,6 +2,7 @@ module build
 import token
 import errors
 import support
+import table
 import proj
 import parse
 import backend
@@ -20,6 +21,14 @@ import hash
 // 目录/路径的纯计算在 proj（proj_40_art），工具链调用在 link；本文件只负责
 // 「按什么顺序做、失败怎么收尾」。
 // ============================================================================
+
+// mb_pass2_file 的子遍选择：0 = 普通函数体；其余是全局/编译期子遍。
+const MB_PASS2_FN_BODY int = 0
+const MB_PASS2_GLOBALS int = 1
+const MB_PASS2_CT_FNS int = 2
+const MB_PASS2_LAYOUT_REGISTER int = 3
+const MB_PASS2_LAYOUT_EVAL int = 4
+const MB_PASS2_TEST_BODY int = 5
 
 // mb_check_clear_ifaces：删除本轮 check 生成的临时模块接口。
 // check 使用独立构建目录，不覆盖正式构建缓存；依赖接口保留到全部模块检查结束。
@@ -44,6 +53,39 @@ fn mb_check_clear_ifaces(build_off int, build_len int, count int) void {
         }
         ci += 1
     }
+}
+
+// mb_job_make：组装一个模块编译任务；依赖接口表在这里重新计算。
+// mode 取自会话开关（check_only/test_mode），worker 入口再把它落回同一组开关，
+// B1 收编后改为 worker 直接读 job.mode。
+// 返回 0 = 成功；-1 = 模块下标越界、符号后缀或依赖接口解析失败（已诊断）。
+fn mb_job_make(out *ModuleJob, m int, build_off int, build_len int,
+    out_dir *char, ir_cache_salt u64) int {
+    if (m < 0 || m >= proj.mod_count()) {
+        return errors.fail("内部错误：模块下标越界")
+    }
+    out.mod = m
+    out.mode = JOB_BUILD
+    if (support.session().check_only != 0) { out.mode = out.mode | JOB_CHECK }
+    if (support.session().test_mode != 0) { out.mode = out.mode | JOB_TEST }
+    out.dep_base = bc().dep_base
+    out.build_off = build_off
+    out.build_len = build_len
+    out.out_dir = out_dir
+    out.ir_cache_salt = ir_cache_salt
+    let sfx_off int = -1
+    let sfx_len int = 0
+    if (pj_mod_suffix(proj.mod_at(m).proj, m, &sfx_off, &sfx_len) != 0) {
+        return -1
+    }
+    out.sym_sfx_off = sfx_off
+    out.sym_sfx_len = sfx_len
+    // 成功时返回依赖条数（>= 0），只有负数才是失败。
+    if (mb_module_iface_deps(m, build_off, build_len) < 0) {
+        return -1
+    }
+    out.dep = bc().dep
+    return 0
 }
 
 // mb_compile_start：检查模块缓存；命中返回 1，否则启动 worker 并返回 0。
@@ -78,7 +120,7 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     let artifact_path *char = 0
     let text_artifact [700]u8
     let asm_artifact [700]u8
-    if (mb_llvm_module_paths(m, root_off, root_len, &cache_artifact[0],
+    if (mb_llvm_module_paths(m, build_off, build_len, &cache_artifact[0],
             &text_artifact[0], &asm_artifact[0]) != 0) { return -1 }
     artifact_path = support.arr_cstr(&cache_artifact[0])
     if (proj.canon(build_off, build_len, "iface", &c_off, &c_len) != 0) {
@@ -128,8 +170,12 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     // （tmp/yh-test）与扩展键（见下方 c_test_key），既不复用生产对象，也能在
     // 选中测试集合不变时增量复用测试对象。
     if (support.session().check_only != 0) {
-        if (mb_spawn_indexed_module(m, root_off, root_len,
-                support.arr_cstr(asmdir), 0, pid_out) != 0) {
+        let job ModuleJob
+        if (mb_job_make(&job, m, build_off, build_len,
+                support.arr_cstr(asmdir), 0) != 0) {
+            return -1
+        }
+        if (mb_spawn_indexed_module(&job, root_off, root_len, pid_out) != 0) {
             return errors.fail("无法启动项目检查/测试 worker")
         }
         return 0
@@ -301,8 +347,12 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
         ki += 1
     }
     // 子进程编译（提供方项目根 + 主项目根）
-    if (mb_spawn_indexed_module(m, root_off, root_len, support.arr_cstr(asmdir),
-            bc().compiler_fingerprint, pid_out) != 0) {
+    let job ModuleJob
+    if (mb_job_make(&job, m, build_off, build_len, support.arr_cstr(asmdir),
+            bc().compiler_fingerprint) != 0) {
+        return -1
+    }
+    if (mb_spawn_indexed_module(&job, root_off, root_len, pid_out) != 0) {
         // 不要把「子进程启动失败」与「子进程启动后因参数/编译错误退出」混为一谈：
         // 无 fork 宿主（Windows）上，worker 以非 0 退出时这里同样是 -1，真实原因
         // 在 worker 自己打印的诊断里（例如 --emit-module 参数被拒时退出码 2）。
@@ -409,28 +459,28 @@ fn mb_file_head_bind(fi int) int {
         return -1
     }
     let i int = 0
-    for i < support.fs().import_n {
+    for i < proj.fs().import_n {
         let found int = -1
         let ii int = 0
         for ii < proj.import_count() {
             if (proj.import_at(ii).file == fi
-                && proj.import_at(ii).line == support.fs().imports[i].line
-                && proj.import_at(ii).col == support.fs().imports[i].col) {
+                && proj.import_at(ii).line == proj.fs().imports[i].line
+                && proj.import_at(ii).col == proj.fs().imports[i].col) {
                 found = ii
                 break
             }
             ii += 1
         }
         if (found < 0) {
-            return errors.err_lc(support.fs().imports[i].line, support.fs().imports[i].col,
+            return errors.err_lc(proj.fs().imports[i].line, proj.fs().imports[i].col,
                 "内部错误：导入与扫描记录不对应")
         }
         let imp_proj int = proj.mod_at(proj.file(fi).mod).proj
         if (proj.import_at(found).test_only != 0
             && (support.session().test_mode == 0 || imp_proj != proj.ctx().test_project)) {
             // 生产构建/非目标项目不绑定 test 专用导入；标记 used 以免报未使用。
-            support.fs().import_mod[i] = -1
-            support.fs().import_used[i] = 1
+            proj.fs().import_mod[i] = -1
+            proj.fs().import_used[i] = 1
             i += 1
             continue
         }
@@ -445,30 +495,30 @@ fn mb_file_head_bind(fi int) int {
             di += 1
         }
         if (mi < 0) {
-            return errors.err_lc(support.fs().imports[i].line, support.fs().imports[i].col,
+            return errors.err_lc(proj.fs().imports[i].line, proj.fs().imports[i].col,
                 "内部错误：导入的接口未加载")
         }
-        support.fs().import_mod[i] = mi
-        support.fs().import_used[i] = 0
+        proj.fs().import_mod[i] = mi
+        proj.fs().import_used[i] = 0
         // 导入可只在全局初始化器中使用，而模块文件会在全局遍历与
         // 函数遍历之间重新绑定头部；按 token 快照保留整文件的限定引用。
         let ti int = 0
         for ti + 1 < token.ctx().count {
             if (token.ctx().tokens[ti].kind == token.TOK_IDENT
-                && token.ctx().tokens[ti].len == support.fs().imports[i].alias_len
+                && token.ctx().tokens[ti].len == proj.fs().imports[i].alias_len
                 && token.ctx().tokens[ti + 1].kind == token.TK_DOT) {
                 let same int = 1
                 let j int = 0
-                for j < support.fs().imports[i].alias_len {
+                for j < proj.fs().imports[i].alias_len {
                     if (support.src_ctx().data[token.ctx().tokens[ti].start + j]
-                        != support.pool_ctx().data[support.fs().imports[i].alias_off + j]) {
+                        != support.pool_ctx().data[proj.fs().imports[i].alias_off + j]) {
                         same = 0
                         break
                     }
                     j += 1
                 }
                 if (same != 0) {
-                    support.fs().import_used[i] = 1
+                    proj.fs().import_used[i] = 1
                     break
                 }
             }
@@ -491,22 +541,23 @@ fn mb_pass1_file(path *char, fi int) int {
 }
 
 // mb_pass2_file：复用模块文件快照执行全局、CT 捕获/布局常量子遍或函数子遍。
-// 1 全局初始化，2 CT 正文捕获，3 布局请求登记，4 布局 const 求值，0 普通函数。
-fn mb_pass2_file(path *char, fi int, is_globals int) int {
+// mode 取 MB_PASS2_*：GLOBALS 全局初始化，CT_FNS 正文捕获，LAYOUT_REGISTER
+// 布局请求登记，LAYOUT_EVAL 布局 const 求值，TEST_BODY 测试体，FN_BODY 普通函数。
+fn mb_pass2_file(path *char, fi int, mode int) int {
     if (mb_restore_front_file(path, fi) != 0) {
         return -1
     }
     if (mb_file_head_bind(fi) != 0) {
         return -1
     }
-    if (is_globals != 0) {
-        if (is_globals == 2) {
+    if (mode != MB_PASS2_FN_BODY) {
+        if (mode == MB_PASS2_CT_FNS) {
             if (parse.parse_source_ct_fns() != 0) { return -1 }
-        } else if (is_globals == 3) {
+        } else if (mode == MB_PASS2_LAYOUT_REGISTER) {
             if (parse.parse_source_ct_layout_register() != 0) { return -1 }
-        } else if (is_globals == 4) {
+        } else if (mode == MB_PASS2_LAYOUT_EVAL) {
             if (parse.parse_source_ct_layout_consts() != 0) { return -1 }
-        } else if (is_globals == 5) {
+        } else if (mode == MB_PASS2_TEST_BODY) {
             if (parse.parse_source_tests() != 0) { return -1 }
         } else if (parse.parse_source_globals() != 0) {
             return -1
@@ -517,9 +568,9 @@ fn mb_pass2_file(path *char, fi int, is_globals int) int {
         }
         // 未使用导入检查（U3）：本文件编译完后仍为零使用的导入报错
         let i int = 0
-        for i < support.fs().import_n {
-            if (support.fs().import_used[i] == 0) {
-                return errors.err_lc(support.fs().imports[i].line, support.fs().imports[i].col,
+        for i < proj.fs().import_n {
+            if (proj.fs().import_used[i] == 0) {
+                return errors.err_lc(proj.fs().imports[i].line, proj.fs().imports[i].col,
                     "导入未使用（同文件没有任何限定名引用）")
             }
             i += 1
@@ -546,14 +597,14 @@ fn mb_check_binding_clash(m int) int {
                 ii += 1
                 continue
             }
-            let idx int = support.sym_lookup_off(proj.import_at(ii).off, proj.import_at(ii).len)
-            if (idx >= 0 && (support.ms().syms[idx].flags & support.F_GLOBAL) != 0
-                && (support.ms().syms[idx].flags & support.F_EXTERN) == 0) {
+            let idx int = table.sym_lookup_off(proj.import_at(ii).off, proj.import_at(ii).len)
+            if (idx >= 0 && (table.ms().syms[idx].flags & table.F_GLOBAL) != 0
+                && (table.ms().syms[idx].flags & table.F_EXTERN) == 0) {
                 let buf [192]u8
                 let n int = 0
-                n = support.append_int_cap(buf, 192, n, support.ms().syms[idx].def_line)
+                n = support.append_int_cap(buf, 192, n, table.ms().syms[idx].def_line)
                 n = support.append_byte_cap(buf, 192, n, ':')
-                n = support.append_int_cap(buf, 192, n, support.ms().syms[idx].def_col)
+                n = support.append_int_cap(buf, 192, n, table.ms().syms[idx].def_col)
                 n = support.append_str_cap(buf, 192, n, ": 顶层声明与导入名冲突（导入名 ")
                 n = support.append_np_cap(buf, 192, n, proj.import_at(ii).off, proj.import_at(ii).len)
                 n = support.append_str_cap(buf, 192, n, "）")

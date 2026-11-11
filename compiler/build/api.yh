@@ -3,6 +3,7 @@ module build
 import cache
 import errors
 import support
+import table
 import proj
 import link
 import hash
@@ -32,6 +33,29 @@ struct BDep {
     mod int                 // 依赖模块下标
     mi int                  // 加载后的接口模块编号（-1 = 未加载）
 }
+
+// ModuleJob：单个模块编译任务的全部显式输入。
+// 父进程（fork 或进程内串行）或 --emit-module 子进程入口组装，worker 只读。
+// dep 与 bc().dep 共享同一底层缓冲：组装完成到 worker 结束之间不再改写依赖表，
+// 因此两个视图看到同一份记录（fork 后各自 COW）。
+struct ModuleJob {
+    mod int               // 模块下标（proj.mod_at）
+    mode int              // JOB_BUILD / JOB_CHECK / JOB_TEST
+    dep list.List         // 依赖接口记录（元素类型 BDep）
+    dep_base int          // 接口模块编号基线（加载 .s.ct 用）
+    sym_sfx_off int       // 本模块符号后缀池偏移（__proj__mod）
+    sym_sfx_len int
+    build_off int         // 构建目录池偏移（父进程已解析，worker 不再重算）
+    build_len int
+    out_dir *char         // 本模块汇编输出目录（<build>/asm/<tag>）
+    ir_cache_salt u64     // 编译器指纹（函数 IR 缓存环境键）
+}
+
+// ModuleJob.mode 的位标志：check 与 test 可并存，保持与两个会话开关原语义一致。
+// B0 在 worker 入口把它落回会话开关，B1 收编后改为 worker 直接读 job.mode。
+const JOB_BUILD int = 0
+const JOB_CHECK int = 1
+const JOB_TEST int = 2
 
 // BuildCtx：一次构建的进程级会话状态。
 pub struct BuildCtx {
@@ -84,6 +108,17 @@ fn bdep_count() int {
 // bdep_at：第 i 条依赖接口记录；调用方保证 0 <= i < bdep_count()。
 fn bdep_at(i int) *BDep {
     let base *BDep = list.first(&bc().dep).to_type(*BDep)
+    return &base[i]
+}
+
+// mb_job_dep_count：一个模块任务的依赖接口记录数。
+fn mb_job_dep_count(job *ModuleJob) int {
+    return job.dep.count.to_type(int)
+}
+
+// mb_job_dep_at：任务第 i 条依赖接口记录；调用方保证 0 <= i < mb_job_dep_count()。
+fn mb_job_dep_at(job *ModuleJob, i int) *BDep {
+    let base *BDep = list.first(&job.dep).to_type(*BDep)
     return &base[i]
 }
 
@@ -644,20 +679,20 @@ pub fn mb_cache_lookup_module(m int, build_off int, build_len int,
 pub fn llvm_check_single_file(source_path *char, require_main int,
     out *check.CheckedModule) int {
     if (out == 0) { return -1 }
-    if (support.front_checked_begin() != 0) { return 1 }
+    if (check.front_checked_begin() != 0) { return 1 }
     if (lex.lex_all() != 0) { return 1 }
     if (mb_llvm_file_begin(source_path) != 0) { return 1 }
     support.session().compile = 1
     if (builtin.front_prepare() != 0) { return 1 }
     if (mb_llvm_semantics(require_main) != 0) { return 1 }
-    if (support.front_checked_verify() != 0) { return 1 }
+    if (check.front_checked_verify() != 0) { return 1 }
     if (check.checked_module_capture(out) != 0) { return -1 }
     let checked_status int = llvm_emit_verify_checked_snapshot(out)
     if (checked_status != 0) {
         check.checked_module_release(out)
         return checked_status
     }
-    if (support.front_checked_end() != 0) {
+    if (check.front_checked_end() != 0) {
         check.checked_module_release(out)
         return 1
     }
@@ -1314,7 +1349,16 @@ pub fn mb_emit_module(mod_off int, mod_len int, prov_off int, prov_len int,
     if (extra != 0 && support.session().test_mode != 0) {
         proj.mod_at(m).is_entry = 1
     }
-    return mb_emit_indexed_module(m, main_off, main_len, out_dir, ir_cache_salt)
+    let build_len int = 0
+    let build_off int = proj.build_dir(main_off, main_len, &build_len)
+    if (build_off < 0) {
+        return -1
+    }
+    let job ModuleJob
+    if (mb_job_make(&job, m, build_off, build_len, out_dir, ir_cache_salt) != 0) {
+        return -1
+    }
+    return mb_emit_job(&job)
 }
 
 @[extern] fn getppid() int
@@ -1551,12 +1595,12 @@ pub fn pj_index_file(path *char, pj int) int {
     if (parse.mod_parse_head() != 0) {
         return -1
     }
-    if (support.fs().has_module == 0 && proj.ctx().scan_file_off >= 0
+    if (proj.fs().has_module == 0 && proj.ctx().scan_file_off >= 0
         && pj_scan_is_target(path) != 0) {
         // 单文件测试：文件可以省略 module 头，用文件名派生一个模块名。
         if (pj_synth_module_name(path) != 0) { return -1 }
     }
-    if (support.fs().has_module == 0) {
+    if (proj.fs().has_module == 0) {
         // 源码根内的文件必须声明模块（旧单文件形态不属于项目源码根）
         errors.diag().errors += 1
         let buf [256]u8
@@ -1592,10 +1636,10 @@ pub fn pj_index_file(path *char, pj int) int {
         return -1
     }
     // 查找/创建模块：同名不同目录是两个模块（不再静默合并）
-    let mod int = proj.module_at_dir(pj, support.fs().name_off, support.fs().name_len,
+    let mod int = proj.module_at_dir(pj, proj.fs().name_off, proj.fs().name_len,
         dir_off, dlen)
     if (mod < 0) {
-        mod = proj.add_module(support.fs().name_off, support.fs().name_len, pj, dir_off, dlen)
+        mod = proj.add_module(proj.fs().name_off, proj.fs().name_len, pj, dir_off, dlen)
         if (mod < 0) {
             return -1
         }
@@ -1652,12 +1696,12 @@ pub fn pj_index_file(path *char, pj int) int {
     }
     // 导入记录
     let ii int = 0
-    for ii < support.fs().import_n {
-        if (proj.add_import(fidx, support.fs().imports[ii].name_off, support.fs().imports[ii].name_len,
-            support.fs().imports[ii].proj_key_off, support.fs().imports[ii].proj_key_len,
-            support.fs().imports[ii].path_off, support.fs().imports[ii].path_len,
-            support.fs().imports[ii].alias_off, support.fs().imports[ii].alias_len,
-            support.fs().imports[ii].line, support.fs().imports[ii].col) != 0) {
+    for ii < proj.fs().import_n {
+        if (proj.add_import(fidx, proj.fs().imports[ii].name_off, proj.fs().imports[ii].name_len,
+            proj.fs().imports[ii].proj_key_off, proj.fs().imports[ii].proj_key_len,
+            proj.fs().imports[ii].path_off, proj.fs().imports[ii].path_len,
+            proj.fs().imports[ii].alias_off, proj.fs().imports[ii].alias_len,
+            proj.fs().imports[ii].line, proj.fs().imports[ii].col) != 0) {
             return -1
         }
         ii += 1
@@ -2004,7 +2048,7 @@ pub fn pro_find_root(quiet int, out_len *int) int {
 // files 是模块的文件号数组；sym_base 是本模块 pass1 起点的符号下标
 // （单文件编译传 0）。有未使用函数时逐条报错并返回 -1，否则返回 0。
 pub fn unused_function_report(files *int, file_n int, sym_base int) int {
-    let room int = support.ms().sym_n - sym_base
+    let room int = table.ms().sym_n - sym_base
     if (files == 0 || file_n <= 0 || room <= 0) { return 0 }
     let cands *UfCand = malloc((room * sizeof(UfCand)).to_type(u64)).to_type(*UfCand)
     let used *u8 = malloc(room.to_type(u64)).to_type(*u8)

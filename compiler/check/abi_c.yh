@@ -1,29 +1,77 @@
 module check
+import types
 import support
 
-// C ABI 的位置分类；种类常量与值/游标模型在 gen/abi_model.yh。
+import table
+// ============================================================================
+// abi_c.yh —— C ABI 位置分类（2026-11-10 结构自 support 迁入，ADR-0024）
+//
+// 本文件持有 ABI 分类的数据模型（ABIValue/ABICursor/ABIArg）与种类常量；
+// 只有 check 消费它们。check/api.yh 的 abi_c_cursor_init/abi_c_place 用这些
+// 类型；文件名字节序要求结构先于 api.yh 登记，所以定义放在本文件。
+// ============================================================================
+
+// ABIValue 描述已完成 C 布局的值。fp_count=1 表示浮点标量；聚合非零时
+// 表示 HFA，fp_size 为同构元素宽度。普通聚合的 fp_count 必须为零。
+pub struct ABIValue {
+    size int
+    align int
+    aggregate int
+    fp_size int
+    fp_count int
+}
+
+// ABICursor 保存一份签名分配到当前参数前的状态。Darwin 的栈参数使用
+// 自然大小与对齐，Linux 的每个槽至少八字节；最终调用区统一十六字节对齐。
+pub struct ABICursor {
+    gpr int
+    fpr int
+    stack int
+    darwin int
+}
+
+// ABIArg 是单个逻辑参数/返回值的位置计划。寄存器片连续；stack 是调用时
+// SP 起的字节偏移；indirect 表示按调用方副本地址传参或按 x8 返回。
+pub struct ABIArg {
+    kind int
+    reg int
+    count int
+    stack int
+    indirect int
+    size int
+    fp_size int
+}
+
+// C ABI 位置分类种类（ABIArg.kind）。
+pub const CABI_GPR int = 0
+
+pub const CABI_FPR int = 1
+
+pub const CABI_STACK int = 2
+
+pub const CABI_VOID int = 3
 
 // abi_c_hfa：递归识别 f32/f64 同构聚合，返回 base_size*8+元素数；零为非 HFA。
 // 联合体按最大成员元素数分类；结构体按元素数相加，数组按长度相乘。
 fn abi_c_hfa(tid int) int {
-    let t support.CType = support.ms().types[tid]
-    if (t.kind == support.TY_F32 || t.kind == support.TY_F64) { return t.size * 8 + 1 }
-    if (t.kind == support.TY_ARRAY) {
+    let t types.CType = table.ms().types[tid]
+    if (t.kind == types.TY_F32 || t.kind == types.TY_F64) { return t.size * 8 + 1 }
+    if (t.kind == types.TY_ARRAY) {
         let elem int = abi_c_hfa(t.elem)
         let count int = (elem % 8) * t.len
         if (elem == 0 || count < 1 || count > 4) { return 0 }
         return elem / 8 * 8 + count
     }
-    if (t.kind != support.TY_STRUCT && t.kind != support.TY_UNION) { return 0 }
+    if (t.kind != types.TY_STRUCT && t.kind != types.TY_UNION) { return 0 }
     let base int = 0
     let count int = 0
     let i int = 0
     for i < t.len {
-        let part int = abi_c_hfa(support.ms().fields[t.sub + i].type_id)
+        let part int = abi_c_hfa(table.ms().fields[t.sub + i].type_id)
         if (part == 0) { return 0 }
         if (base == 0) { base = part / 8 }
         if (base != part / 8) { return 0 }
-        if (t.kind == support.TY_UNION) {
+        if (t.kind == types.TY_UNION) {
             if (part % 8 > count) { count = part % 8 }
         } else {
             count += part % 8
@@ -36,11 +84,11 @@ fn abi_c_hfa(tid int) int {
 }
 
 // abi_c_describe：把前端类型布局转换为共享分类器输入，不进行任何发射。
-fn abi_c_describe(tid int, out *support.ABIValue) void {
-    let t support.CType = support.ms().types[tid]
+fn abi_c_describe(tid int, out *ABIValue) void {
+    let t types.CType = table.ms().types[tid]
     out.size = t.size
     out.align = t.align
-    out.aggregate = (t.kind == support.TY_STRUCT || t.kind == support.TY_UNION).to_type(int)
+    out.aggregate = (t.kind == types.TY_STRUCT || t.kind == types.TY_UNION).to_type(int)
     out.fp_size = 0
     out.fp_count = 0
     let hfa int = abi_c_hfa(tid)
@@ -51,10 +99,10 @@ fn abi_c_describe(tid int, out *support.ABIValue) void {
 }
 
 // abi_c_result：返回位置等同于首个参数的位置，普通大聚合的地址改用 x8。
-fn abi_c_result(tid int, out *support.ABIArg) void {
-    let value support.ABIValue
+fn abi_c_result(tid int, out *ABIArg) void {
+    let value ABIValue
     abi_c_describe(tid, &value)
-    let cursor support.ABICursor
+    let cursor ABICursor
     abi_c_cursor_init(&cursor, support.tg_darwin())
     abi_c_place(&value, &cursor, out)
     if (out.indirect != 0) { out.reg = 8 }

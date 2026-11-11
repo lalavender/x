@@ -1,7 +1,10 @@
 module parse
 import check
 import errors
+import types
 import support
+import table
+import proj
 import token
 
 import ast
@@ -35,9 +38,9 @@ fn interp_intern(name *char, n int) int {
 // interp_mark_import：把 fmt 导入标记为已使用，避免未使用导入告警。
 fn interp_mark_import(mi int) void {
     let i int = 0
-    for i < support.fs().import_n {
-        if (support.fs().import_mod[i] == mi) {
-            support.fs().import_used[i] = 1
+    for i < proj.fs().import_n {
+        if (proj.fs().import_mod[i] == mi) {
+            proj.fs().import_used[i] = 1
             return
         }
         i += 1
@@ -48,12 +51,12 @@ fn interp_mark_import(mi int) void {
 // use_second=0 时只传 arg0。成功返回 0，结果写入 res。
 fn interp_call(mi int, name_off int, name_len int, arg0 support.Res,
     arg1 support.Res, use_second int, first int, after int, res *support.Res) int {
-    let e int = support.mod_ns_lookup_pool(mi, name_off, name_len, 0)
+    let e int = proj.mod_ns_lookup_pool(mi, name_off, name_len, 0)
     if (e < 0) {
         return token.err_tok("fmt 模块缺少插值所需的导出函数")
     }
     let callee support.Res
-    if (check.sem_ident_val(support.fs().mods[mi].ns[e].sym, &callee) != 0) {
+    if (check.sem_ident_val(proj.fs().mods[mi].ns[e].sym, &callee) != 0) {
         return -1
     }
     if (check.sem_call_begin(&callee) < 0) {
@@ -120,16 +123,16 @@ fn interp_view_ctor(mi int, expr support.Res, first int, after int,
     res *support.Res) int {
     let off int = interp_intern("of_str", 6)
     if (off < 0) { return -1 }
-    let e int = support.mod_ns_lookup_pool(mi, off, 6, 0)
+    let e int = proj.mod_ns_lookup_pool(mi, off, 6, 0)
     if (e < 0) { return 1 }
-    let sym int = support.fs().mods[mi].ns[e].sym
-    let fn_tid int = support.ms().syms[sym].type_id
-    if (fn_tid < 0 || support.ms().types[fn_tid].kind != support.TY_FN) {
+    let sym int = proj.fs().mods[mi].ns[e].sym
+    let fn_tid int = table.ms().syms[sym].type_id
+    if (fn_tid < 0 || table.ms().types[fn_tid].kind != types.TY_FN) {
         return 1
     }
-    let sig int = support.ms().types[fn_tid].sub
-    if (support.ms().sig_np[sig] != 1) { return 1 }
-    let want int = support.ms().sig_params[support.ms().sig_first[sig]]
+    let sig int = table.ms().types[fn_tid].sub
+    if (table.ms().sig_np[sig] != 1) { return 1 }
+    let want int = table.ms().sig_params[table.ms().sig_first[sig]]
     if (want != expr.type_id) { return 1 }
     let unused support.Res
     return interp_call(mi, off, 6, expr, unused, 0, first, after, res)
@@ -138,37 +141,37 @@ fn interp_view_ctor(mi int, expr support.Res, first int, after int,
 // interp_value_ctor：按表达式静态类型选择 fmt.of_* 并返回构造出的 Value。
 fn interp_value_ctor(mi int, expr support.Res, first int, after int,
     res *support.Res) int {
-    let kind int = support.ms().types[expr.type_id].kind
-    if (kind == support.TY_STRUCT) {
+    let kind int = table.ms().types[expr.type_id].kind
+    if (kind == types.TY_STRUCT) {
         let view int = interp_view_ctor(mi, expr, first, after, res)
         if (view <= 0) { return view }
     }
     let ctor_off int = -1
     let ctor_len int = 0
     let cast_tid int = -1
-    if (kind == support.TY_BOOL) {
+    if (kind == types.TY_BOOL) {
         ctor_off = interp_intern("of_bool", 7)
         ctor_len = 7
-    } else if (kind == support.TY_F64) {
+    } else if (kind == types.TY_F64) {
         ctor_off = interp_intern("of_f64", 6)
         ctor_len = 6
-    } else if (kind == support.TY_F32) {
+    } else if (kind == types.TY_F32) {
         ctor_off = interp_intern("of_f64", 6)
         ctor_len = 6
-        cast_tid = support.TY_F64
-    } else if (kind == support.TY_I8 || kind == support.TY_I16
-        || kind == support.TY_I32 || kind == support.TY_I64
-        || kind == support.TY_ENUM || kind == support.TY_CHAR) {
+        cast_tid = types.TY_F64
+    } else if (kind == types.TY_I8 || kind == types.TY_I16
+        || kind == types.TY_I32 || kind == types.TY_I64
+        || kind == types.TY_ENUM || kind == types.TY_CHAR) {
         ctor_off = interp_intern("of_i64", 6)
         ctor_len = 6
-        cast_tid = support.TY_I64
-    } else if (kind == support.TY_U8 || kind == support.TY_U16
-        || kind == support.TY_U32 || kind == support.TY_U64) {
+        cast_tid = types.TY_I64
+    } else if (kind == types.TY_U8 || kind == types.TY_U16
+        || kind == types.TY_U32 || kind == types.TY_U64) {
         ctor_off = interp_intern("of_u64", 6)
         ctor_len = 6
-        cast_tid = support.TY_U64
-    } else if (kind == support.TY_PTR
-        && support.ms().types[support.ms().types[expr.type_id].elem].kind == support.TY_CHAR) {
+        cast_tid = types.TY_U64
+    } else if (kind == types.TY_PTR
+        && table.ms().types[table.ms().types[expr.type_id].elem].kind == types.TY_CHAR) {
         ctor_off = interp_intern("of_cstr", 7)
         ctor_len = 7
     } else {
@@ -191,7 +194,7 @@ fn interp_value_ctor(mi int, expr support.Res, first int, after int,
 // interp_spec_valid：编译期校验 V 格式说明符的语法与类型兼容性。
 // 返回 1 合法、0 非法；非法时由调用方按 SPEC token 位置报错。
 fn interp_spec_valid(type_id int, start int, length int) int {
-    let kind int = support.ms().types[type_id].kind
+    let kind int = table.ms().types[type_id].kind
     let i int = 0
     let minus int = 0
     let zero int = 0
@@ -235,19 +238,19 @@ fn interp_spec_valid(type_id int, start int, length int) int {
         i += 1
     }
     if (i != length) { return 0 }
-    if (kind == support.TY_BOOL) {
+    if (kind == types.TY_BOOL) {
         if (type_byte != 0 || has_precision != 0 || zero != 0 || plus != 0) {
             return 0
         }
         return 1
     }
-    if (kind == support.TY_PTR
-        && support.ms().types[support.ms().types[type_id].elem].kind == support.TY_CHAR) {
+    if (kind == types.TY_PTR
+        && table.ms().types[table.ms().types[type_id].elem].kind == types.TY_CHAR) {
         if (type_byte != 0 && type_byte != 's') { return 0 }
         if (has_precision != 0 || zero != 0 || plus != 0) { return 0 }
         return 1
     }
-    if (kind == support.TY_F64 || kind == support.TY_F32) {
+    if (kind == types.TY_F64 || kind == types.TY_F32) {
         if (type_byte == 0 || type_byte == 'f' || type_byte == 'F'
             || type_byte == 'e' || type_byte == 'E' || type_byte == 'g'
             || type_byte == 'G') {
@@ -255,10 +258,10 @@ fn interp_spec_valid(type_id int, start int, length int) int {
         }
         return 0
     }
-    if (kind == support.TY_I8 || kind == support.TY_I16 || kind == support.TY_I32
-        || kind == support.TY_I64 || kind == support.TY_ENUM || kind == support.TY_CHAR
-        || kind == support.TY_U8 || kind == support.TY_U16 || kind == support.TY_U32
-        || kind == support.TY_U64) {
+    if (kind == types.TY_I8 || kind == types.TY_I16 || kind == types.TY_I32
+        || kind == types.TY_I64 || kind == types.TY_ENUM || kind == types.TY_CHAR
+        || kind == types.TY_U8 || kind == types.TY_U16 || kind == types.TY_U32
+        || kind == types.TY_U64) {
         if (type_byte == 0 || type_byte == 'd' || type_byte == 'x'
             || type_byte == 'X' || type_byte == 'o' || type_byte == 'b') {
             return 1
@@ -351,7 +354,7 @@ fn parse_interp(res *support.Res) int {
         support.res_reset(res, 0)
         return 0
     }
-    let mi int = support.mod_import_find("fmt", 3)
+    let mi int = proj.mod_import_find("fmt", 3)
     if (mi < 0) {
         return token.err_tok("字符串插值需要 import fmt")
     }

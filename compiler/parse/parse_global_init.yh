@@ -2,7 +2,9 @@ module parse
 import token
 import check
 import errors
+import types
 import support
+import table
 import comptime
 import ast
 
@@ -19,7 +21,7 @@ fn parse_global_bind_iface_label(idx int) void {
     if (support.session().iface_load != 0) {
         let lbl int = support.data_label()
         support.data_label_advance()
-        support.ms().syms[idx].cval = lbl.to_type(i64)
+        table.ms().syms[idx].cval = lbl.to_type(i64)
     }
 }
 
@@ -52,7 +54,7 @@ fn parse_binding(global int, kind int) int {
         return 0
     }
     // 编译模式
-    if (support.ty_has_opaque_value(tid) != 0) {
+    if (table.ty_has_opaque_value(tid) != 0) {
         return token.err_tok("不透明 C 类型只能通过指针声明")
     }
     let idx int = -1
@@ -60,16 +62,16 @@ fn parse_binding(global int, kind int) int {
         // 顶层登记：标量/聚合（结构体/数组/切片）一律登记名字与类型；
         // 零初始化聚合在 pass 2 走 .bss，带初始化器的聚合走
         // parse_global_init 的数据发射。
-        let fl int = support.F_GLOBAL
+        let fl int = table.F_GLOBAL
         if (support.fc().c_decl_pub != 0) {
-            fl |= support.F_PUB
+            fl |= table.F_PUB
         }
         idx = check.sym_push(start, n, kind, tid, fl)
         if (idx < 0) {
             return -1
         }
     } else if (global != 0) {
-        idx = support.sym_lookup(start, n)
+        idx = table.sym_lookup(start, n)
         if (idx < 0) {
             return token.err_tok("内部错误：全局符号丢失")
         }
@@ -78,8 +80,8 @@ fn parse_binding(global int, kind int) int {
         if (check.sem_check_duplicate(start, n) != 0) {
             return -1
         }
-        if (kind == support.SYM_CONST) {
-            idx = check.sym_push(start, n, support.SYM_CONST, tid, 0)
+        if (kind == table.SYM_CONST) {
+            idx = check.sym_push(start, n, table.SYM_CONST, tid, 0)
         } else {
             idx = check.sem_declare_local(start, n, tid)
         }
@@ -94,8 +96,8 @@ fn parse_binding(global int, kind int) int {
     if (p_cur() == token.TK_ASSIGN) {
         p_adv()
         if (support.session().pass == 1) {
-            if (global != 0 && kind == support.SYM_CONST
-                && support.ty_is_integer(tid) != 0) {
+            if (global != 0 && kind == table.SYM_CONST
+                && table.ty_is_integer(tid) != 0) {
                 let probe int = parse_global_ct_const_probe(idx, tid)
                 if (probe < 0) { return -1 }
                 if (probe > 0) { return 0 }
@@ -114,10 +116,10 @@ fn parse_binding(global int, kind int) int {
         return parse_local_init(idx, tid, kind)
     }
     // 无初值
-    if (support.session().compile != 0 && kind == support.SYM_CONST) {
+    if (support.session().compile != 0 && kind == table.SYM_CONST) {
         return token.err_tok("const 必须带初值")
     }
-    if (support.session().compile != 0 && support.session().pass == 2 && global != 0 && kind == support.SYM_VAR) {
+    if (support.session().compile != 0 && support.session().pass == 2 && global != 0 && kind == table.SYM_VAR) {
         // 零初始化全局 → .bss
         return sem_global_zero(idx, tid)
     }
@@ -136,9 +138,9 @@ fn record_aggregate_const_src(idx int, first int, after int, kind int) int {
     if (span <= 0) { return 0 }
     let off int = support.tml_intern_str(support.src_ctx().data, start, span)
     if (off < 0) { return -1 }
-    support.ms().syms[idx].const_expr_off = off
-    support.ms().syms[idx].const_expr_len = span
-    support.ms().syms[idx].const_expr_kind = kind
+    table.ms().syms[idx].const_expr_off = off
+    table.ms().syms[idx].const_expr_len = span
+    table.ms().syms[idx].const_expr_kind = kind
     return 0
 }
 
@@ -168,8 +170,8 @@ fn parse_global_string_ast(str_type int, first int, after int, lbl int) int {
 fn parse_global_init(idx int, tid int, kind int) int {
     // 初始化式的起始 token：聚合常量要按这个位置记下源文本（见 record_aggregate_const_src）。
     let init_pos int = token.ctx().pos
-    let fk int = support.ms().types[tid].kind
-    if (fk == support.TY_STRUCT) {
+    let fk int = table.ms().types[tid].kind
+    if (fk == types.TY_STRUCT) {
         // const 聚合常量：与全局变量走同一条初始化路径（发射到数据段，运行期只读）。
         // 字面量与 $ 调用形态的 pub/私有常量都放行：pub 的 $ 调用形态经
         // .s.i 重放调用文本并登记闭包可达种子（见 parse_global_comptime_aggregate_ex）。
@@ -179,9 +181,9 @@ fn parse_global_init(idx int, tid int, kind int) int {
         // 编译期模型：字面量的元素值在前端已知，建成 CtAggregate 供编译期读字段与
         // 下标（聚合常量的 cval 只是数据段标签，见 comptime/ct_global_agg.yh）。
         let ct_obj i64 = 0
-        if (kind == support.SYM_CONST
+        if (kind == table.SYM_CONST
             && comptime.ct_global_agg_modelable(tid, 0) != 0) {
-            ct_obj = comptime.ct_global_agg_new(tid, support.ms().types[tid].len)
+            ct_obj = comptime.ct_global_agg_new(tid, table.ms().types[tid].len)
             if (ct_obj == 0) { return -1 }
         }
         let struct_ast int = -1
@@ -191,11 +193,11 @@ fn parse_global_init(idx int, tid int, kind int) int {
                 struct_ast) != 0) { return -1 }
         // 聚合常量没有标量值，但数据已发射到数据段：标记为已就绪，避免读取时
         // 被「编译期常量尚未就绪」拦下（运行期按全局符号地址访问字段）。
-        if (kind == support.SYM_CONST) {
+        if (kind == table.SYM_CONST) {
             if (record_aggregate_const_src(idx, init_pos, token.ctx().pos, 4) != 0) {
                 return -1
             }
-            support.ms().syms[idx].const_ready = 1
+            table.ms().syms[idx].const_ready = 1
             if (ct_obj != 0
                 && comptime.ct_global_agg_register(idx, ct_obj) != 0) {
                 return -1
@@ -203,10 +205,10 @@ fn parse_global_init(idx int, tid int, kind int) int {
         }
         return 0
     }
-    if (fk == support.TY_UNION) {
+    if (fk == types.TY_UNION) {
         return token.err_tok("union 全局初始化暂不支持")
     }
-    if (fk == support.TY_ARRAY || fk == support.TY_SLICE) {
+    if (fk == types.TY_ARRAY || fk == types.TY_SLICE) {
         // const 数组/切片常量：与结构体同理走变量同一条发射路径；pub 的
         // $ 调用形态经 .s.i 重放调用文本跨模块导出（见 aggregate_ex）。
         if (p_cur() == token.TK_DOLLAR) {
@@ -219,10 +221,10 @@ fn parse_global_init(idx int, tid int, kind int) int {
         // 字面量才知道，模型对象在 parse_global_array_init 内部按 count 创建
         // （CtValue 以聚合对象的 count/values 承载切片视图，无需「地址+长度」）。
         let ct_obj i64 = 0
-        if (kind == support.SYM_CONST && fk == support.TY_ARRAY
+        if (kind == table.SYM_CONST && fk == types.TY_ARRAY
             && comptime.ct_global_agg_modelable(tid, 0) != 0) {
-            ct_obj = comptime.ct_global_agg_new(support.ms().types[tid].elem,
-                support.ms().types[tid].len)
+            ct_obj = comptime.ct_global_agg_new(table.ms().types[tid].elem,
+                table.ms().types[tid].len)
             if (ct_obj == 0) { return -1 }
         }
         let array_ast int = -1
@@ -231,11 +233,11 @@ fn parse_global_init(idx int, tid int, kind int) int {
             && ast.ast_decl_attach_init(support.session().active_file, ast.store().file_decl_i,
                 array_ast) != 0) { return -1 }
         // 聚合常量：数据已发射，标记已就绪供运行期按符号地址读取。
-        if (kind == support.SYM_CONST) {
+        if (kind == table.SYM_CONST) {
             if (record_aggregate_const_src(idx, init_pos, token.ctx().pos, 4) != 0) {
                 return -1
             }
-            support.ms().syms[idx].const_ready = 1
+            table.ms().syms[idx].const_ready = 1
             if (ct_obj != 0
                 && comptime.ct_global_agg_register(idx, ct_obj) != 0) {
                 return -1
@@ -262,54 +264,54 @@ fn parse_global_init(idx int, tid int, kind int) int {
     if (check.sem_can_assign(tid, r.type_id, r.is_lit, r.ival, r.lit_big) != 0) {
         return -1
     }
-    if (kind == support.SYM_CONST) {
-        support.ms().syms[idx].cval = r.ival
+    if (kind == table.SYM_CONST) {
+        table.ms().syms[idx].cval = r.ival
         // 跨模块 CT 闭包需要重放浮点字面值；保存字节以避免十进制/IEEE 位转换丢精度。
-        if (support.ty_is_float(tid) != 0 && init_token_after == init_token_first + 1
+        if (table.ty_is_float(tid) != 0 && init_token_after == init_token_first + 1
             && token.ctx().tokens[init_token_first].kind == token.TOK_NUMBER
-            && check.sem_num_is_float(token.ctx().tokens[init_token_first].start,
+            && support.num_is_float(token.ctx().tokens[init_token_first].start,
                 token.ctx().tokens[init_token_first].len) != 0) {
             let expr_start int = token.ctx().tokens[init_token_first].start
             let expr_len int = token.ctx().tokens[init_token_first].len
             let expr_off int = support.tml_intern_str(support.src_ctx().data, expr_start,
                 expr_len)
             if (expr_off < 0) { return -1 }
-            support.ms().syms[idx].const_expr_off = expr_off
-            support.ms().syms[idx].const_expr_len = expr_len
-            support.ms().syms[idx].const_expr_kind = 1
+            table.ms().syms[idx].const_expr_off = expr_off
+            table.ms().syms[idx].const_expr_len = expr_len
+            table.ms().syms[idx].const_expr_kind = 1
         }
         // 只保存单个字符串 token；跨模块闭包重放原字节，不传递提供方数据标签。
-        if (fk == support.TY_PTR && init_token_after == init_token_first + 1
+        if (fk == types.TY_PTR && init_token_after == init_token_first + 1
             && token.ctx().tokens[init_token_first].kind == token.TOK_STRING) {
             let expr_start int = token.ctx().tokens[init_token_first].start
             let expr_len int = token.ctx().tokens[init_token_first].len
             let expr_off int = support.tml_intern_str(support.src_ctx().data, expr_start,
                 expr_len)
             if (expr_off < 0) { return -1 }
-            support.ms().syms[idx].const_expr_off = expr_off
-            support.ms().syms[idx].const_expr_len = expr_len
-            support.ms().syms[idx].const_expr_kind = 2
+            table.ms().syms[idx].const_expr_off = expr_off
+            table.ms().syms[idx].const_expr_len = expr_len
+            table.ms().syms[idx].const_expr_kind = 2
         }
         // 指针常量的初始化式是单个标识符（引用另一个指针常量）：记下该名字，
         // 供接口导出时追链到最终字面式（消费者看不到提供方的私有常量名）。
-        if (fk == support.TY_PTR && init_token_after == init_token_first + 1
+        if (fk == types.TY_PTR && init_token_after == init_token_first + 1
             && token.ctx().tokens[init_token_first].kind == token.TOK_IDENT) {
             let rid_start int = token.ctx().tokens[init_token_first].start
             let rid_len int = token.ctx().tokens[init_token_first].len
             let rid_off int = support.tml_intern_str(support.src_ctx().data, rid_start, rid_len)
             if (rid_off < 0) { return -1 }
-            support.ms().syms[idx].const_expr_off = rid_off
-            support.ms().syms[idx].const_expr_len = rid_len
-            support.ms().syms[idx].const_expr_kind = 3
+            table.ms().syms[idx].const_expr_off = rid_off
+            table.ms().syms[idx].const_expr_len = rid_len
+            table.ms().syms[idx].const_expr_kind = 3
         }
-        if (fk == support.TY_PTR) {
-            support.ms().syms[idx].flags |= support.F_ADDR
+        if (fk == types.TY_PTR) {
+            table.ms().syms[idx].flags |= table.F_ADDR
         }
-        support.ms().syms[idx].const_ready = 1
+        table.ms().syms[idx].const_ready = 1
         return 0
     }
     // 全局变量：指针的 0 是 NULL（.xword 0）；标签号 ≥ 1 才是字符串地址
-    if (fk == support.TY_PTR) {
+    if (fk == types.TY_PTR) {
         if (r.ival == 0) {
             return sem_global_zero(idx, tid)
         }
@@ -347,8 +349,8 @@ fn parse_global_init(idx int, tid int, kind int) int {
 // 登记延迟执行项，由 module_worker 在接口闭包加载完成后统一执行。
 fn parse_global_comptime_aggregate_ex(idx int, tid int, kind int,
     init_pos int) int {
-    let pub_ex int = (kind == support.SYM_CONST && support.module_mode() != 0
-        && (support.ms().syms[idx].flags & support.F_PUB) != 0).to_type(int)
+    let pub_ex int = (kind == table.SYM_CONST && support.module_mode() != 0
+        && (table.ms().syms[idx].flags & table.F_PUB) != 0).to_type(int)
     if (support.session().iface_load != 0) {
         // 接口加载阶段：pub 形态（.s.i）的调用目标隐藏符号尚未登记，
         // 私有隐藏形态（.s.ct 闭包常量）的目标正文尚未捕获——两者都推迟到
@@ -371,16 +373,16 @@ fn parse_global_comptime_aggregate_ex(idx int, tid int, kind int,
         }
         let fname_start int = token.ctx().tokens[init_pos + 1].start
         let fname_len int = token.ctx().tokens[init_pos + 1].len
-        let fnsym int = support.sym_lookup(fname_start, fname_len)
-        if (fnsym < 0 || (support.ms().syms[fnsym].flags & support.F_COMPTIME) == 0
+        let fnsym int = table.sym_lookup(fname_start, fname_len)
+        if (fnsym < 0 || (table.ms().syms[fnsym].flags & table.F_COMPTIME) == 0
             || comptime.ct_pub_agg_fn_add(fnsym) != 0) { return -1 }
     }
     let status int = parse_global_comptime_aggregate(idx, tid)
     if (status != 0) { return -1 }
-    if (kind == support.SYM_CONST) {
+    if (kind == table.SYM_CONST) {
         // 与字面量初始化路径一致：聚合常量数据已发射、模型已登记，
         // 标记就绪供正文闭包引用（iface_ct_emit_const 要求 const_ready）。
-        support.ms().syms[idx].const_ready = 1
+        table.ms().syms[idx].const_ready = 1
     }
     if (pub_ex != 0
         && record_aggregate_const_src(idx, init_pos, token.ctx().pos, 5) != 0) {
@@ -444,8 +446,8 @@ fn parse_global_comptime_aggregate(idx int, tid int) int {
     if (comptime.ct_ir_data_emit_global(idx, tid, &value) != 0) { return -1 }
     // 顶层 CT 结果本身就是受支持的 CtAggregate 对象：登记成编译期模型，
     // 同一编译单元内再引用该常量时可直接读元素/字段，不必重跑 CT 调用。
-    let ck int = support.ms().types[tid].kind
-    if (ck == support.TY_ARRAY || ck == support.TY_STRUCT) {
+    let ck int = table.ms().types[tid].kind
+    if (ck == types.TY_ARRAY || ck == types.TY_STRUCT) {
         if (comptime.ct_global_agg_register(idx, result.ival) != 0) {
             return -1
         }
@@ -460,9 +462,9 @@ fn parse_global_ct_const_probe(idx int, tid int) int {
     // 留给全部声明登记后的 typed 布局常量依赖调度。
     if (parse_global_ct_const_has_unready_name() != 0) { return 0 }
     let tok_pos int = token.ctx().pos + 1
-    let sym int = support.sym_lookup(token.ctx().tokens[tok_pos].start, token.ctx().tokens[tok_pos].len)
-    if (sym < 0 || support.ms().syms[sym].kind != support.SYM_FN
-        || (support.ms().syms[sym].flags & support.F_COMPTIME) == 0
+    let sym int = table.sym_lookup(token.ctx().tokens[tok_pos].start, token.ctx().tokens[tok_pos].len)
+    if (sym < 0 || table.ms().syms[sym].kind != table.SYM_FN
+        || (table.ms().syms[sym].flags & table.F_COMPTIME) == 0
         // 只在目标编译期函数已捕获 typed IR 时才提前折叠：pass1 期间一律让位给
         // pass2a 之后的 typed 布局常量依赖调度，避免使用第二套 token 解释器。
         || comptime.ct_is_prepared(sym) == 0) { return 0 }
@@ -476,8 +478,8 @@ fn parse_global_ct_const_probe(idx int, tid int) int {
     }
     if (check.sem_can_assign(tid, value.type_id, value.is_lit,
             value.ival, value.lit_big) != 0) { return -1 }
-    support.ms().syms[idx].cval = value.ival
-    support.ms().syms[idx].const_ready = 1
+    table.ms().syms[idx].cval = value.ival
+    table.ms().syms[idx].const_ready = 1
     return 1
 }
 
@@ -497,10 +499,10 @@ fn parse_global_ct_const_has_unready_name() int {
         if (kind == token.TOK_IDENT
             && (i == 0 || (token.ctx().tokens[i - 1].kind != token.TK_DOT
                 && token.ctx().tokens[i - 1].kind != token.TK_DOLLAR))) {
-            let sym int = support.sym_lookup(token.ctx().tokens[i].start, token.ctx().tokens[i].len)
+            let sym int = table.sym_lookup(token.ctx().tokens[i].start, token.ctx().tokens[i].len)
             if (sym < 0) { return 1 }
-            if (support.ms().syms[sym].kind == support.SYM_CONST
-                && support.ms().syms[sym].const_ready == 0) { return 1 }
+            if (table.ms().syms[sym].kind == table.SYM_CONST
+                && table.ms().syms[sym].const_ready == 0) { return 1 }
         }
         i += 1
     }
@@ -514,7 +516,7 @@ fn sem_global_zero(idx int, tid int) int {
     if (support.fc().c_bss_n >= 4096) {
         return token.err_tok("零初始化全局过多")
     }
-    support.ms().syms[idx].offset = support.fc().c_bss_n
+    table.ms().syms[idx].offset = support.fc().c_bss_n
     support.fc().c_bss_syms[support.fc().c_bss_n] = idx
     support.fc().c_bss_n += 1
     if (parse_global_static_root(idx, tid) == -1) { return -1 }
@@ -524,8 +526,8 @@ fn sem_global_zero(idx int, tid int) int {
 // parse_global_array_init：全局数组/切片字面量初始化（发射旧数据 + 可选 AST 捕获）。
 // ast_out 在捕获开启时写出 AST_EXPR_ARRAY 根（元素链与局部字面量同构），否则写 -1。
 fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) int {
-    let elem int = support.ms().types[tid].elem
-    let esz int = support.ms().types[elem].size
+    let elem int = table.ms().types[tid].elem
+    let esz int = table.ms().types[elem].size
     let first int = token.ctx().pos
     ast_out[0] = -1
     p_adv() // 消费 '['
@@ -583,8 +585,8 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
             }
             if (support.session().ast_capture != 0
                 && ast.ast_expr_args_append(&list, e.ast_id) != 0) { return -1 }
-            if (support.ty_is_float(elem) != 0) {
-                if (support.ty_is_float(e.type_id) == 0) {
+            if (table.ty_is_float(elem) != 0) {
+                if (table.ty_is_float(e.type_id) == 0) {
                     return token.err_tok("浮点元素需要浮点字面量")
                 }
                 vals[count] = e.fval_bits
@@ -592,7 +594,7 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
                 vals[count] = e.ival
             }
             labels[count] = 0
-            if (support.ms().types[elem].kind == support.TY_PTR && vals[count] != 0) {
+            if (table.ms().types[elem].kind == types.TY_PTR && vals[count] != 0) {
                 labels[count] = parse_global_static_string_target(elem_first,
                     token.ctx().pos, vals[count])
                 if (labels[count] <= 0) {
@@ -611,7 +613,7 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
     if (p_expect(token.TK_RBRACKET, "期望 ']'") != 0) {
         return -1
     }
-    if (fk == support.TY_ARRAY && count != support.ms().types[tid].len) {
+    if (fk == types.TY_ARRAY && count != table.ms().types[tid].len) {
         return token.err_tok("数组字面量元素个数与数组长度不一致")
     }
     if (support.session().ast_capture != 0) {
@@ -622,8 +624,8 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
     }
     // 切片常量没有类型内建长度：解析完字面量才知元素个数，模型在这里创建
     // （数组的模型已在 parse_global_init 按类型长度创建）。
-    if (fk == support.TY_SLICE && ct_obj[0] == 0
-        && support.ms().syms[idx].kind == support.SYM_CONST
+    if (fk == types.TY_SLICE && ct_obj[0] == 0
+        && table.ms().syms[idx].kind == table.SYM_CONST
         && comptime.ct_global_agg_modelable(elem, 0) != 0) {
         ct_obj[0] = comptime.ct_global_agg_new(elem, count)
         if (ct_obj[0] == 0) { return -1 }
@@ -643,7 +645,7 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
     }
     // 发射变量数据
     let lbl int = 0
-    if (fk == support.TY_SLICE) {
+    if (fk == types.TY_SLICE) {
         lbl = support.data_label()
         support.data_label_advance()
     }
@@ -651,7 +653,7 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
     let static_row int = parse_global_static_root(idx, tid)
     if (static_row == -1) { return -1 }
     let backing_row int = -2
-    if (fk == support.TY_SLICE) {
+    if (fk == types.TY_SLICE) {
         backing_row = parse_global_static_backing(lbl, elem, count)
         if (backing_row == -1) { return -1 }
         if (parse_global_static_scalar(static_row, 0, 10, count.to_type(i64)) != 0
@@ -660,16 +662,16 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
     let i int = 0
     for i < count {
         if (kinds[i] == 1) {
-            if (support.ms().types[elem].kind != support.TY_PTR || esz != 8
-                || parse_global_static_pointer(fk == support.TY_SLICE ? backing_row : static_row,
+            if (table.ms().types[elem].kind != types.TY_PTR || esz != 8
+                || parse_global_static_pointer(fk == types.TY_SLICE ? backing_row : static_row,
                     i * esz, labels[i], 0) != 0) { return -1 }
 
-        } else if (support.ty_is_float(elem) != 0) {
-            if (parse_global_static_scalar(fk == support.TY_SLICE ? backing_row : static_row,
+        } else if (table.ty_is_float(elem) != 0) {
+            if (parse_global_static_scalar(fk == types.TY_SLICE ? backing_row : static_row,
                     i * esz, elem, vals[i]) != 0) { return -1 }
 
         } else {
-            if (parse_global_static_scalar(fk == support.TY_SLICE ? backing_row : static_row,
+            if (parse_global_static_scalar(fk == types.TY_SLICE ? backing_row : static_row,
                     i * esz, elem, vals[i]) != 0) { return -1 }
 
         }
@@ -694,7 +696,7 @@ fn parse_global_struct_init(idx int, tid int, ct_obj i64, ast_out *int) int {
     }
     let nstart int = token.ctx().tokens[token.ctx().pos].start
     let nlen int = token.ctx().tokens[token.ctx().pos].len
-    if (support.ty_lookup_name(nstart, nlen) != tid) {
+    if (table.ty_lookup_name(nstart, nlen) != tid) {
         return token.err_tok("初始化器类型与变量类型不一致")
     }
     let first int = token.ctx().pos
@@ -753,15 +755,15 @@ fn parse_global_struct_body(tid int, base int, cur *int, ct_obj i64,
                 return -1
             }
         } else {
-            if (fpos >= support.ms().types[tid].len) {
+            if (fpos >= table.ms().types[tid].len) {
                 return token.err_tok("位置式字面量字段过多")
             }
-            fidx = support.ms().types[tid].sub + fpos
+            fidx = table.ms().types[tid].sub + fpos
             fpos += 1
         }
         let value_ast int = -1
         if (parse_global_field_value(fidx, base, cur, ct_obj,
-                fidx - support.ms().types[tid].sub, &value_ast, static_row) != 0) {
+                fidx - table.ms().types[tid].sub, &value_ast, static_row) != 0) {
             return -1
         }
         if (support.session().ast_capture != 0) {
@@ -793,20 +795,20 @@ fn parse_global_struct_body(tid int, base int, cur *int, ct_obj i64,
 // ast_out 在捕获开启时写出该字段值的表达式根（嵌套结构体为 STRUCT_INIT），否则为 -1。
 fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
     ct_index int, ast_out *int, static_row int) int {
-    let ftid int = support.ms().fields[fidx].type_id
-    let foff int = base + support.ms().fields[fidx].offset
+    let ftid int = table.ms().fields[fidx].type_id
+    let foff int = base + table.ms().fields[fidx].offset
     ast_out[0] = -1
 
     cur[0] = foff
-    let fk int = support.ms().types[ftid].kind
-    if (fk == support.TY_STRUCT) {
+    let fk int = table.ms().types[ftid].kind
+    if (fk == types.TY_STRUCT) {
         // 嵌套结构体字面量：IDENT '{' body '}'
         if (p_cur() != token.TOK_IDENT) {
             return token.err_tok("嵌套字段需要「类型名 { 字段 }」字面量")
         }
         let ns int = token.ctx().tokens[token.ctx().pos].start
         let nl int = token.ctx().tokens[token.ctx().pos].len
-        if (support.ty_lookup_name(ns, nl) != ftid) {
+        if (table.ty_lookup_name(ns, nl) != ftid) {
             return token.err_tok("嵌套字面量类型与字段类型不一致")
         }
         let nested_first int = token.ctx().pos
@@ -817,7 +819,7 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
         // 嵌套结构体的编译期模型：先建子对象，填完再挂到父对象字段上。
         let ct_child i64 = 0
         if (ct_obj != 0) {
-            ct_child = comptime.ct_global_agg_new(ftid, support.ms().types[ftid].len)
+            ct_child = comptime.ct_global_agg_new(ftid, table.ms().types[ftid].len)
             if (ct_child == 0) { return -1 }
         }
         let nested_fields int = -1
@@ -835,7 +837,7 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
             ast_out[0] = nested_root
         }
 
-        cur[0] = foff + support.ms().types[ftid].size
+        cur[0] = foff + table.ms().types[ftid].size
         if (ct_obj != 0
             && comptime.ct_global_agg_set_obj(ct_obj, ct_index, ftid,
                 ct_child) != 0) {
@@ -843,15 +845,15 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
         }
         return 0
     }
-    if (fk == support.TY_UNION) {
+    if (fk == types.TY_UNION) {
         return token.err_tok("union 字段的全局初始化暂不支持")
     }
-    if (fk == support.TY_ARRAY || fk == support.TY_SLICE) {
+    if (fk == types.TY_ARRAY || fk == types.TY_SLICE) {
         return token.err_tok("数组/切片字段的全局初始化暂不支持")
     }
     // 标量 / 指针 / 浮点：各分支自行折叠求值并发射
     let r int = 0
-    if (fk == support.TY_PTR) {
+    if (fk == types.TY_PTR) {
         if (p_cur() == token.TOK_STRING) {
             // 字符串字面量：先领标签号、发指针引用，再补内容——
             // 内容不能打断变量自身的字段布局（曾插进字段中间）。
@@ -861,7 +863,7 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
             p_adv()
             let lbl int = support.data_label()
             support.data_label_advance()
-            if (support.ms().types[ftid].size != 8
+            if (table.ms().types[ftid].size != 8
                 || parse_global_static_pointer(static_row, foff, lbl, 0) != 0
                 || parse_global_static_string(ss, sl, lbl) != 0) { return -1 }
             if (support.session().ast_capture != 0) {
@@ -891,7 +893,7 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
             if (parse_global_static_scalar(static_row, foff, ftid, 0) != 0) { return -1 }
             r = 0
         }
-    } else if (support.ty_is_float(ftid) != 0) {
+    } else if (table.ty_is_float(ftid) != 0) {
         support.fc().c_fold += 1
         let fv2 support.Res
         let fr int = parse_expr_iso(&fv2)
@@ -902,10 +904,10 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
         if (fv2.is_const == 0) {
             return token.err_tok("全局初始化字段必须是编译期常量")
         }
-        if (support.ty_is_float(fv2.type_id) == 0) {
+        if (table.ty_is_float(fv2.type_id) == 0) {
             return token.err_tok("浮点字段需要浮点字面量")
         }
-        if (support.ms().types[ftid].size != 8) {
+        if (table.ms().types[ftid].size != 8) {
             return token.err_tok("f32 字段的全局初始化暂不支持（请用 f64）")
         }
         if (parse_global_static_scalar(static_row, foff, ftid, fv2.fval_bits) != 0) { return -1 }
@@ -942,6 +944,6 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
     if (r != 0) {
         return -1
     }
-    cur[0] = foff + support.ms().types[ftid].size
+    cur[0] = foff + table.ms().types[ftid].size
     return 0
 }

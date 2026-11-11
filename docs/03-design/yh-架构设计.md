@@ -150,7 +150,7 @@ bin/yh-<平台>-<架构>（Release 种子）
 
 **逐模块职责、规模、依赖与内部拆分的唯一清单已迁到
 [`yh-模块职责-当前实现.md`](yh-模块职责-当前实现.md)**（2026-11-10 实测：
-17 个模块 / 179 个文件 / 60,970 行 / 76 条依赖边；`cmdline` 已并入 `main`）。
+19 个模块 / 183 个文件 / 63,396 行；语言类型模型已拆到 `types` 模块）。
 
 本节只保留分层意图：`support`/`ir` 是无依赖底座，`token`/`cache`/`lex`/`proj`/`ast`/
 `comptime` 依次叠到语义层，`check` 是语义中心，`parse` 是前端装配，
@@ -181,22 +181,24 @@ bin/yh-<平台>-<架构>（Release 种子）
 ### 3.1 允许的依赖边（评审基准）
 
 ```text
-support    → （无）
+types      → （无）
+support    → types, errors
+table      → types, support, errors, token
 ir         → （无）
 token      → support
 cache      → support, token, hash
 lex        → support, token
 proj       → support, token
-ast        → support, token, proj, comptime
-comptime   → support, token
-check      → support, ir, token, cache, proj, ast, comptime
-builtin    → support, check
-parse      → support, ir, token, lex, proj, ast, comptime, check
-lower      → support, ir, token, cache, proj, ast, check
+ast        → types, table, support, token, proj, comptime
+comptime   → table, types, support, errors, token
+check      → types, table, support, ir, token, cache, proj, ast, comptime
+builtin    → types, table, support, check
+parse      → types, table, support, ir, token, lex, proj, ast, comptime, check
+lower      → types, table, support, ir, token, cache, proj, ast, check
 backend    → support, ir
 link       → support, proj, backend, hash
 build      → support, ir, token, cache, lex, proj, ast, comptime, check, builtin, parse, lower, backend, link, hash, libs
-testkit    → support, token, proj, ast, parse, link, build
+testkit    → support, token, proj, ast, parse, link, build, libs
 main       → support, ir, lex, proj, ast, comptime, check, builtin, parse, lower, backend, link, build, testkit, libs
 ```
 
@@ -205,7 +207,7 @@ main       → support, ir, lex, proj, ast, comptime, check, builtin, parse, low
 ### 3.2 分层与根
 
 ```text
-support  ir                 ← 零依赖底座
+types  support  table  ir    ← 底座（support → types；table → types/support）
    ↑
 token  cache  lex          ← 词汇/原语
    ↑
@@ -228,7 +230,9 @@ build                       ← 构建编排（依赖全部下层）
 testkit   main（cmd/yh）     ← 测试 runner / CLI 分派（main 唯一可依赖 libs/cli）
 ```
 
-- `support` 必须是叶子：任何反向依赖都会成环（`token` 也只能到 `support`）。
+- `types` 必须是叶子（语言类型模型只有数据形状与种类常量）；`support` 只允许
+  依赖 `types`/`errors`；`table` 只依赖 `types`/`support`/`errors`/`token`，是语义存储层，
+  **support 不得 import table**（否则成环）。
 - `comptime` 不得依赖 `check`（`check → comptime` 已存在）——这条决定了它
   必须留在 `check` 之下（2026-11-07 `gen` 删除后，该位置由 `support`/`token` 承载）。
 - `ir` 不得 import 任何前端模块；`backend` 不得 import `ast`/`parse`/`comptime`/`check`；
@@ -292,8 +296,10 @@ testkit   main（cmd/yh）     ← 测试 runner / CLI 分派（main 唯一可�
 → check.full`；CT 语法在 resolve 之后展开，语义分析统一归 `check`。2026-11-08
 重估后按 `docs/todo.md` 的 S1–S4 切片推进；当前代码仍是语义动作解析器。
 
-> **草案补充（待评审）**：§6.11 拟在 AST 与 check 之间增加 AstGen/UIR，并把
-> `check.expand` 从 AST→AST 改为 UIR→UIR；批准前本表按现状 / S1–S4 执行。
+> **评审结论（2026-11-10，[ADR-0022](../adr/0022-yh-管线数据结构契约.md)）**：
+> §6.11 的 AstGen/UIR 层**不引入**；CT 展开位置定为纯语法 AST。本表与 S1–S4
+> 计划不变，另加 B0–B4 编排契约切片（见
+> [管线数据结构重设计](../02-plan/yh-管线数据结构重设计-2026-11-10.md)）。
 
 ### 4.2 关键产物与契约
 
@@ -308,8 +314,9 @@ testkit   main（cmd/yh）     ← 测试 runner / CLI 分派（main 唯一可�
 | `TargetDesc` | triple、数据模型、ABI 分类、平台文件后缀、链接驱动 | **演进** | 描述符表 + 逐目标门 |
 | `Diagnostic` | 稳定错误码、位置、严重级、渲染 | **演进** | 错误码目录 + 文案快照 |
 
-> 草案 §6.11 拟增加 `UIR` 契约（逐文件、无类型、可序列化）；是否引入与放在
-> `ast` 内部还是独立 `uir` 模块，待评审。当前 `CheckedModule`/`IRModule` 不变。
+> **评审结论（2026-11-10，[ADR-0022](../adr/0022-yh-管线数据结构契约.md)）**：
+> 不新增 `UIR` 契约。语法/语义分离由「纯语法 AST + check 注解侧表」获得，
+> `CheckedModule`/`IRModule` 契约不变；§6.11 保留作评审记录。
 
 **契约版本化的最小要求**（尚未全部落地）：
 
@@ -479,7 +486,7 @@ testkit   main（cmd/yh）     ← 测试 runner / CLI 分派（main 唯一可�
 P5 是刻意克制：不引入通用插件框架、全仓库查询数据库或常驻守护进程。扩展点应是
 编译期确定的表，不是运行时加载的 `.so`——后者会破坏可重现构建、自举闭包与固定点。
 
-### 6.2 分层（18 模块，当前实现）
+### 6.2 分层（20 模块，当前实现）
 
 ```text
 L4 入口     cmd（一命令一文件，导出面只有 main）
@@ -489,28 +496,30 @@ L2 语义     check（语义动作 + 受检契约）  comptime（CT 求值）；
 L1.5 变换   lower
 L1 中端     ir（不依赖任何 yh 模块）
 L1 后端     backend（LLVM 描述）  link（工具链调用，缓存移出）
-L0 支撑     support（含诊断/目标身份）  token
+L0 支撑     types（语言类型模型）  support（含诊断/目标身份）  table（语义存储）  token
 ```
 
 ### 6.3 允许依赖矩阵（2026-11-08 快照，已无机器校验）
 
 | 模块 | 允许依赖 |
 | --- | --- |
-| support / ir | 无 |
+| types / ir | 无 |
+| table | types, support, errors, token |
+| support | types, errors |
 | token | support |
 | cache | hash, support, token |
 | lex | support, token |
 | proj | support, token |
-| comptime | support, token |
-| ast | support, token, proj, comptime |
-| check | support, ir, token, cache, proj, ast, comptime |
-| builtin | support, check |
-| parse | support, ir, token, lex, proj, ast, comptime, check |
-| lower | support, ir, token, cache, proj, ast, check |
+| comptime | table, types, support, errors, token |
+| ast | types, table, support, token, proj, comptime |
+| check | types, table, support, ir, token, cache, proj, ast, comptime |
+| builtin | types, table, support, check |
+| parse | types, table, support, ir, token, lex, proj, ast, comptime, check |
+| lower | types, table, support, ir, token, cache, proj, ast, check |
 | backend | support, ir |
 | link | support, proj, backend, hash |
 | build | support, ir, token, cache, lex, proj, ast, comptime, check, builtin, parse, lower, backend, link, hash, libs |
-| testkit | support, token, proj, ast, parse, link, build |
+| testkit | support, token, proj, ast, parse, link, build, libs |
 | main（cmd/yh） | 全部（入口唯一例外；唯一允许 libs/cli 的模块） |
 
 ### 6.3.1 历史快照：依赖实测与两条解锁链（2026-11-06；`gen` 已于 2026-11-07 删除）
@@ -743,8 +752,9 @@ cache/
 
 ### 6.9 平台抽象
 
-当前平台适配靠文件名后缀复制：`clock.*`、`project_dir.*`、`argv.*`、`console.*`、
-`llvm_bind.*`、`*_runtime.*` 各 4 份。机制是对的（编译期按目标选文件，不是
+当前平台适配靠文件名后缀复制：`project_dir.*`、`llvm_bind.*`、`*_runtime.*`、
+`cmd/yh/console.*`、`cmd/yh/argv.*` 各多份（support 的 `clock.*` 已删除、
+`console/argv` 已迁 cmd，见 ADR-0025/0026）。机制是对的（编译期按目标选文件，不是
 `#ifdef`），但新增平台要写第 5 份同类文件，且文件之间没有共享声明头。
 
 目标：
@@ -816,19 +826,20 @@ check.resolve（先建声明/类型/常量环境）
 按切片各自验收）；不再按 F0 做全量 ADR + spike。每阶段保持固定点；旧语义动作
 路径保留用于差分，逐特性切换后删除。
 
-> **与 §6.11 草案的关系**：若 §6.11 批准，本节的目标链路改为
-> `parse → AST → AstGen → UIR → check.resolve → check.expand(UIR) →
-> check.full → HIR → lower`，并在 F2/F3 之间插入 F2b；否则按 S1–S4 执行。
+> **与 §6.11 草案的关系（已定，2026-11-10）**：§6.11 未批准（[ADR-0022](../adr/0022-yh-管线数据结构契约.md)），
+> 目标链路就是本节的两遍化，不加 AstGen/UIR；`check.expand` 保持在纯语法 AST 上
+> 展开 CT（不是 UIR→UIR）。编排层的 `ModuleJob/WorkerSlot/LinkJob` 契约另见
+> [管线数据结构重设计](../02-plan/yh-管线数据结构重设计-2026-11-10.md)。
 
 ---
 
 ### 6.11 Zig 对齐：AstGen/UIR/Sema（草案，待评审）
 
-状态：**草案，未批准**。当前实现与 S1–S4 计划不变；本节只用于评审“是否在
-`parse` 与 `check` 之间增加 AstGen/UIR，并把 `check` 做成真正的 Sema”。
-若批准，本节成为阶段 B 的目标流程，并在 F2/F3 之间插入 **F2b**；§6.10 的
-“`check.expand` AST→AST”相应改为“UIR→UIR”。本轮已确认两点：**CT 展开放
-UIR**；**暂不接受惰性 Sema**（`check.full` 仍检查模块内全部函数）。
+状态：**已评审否决（2026-11-10）**：不引入 UIR 层，CT 展开放纯语法 AST；
+「暂不接受惰性 Sema」维持。理由见 [ADR-0022](../adr/0022-yh-管线数据结构契约.md)：
+yh AST 已是扁平 arena + id（Zig AstGen 的指针树→扁平流前提不存在），
+PF2 实测前端仅占 6%，多一层 arena/verifier/缓存无收益。本节保留作评审记录，
+不再作为实施依据；当前实现与 S1–S4 计划不变。
 
 目标不是复制 Zig 的后端，而是复制它的前端分层：
 

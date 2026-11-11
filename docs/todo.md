@@ -8,11 +8,43 @@
 已完成项一律删除（历史与证据见 `finish.md`、`01-finished/`），已表决不做的见文末。
 
 - 添加string类型
-- 添加类型推导
 - 添加接口功能
-- 添加错误，当前错误提示功能太简陋
-- 诊断直写 stderr 旁路收编（link/build/testkit 约 20 处 `write_all(2, ...)`）
 - project.toml 添加[env]
+
+## 2026-11-11 编译诊断 V 风格源片段（P0，规划）
+
+方案：[yh-V风格编译诊断实施方案](02-plan/yh-V风格编译诊断实施方案-2026-11-11.md)。
+目标：`path:line:col: 错误:` 后输出上下各 2 行源码 + `~~~` 精确下划线 +
+可选 `说明:`；同时修正当前 142 个带位置失败用例中 65 例列号落在行尾的问题。
+
+- [ ] D0：`tests/diagnostics` 骨架 + 失败语料基线（片段/caret/行尾列号统计）。
+- [ ] D1：`errors` 源槽 + `err_span`/`fmt_diag` 渲染器；`err_tok` 带 token 宽度；
+      UTF-8/tab/CRLF/长行/无源码回退单测。
+- [ ] D2：位置审计（`token.err_range`/`index_at_offset` + `check/diag.file_span`），
+      行尾列号降到 ≤5/142；跨文件模块片段测试。
+- [ ] D3：旁路收编（含原条目「诊断直写 stderr 约 20 处」）；`yh test`/构建诊断
+      统一走 `errors`，补 ICE 形式。
+- [ ] D4：`说明:` 行、期望/实际类型名、未声明名字/类型的「是否想用」建议。
+- [ ] D5（待定）：TTY 颜色、多错误恢复、多行跨度；不阻塞 D1–D4。
+
+## 2026-11-11 类型推导（P0，规划）
+
+方案：[yh-类型推导实施方案](02-plan/yh-类型推导实施方案-2026-11-11.md)。
+用户已确认：语法用 `let x = expr`；首版支持函数内与模块级**私有**
+`let`/`const` 推导；`pub` API（`pub const`、`pub fn` 参数/返回、`pub` 字段）
+强制显式类型。先修两个前置问题：同型字面量越界被 `vk_can_assign` 短路
+（`2147483648` 静默截断）、三元两支类型未合流。
+
+- [ ] P0：`vk_can_assign` 字面量范围前置检查；`sem_ternary_end` 分支合流；
+      补 fail/run 用例。
+- [ ] I1：语法可选类型 + `parse_inferred_binding`；函数内标量/表达式/调用/
+      结构体/函数值推导；局部 `const`；语法/语义用例。
+- [ ] I2：`ParseCtx.infer_lit` + `parse_array_literal` 推断模式；首元素定类型、
+      逐元素 `sem_can_assign`、空数组/嵌套数组；O0/O2 降低验证。
+- [ ] I3：模块级私有推断：pass1 `TY_VOID` 占位 + pass1 后/CT 前类型解析子遍 +
+      `c_type_probe` 副作用抑制；`pub` 推断拒绝；跨文件/CT/接口用例。
+- [ ] I4：推断诊断、类型显示、`yh.g4`/编码规范/设计文档/ADR；种子兼容审计；
+      `just build` + `just test` + `just selfhost-native`。
 
 ## 2026-11-10 前端 S4：parse 纯化后续（P0，进行中）
 
@@ -38,6 +70,21 @@
 - [ ] S4-3 CT 展开下沉：`$if`/`$for` 结构节点 + `check.expand`；删 `parse→comptime`。
 - [ ] S4-4 收口：删 `parse→check`（当前只剩 `parse_type.yh` 的 `type_resolve`
       转发），补模块依赖守卫。
+
+## 2026-11-10 管线数据结构重设计（P0，实施中）
+
+方案：[yh-管线数据结构重设计](02-plan/yh-管线数据结构重设计-2026-11-10.md)。
+范围按用户决策为「整条管线契约」：ModuleJob/WorkerSlot/LinkJob 编排结构 +
+AstExpr 语法/语义拆分（与 S4 汇合）+ SessionCtx 阶段开关收编。
+决策已拍板（D1 不引入 UIR / D2 B0 先行 / D3 全收编），见
+[ADR-0022](adr/0022-yh-管线数据结构契约.md)；架构 §6.10/§6.11 已同步。
+B0 已完成（证据见 [finish.md](finish.md) 2026-11-10 条目）。
+
+- [ ] B1：FrontendStage 枚举收编 SessionCtx；行为配置上移（删 worker 入口的
+      job.mode 回写，`check_only/test_mode/legacy_system` 读点切到 job/会话配置）。
+- [ ] B2：CheckedStorage 定稿「纯语法节点+注解侧表」（依赖 S4-2f，`.fchk` 字节不变）。
+- [ ] B3：LinkJob/LinkScratch 拆分 + ModuleArtifacts。
+- [ ] B4：ModelStore 作用域栈拆出 + FrontCtx 旧发射器字段核实删除 + 文档刷新。
 
 ## 2026-11-10 泛型 `$any` 类型变量与单态化（P0，规划中）
 

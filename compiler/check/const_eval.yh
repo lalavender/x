@@ -1,5 +1,7 @@
 module check
+import types
 import support
+import table
 import token
 
 // ============================================================================
@@ -86,10 +88,10 @@ fn len_defer_needed(first int, after int) int {
 // len_ident_unready：位置 i 的标识符是否为尚未就绪的编译期常量。
 // 成员/模块限定名（前一个是 .）与 `$` 后的名字不是独立引用，不算。
 fn len_ident_unready(i int) int {
-    let sym int = support.sym_lookup(token.ctx().tokens[i].start, token.ctx().tokens[i].len)
-    if (sym >= 0 && sym < support.ms().sym_n
-        && support.ms().syms[sym].kind == support.SYM_CONST
-        && support.ms().syms[sym].const_ready == 0) { return 1 }
+    let sym int = table.sym_lookup(token.ctx().tokens[i].start, token.ctx().tokens[i].len)
+    if (sym >= 0 && sym < table.ms().sym_n
+        && table.ms().syms[sym].kind == table.SYM_CONST
+        && table.ms().syms[sym].const_ready == 0) { return 1 }
     return 0
 }
 
@@ -239,19 +241,19 @@ fn len_mul(i *int, after int, r *support.Res) int {
 }
 
 // len_fold_binop：常量二元折叠。字面量适配与提升类型同 sem_binop 折叠分支；
-// 求值内核与错误诊断走 sem_fold_const_binop（support.vk_fold_binop），除零、
+// 求值内核与错误诊断走 sem_fold_const_binop（table.vk_fold_binop），除零、
 // 移位越界、类型宽度等语义逐字节一致。比较结果保持 BOOL，其余用提升后类型。
 fn len_fold_binop(op int, lhs *support.Res, rhs *support.Res, pos_now int) int {
     // 字面量适配：一侧是字面量时借用另一侧整数类型
-    if (rhs.is_lit != 0 && support.ty_is_scalar(lhs.type_id) != 0
-        && support.ty_is_integer(lhs.type_id) != 0 && support.ty_is_integer(rhs.type_id) != 0) {
-        if (support.sem_lit_fits(lhs.type_id, rhs.ival) != 0) {
+    if (rhs.is_lit != 0 && table.ty_is_scalar(lhs.type_id) != 0
+        && table.ty_is_integer(lhs.type_id) != 0 && table.ty_is_integer(rhs.type_id) != 0) {
+        if (table.sem_lit_fits(lhs.type_id, rhs.ival) != 0) {
             rhs.type_id = lhs.type_id
         }
     }
-    if (lhs.is_lit != 0 && support.ty_is_scalar(rhs.type_id) != 0
-        && support.ty_is_integer(lhs.type_id) != 0 && support.ty_is_integer(rhs.type_id) != 0) {
-        if (support.sem_lit_fits(rhs.type_id, lhs.ival) != 0) {
+    if (lhs.is_lit != 0 && table.ty_is_scalar(rhs.type_id) != 0
+        && table.ty_is_integer(lhs.type_id) != 0 && table.ty_is_integer(rhs.type_id) != 0) {
+        if (table.sem_lit_fits(rhs.type_id, lhs.ival) != 0) {
             lhs.type_id = rhs.type_id
         }
     }
@@ -267,9 +269,12 @@ fn len_fold_binop(op int, lhs *support.Res, rhs *support.Res, pos_now int) int {
     if (op == token.TK_EQEQ || op == token.TK_NEQ || op == token.TK_LT
         || op == token.TK_LEQ || op == token.TK_GT || op == token.TK_GEQ) { is_cmp = 1 }
     if (is_cmp != 0) {
-        support.sem_res_const(lhs, support.TY_BOOL, value)
+        support.sem_res_const(lhs, types.TY_BOOL, value)
     } else {
         support.sem_res_const(lhs, tid, value)
+        // 浮点常量同时保留位模式（与 sem_binop 折叠分支一致）：const 初始化与
+        // 浮点装载读 fval_bits，不只读 ival。
+        if (table.ty_is_float(tid) != 0) { lhs.fval_bits = value }
     }
     return 0
 }
@@ -285,15 +290,15 @@ fn len_unary(i *int, after int, r *support.Res) int {
         let st int = len_unary(i, after, r)
         if (st != 0) { return st }
         // 常量折叠分支：浮点叶子已在源头排除，非整数（BOOL 等）回退。
-        if (support.ty_is_integer(r.type_id) == 0) { return -2 }
+        if (table.ty_is_integer(r.type_id) == 0) { return -2 }
         let unary_type int = r.type_id
-        if (support.ms().types[unary_type].kind == support.TY_BOOL) { unary_type = support.TY_I32 }
+        if (table.ms().types[unary_type].kind == types.TY_BOOL) { unary_type = types.TY_I32 }
         if (k == token.TK_MINUS && r.is_lit != 0 && r.ival >= 0) {
             // 超出当前整数宽度的负数字面量先提升为 i64，保留完整值供适配。
             let negative i64 = 0 - r.ival
-            if (support.sem_lit_fits(unary_type, negative) == 0
-                && support.sem_lit_fits(support.TY_I64, negative) != 0) {
-                unary_type = support.TY_I64
+            if (table.sem_lit_fits(unary_type, negative) == 0
+                && table.sem_lit_fits(types.TY_I64, negative) != 0) {
+                unary_type = types.TY_I64
             }
         }
         let value i64 = 0
@@ -323,7 +328,7 @@ fn len_primary(i *int, after int, r *support.Res) int {
         if (support.fc().c_fold_big != 0) { return -2 }
         r.is_lit = 1
         r.is_const = 1
-        r.type_id = support.TY_I32
+        r.type_id = types.TY_I32
         r.ival = support.fc().c_fold_ival
         *i += 1
         return 0
@@ -339,21 +344,21 @@ fn len_primary(i *int, after int, r *support.Res) int {
     if (t.kind == token.TOK_IDENT) {
         // 模块限定名/成员访问不在窄口内（前看 . 决定），交给原路径。
         if (*i + 1 < after && token.ctx().tokens[*i + 1].kind == token.TK_DOT) { return -2 }
-        let sym int = support.sym_lookup(t.start, t.len)
-        if (sym < 0 || sym >= support.ms().sym_n) { return -2 }
+        let sym int = table.sym_lookup(t.start, t.len)
+        if (sym < 0 || sym >= table.ms().sym_n) { return -2 }
         // 只收有标量值的就绪 const：与 sem_ident_val 的取值分支字段一致。
-        if (support.ms().syms[sym].kind != support.SYM_CONST) { return -2 }
-        let ck int = support.ms().types[support.ms().syms[sym].type_id].kind
-        if (ck == support.TY_STRUCT || ck == support.TY_ARRAY
-            || ck == support.TY_SLICE || ck == support.TY_UNION) { return -2 }
-        if ((support.ms().syms[sym].flags & (support.F_ENUM_META | support.F_FIELD_META)) != 0) { return -2 }
-        if (support.ms().syms[sym].const_ready == 0) { return -2 }  // 防御：入口 defer 已拦
-        if ((support.ms().syms[sym].flags & support.F_ADDR) != 0) { return -2 }
-        if (support.ty_is_float(support.ms().syms[sym].type_id) != 0) { return -2 }
+        if (table.ms().syms[sym].kind != table.SYM_CONST) { return -2 }
+        let ck int = table.ms().types[table.ms().syms[sym].type_id].kind
+        if (ck == types.TY_STRUCT || ck == types.TY_ARRAY
+            || ck == types.TY_SLICE || ck == types.TY_UNION) { return -2 }
+        if ((table.ms().syms[sym].flags & (table.F_ENUM_META | table.F_FIELD_META)) != 0) { return -2 }
+        if (table.ms().syms[sym].const_ready == 0) { return -2 }  // 防御：入口 defer 已拦
+        if ((table.ms().syms[sym].flags & table.F_ADDR) != 0) { return -2 }
+        if (table.ty_is_float(table.ms().syms[sym].type_id) != 0) { return -2 }
         r.sym = sym
-        r.type_id = support.ms().syms[sym].type_id
+        r.type_id = table.ms().syms[sym].type_id
         r.is_const = 1
-        r.ival = support.ms().syms[sym].cval
+        r.ival = table.ms().syms[sym].cval
         *i += 1
         return 0
     }

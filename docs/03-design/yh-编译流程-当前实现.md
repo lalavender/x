@@ -3,7 +3,7 @@
 修改时间：2026-11-08
 
 状态：**当前实现参考**，不是目标架构。
-基线：`llvm` 分支 0.0.12 + C0–C6 + GEN1–GEN4 + F4，18 个 yh 模块（`gen` 已于 2026-11-07 删除），LLVM 唯一后端。
+基线：`llvm` 分支 0.0.12 + C0–C6 + GEN1–GEN4 + F4，19 个 yh 模块（`gen` 已于 2026-11-07 删除；`types` 于 2026-11-10 从 support 拆出），LLVM 唯一后端。
 用途：作为调整编译流程时的逐阶段对照表；目标架构见
 [架构设计](yh-架构设计.md) 与 `docs/todo.md` 的 S1–S4（前端两遍化切片）/
 GEN0–GEN4（`gen` 拆分，已完成）。原 F0–F7 计划已于 2026-11-08 重估，见
@@ -268,7 +268,7 @@ worker 会检查父进程存活，避免 Ctrl-C 后留下孤儿。
 
 ### 5.1 前端初始化
 
-1. `support.front_checked_begin()`：进入受检前端模式。
+1. `check.front_checked_begin()`：进入受检前端模式。
 2. `comptime.ct_reset()`：清空编译期状态。
 3. 设置：
    - `proj.cfg().module_mode = 1`；
@@ -379,11 +379,11 @@ check.verify_module(&view)
 `yh check` / `--check-only`：
 
 ```text
-support.front_checked_verify()
+check.front_checked_verify()
 ast.checked_module_capture()
 mb_verify_checked_snapshot()
 ast.checked_module_release()
-support.front_checked_end()
+check.front_checked_end()
 ```
 
 返回，不 lower、不 LLVM、不链接。
@@ -395,7 +395,7 @@ support.front_checked_end()
 ```text
 ast.ast_view()
 check.verify_module()
-support.front_checked_verify()
+check.front_checked_verify()
 ast.checked_module_capture()      → CheckedModule 快照
 mb_verify_checked_snapshot()
 firc_load()                       → 函数级 IR 缓存
@@ -430,7 +430,7 @@ obj/<project>-<module>.o
 5. 成功后：
    - `firc_check_commit()`；
    - `firc_commit()`；
-6. `support.front_checked_end()`。
+6. `check.front_checked_end()`。
 
 ---
 

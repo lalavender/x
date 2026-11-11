@@ -10,13 +10,17 @@
 用 yh 语言写成的 yh 编译器。源码是 `project.toml` 项目（name = `yh`，
 source = `.`；版本号以 [project.toml](project.toml) 的 `version` 与
 `cmd/yh/cmd_base.yh` 的 `YH_VERSION_TEXT` 为准，两处必须与发布 tag 一致），按
-**support / token / builtin / lex / parse / ast / check / comptime / lower /
+**support / types / table / token / builtin / lex / parse / ast / check / comptime / lower /
 ir / backend / link / build（含 cache 子目录）/ proj / testkit / main（cmd/yh）** 组织。
-**2026-11-10 实测（`just code-stats` + 手工汇总）：十七个模块、179 个 `.yh`、
-60,970 行、76 条依赖边**：`check` 8,249 · `build` 7,826 · `parse` 7,585 ·
-`comptime` 6,076 · `lower` 5,991 · `ir` 5,385 · `link` 4,390 · `backend` 4,149 ·
-`support` 3,118 · `testkit` 1,627 · `proj` 1,590 · `ast` 1,339 · `main` 1,101 ·
-`lex` 1,048 · `cache` 1,047 · `token` 268 · `builtin` 181。
+**2026-11-11 实测（`just code-stats` + 手工汇总）：二十个模块、179 个 `.yh`、
+约 63,445 行**：`check` 9,239 · `build` 7,826 · `parse` 7,585 ·
+`comptime` 6,076 · `lower` 5,927 · `ir` 5,385 · `link` 4,390 · `backend` 4,149 ·
+`support` 1,300 · `table` 1,316 · `proj` 2,078 · `testkit` 1,650 · `ast` 1,339 · `main` 1,393 ·
+`lex` 1,048 · `cache` 1,047 · `token` 268 · `builtin` 181 · `types` 83。
+
+`types/` 是 2026-11-10 从 `support` 拆出的语言类型模型（`TY_*`、`CType`、
+`SField`、`TName`，见 [ADR-0023](../docs/adr/0023-yh-types模块独立.md)）；
+同日 FileScope → proj、front_stage/ABI 分类 → check（[ADR-0024](../docs/adr/0024-yh-support再收缩.md)）。
 
 各层来历：`support/` 与 `token/` 是 2026-11-06 GEN1 自 `gen` 拆出的基础层
 （缓冲/统计与 token 词汇/游标），`ast/` 是 2026-10-12 自 parse 拆出的 AST 阶段，`check/` 承担
@@ -189,7 +193,7 @@ python3 tools/compiler-tests.py --compiler-path ./yh
 | `check/sem_decl.yh` | 声明语义：符号登记、参数/返回事实、main 检查 |
 | `check/sem_flow.yh` | 控制流语义：赋值、循环、goto/标签与可达性 |
 | `check/sem_call_literal.yh` | 调用点语义：实参检查、变参打包记录、结构体字面量 |
-| `check/abi_c.yh` | C ABI 位置分类（值/游标模型在 `gen/abi_model.yh`） |
+| `check/abi_c.yh` | C ABI 位置分类（`ABIValue/ABICursor/ABIArg/CABI_*` 模型同在本文件，ADR-0024） |
 | `check/verify_checked.yh` | 只读校验 `CheckedModule` 快照；由调用方在 lowering 前调用 |
 
 **comptime** —— 编译期函数登记与受限求值
@@ -273,7 +277,7 @@ typed IR 是唯一执行器，正文不在支持子集内的编译期函数直�
 | `gen/static_data.yh` | 独占静态数据、64 位指针槽与重定位登记 |
 | `gen/target.yh` | 仅 `tg_layout_struct`（读类型/字段表） |
 | `gen/front_stage.yh` | 受检前端阶段的进入/校验/退出 |
-| `support/clock.*`、`console.*`、`argv.*` | 宿主平台（GEN1 迁出 gen） |
+| `cmd/yh/console.*`、`argv.*` | 入口宿主平台（GEN1 迁出 gen；ADR-0025 迁 cmd；support/clock.* 已删除，ADR-0026） |
 
 `gen` 不再有 `token_bridge`：token 游标/入表/报错已全部直连 `token.*`。
 

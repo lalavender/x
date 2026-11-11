@@ -2,7 +2,9 @@ module parse
 import token
 import check
 import errors
+import types
 import support
+import table
 import comptime
 import ast
 
@@ -181,9 +183,9 @@ fn parse_comptime_enum_for(name_start int, name_len int, name_token int,
     if (body_after < 0) { return token.err_tok("$for 函数体缺少 '}'") }
     if (support.session().compile == 0) { return parse_comptime_branch(-1) }
 
-    let enum_type int = support.ty_lookup_name(enum_start, enum_len)
+    let enum_type int = table.ty_lookup_name(enum_start, enum_len)
     if (enum_type < 0) { return token.err_tok("$for values 来源不是已声明的类型") }
-    if (support.ms().types[enum_type].kind != support.TY_ENUM) {
+    if (table.ms().types[enum_type].kind != types.TY_ENUM) {
         return token.err_tok("$for values 来源必须是枚举类型")
     }
     let member_count int = comptime.ct_enum_member_count(enum_type)
@@ -208,13 +210,13 @@ fn parse_comptime_enum_for(name_start int, name_len int, name_token int,
             return -1
         }
         token.ctx().pos = body_first
-        support.scope_push()
+        table.scope_push()
         let binding int = check.sym_push(name_start, name_len,
-            support.SYM_CONST, enum_type, support.F_ENUM_META)
+            table.SYM_CONST, enum_type, table.F_ENUM_META)
         if (binding < 0) { return -1 }
-        support.ms().syms[binding].offset = member
-        support.ms().syms[binding].cval = support.ms().syms[member].cval
-        support.ms().syms[binding].const_ready = 1
+        table.ms().syms[binding].offset = member
+        table.ms().syms[binding].cval = table.ms().syms[member].cval
+        table.ms().syms[binding].const_ready = 1
         if (support.session().ast_capture != 0
             && ast.ast_binding_add(binding, name_token, 0) != 0) { return -1 }
         if (typed_for != 0) { support.fc().c_fn_falls = 1 }
@@ -223,7 +225,7 @@ fn parse_comptime_enum_for(name_start int, name_len int, name_token int,
             return token.err_tok("内部错误：枚举 values 展开没有消费完整函数体")
         }
         if (typed_for != 0) { support.fc().c_fn_falls = parent_falls }
-        support.scope_pop()
+        table.scope_pop()
         ordinal += 1
     }
     token.ctx().pos = body_after
@@ -250,13 +252,13 @@ fn parse_comptime_field_for(name_start int, name_len int, name_token int,
     if (body_after < 0) { return token.err_tok("$for 函数体缺少 '}'") }
     if (support.session().compile == 0) { return parse_comptime_branch(-1) }
 
-    let owner int = support.ty_lookup_name(owner_start, owner_len)
+    let owner int = table.ty_lookup_name(owner_start, owner_len)
     if (owner < 0) { return token.err_tok("$for fields 来源不是已声明的类型") }
-    let owner_kind int = support.ms().types[owner].kind
-    if (owner_kind != support.TY_STRUCT && owner_kind != support.TY_UNION) {
+    let owner_kind int = table.ms().types[owner].kind
+    if (owner_kind != types.TY_STRUCT && owner_kind != types.TY_UNION) {
         return token.err_tok("$for fields 来源必须是结构体或联合体")
     }
-    let field_count int = support.ms().types[owner].len
+    let field_count int = table.ms().types[owner].len
     if (field_count < 0) { return errors.fail("内部错误：字段表长度无效") }
     if (field_count > 1024) { return token.err_tok("单个 fields 展开超过 1024 次") }
     if (typed_for != 0 && ast.ast_stmt_current_now() >= 0) {
@@ -267,7 +269,7 @@ fn parse_comptime_field_for(name_start int, name_len int, name_token int,
     let parent_falls int = support.fc().c_fn_falls
     let index int = 0
     for index < field_count {
-        let field support.SField = support.ms().fields[support.ms().types[owner].sub + index]
+        let field types.SField = table.ms().fields[table.ms().types[owner].sub + index]
         if (comptime.ct_charge_expansion(body_after - body_first) != 0
             || comptime.ct_for_boundary_value(index.to_type(i64)) != 0) { return -1 }
         if (typed_for != 0 && support.session().ast_capture != 0
@@ -275,13 +277,13 @@ fn parse_comptime_field_for(name_start int, name_len int, name_token int,
             return -1
         }
         token.ctx().pos = body_first
-        support.scope_push()
+        table.scope_push()
         let binding int = check.sym_push(name_start, name_len,
-            support.SYM_CONST, field.type_id, support.F_FIELD_META)
+            table.SYM_CONST, field.type_id, table.F_FIELD_META)
         if (binding < 0) { return -1 }
-        support.ms().syms[binding].offset = index
-        support.ms().syms[binding].cval = owner.to_type(i64)
-        support.ms().syms[binding].const_ready = 1
+        table.ms().syms[binding].offset = index
+        table.ms().syms[binding].cval = owner.to_type(i64)
+        table.ms().syms[binding].const_ready = 1
         if (support.session().ast_capture != 0
             && ast.ast_binding_add(binding, name_token, 0) != 0) { return -1 }
         if (typed_for != 0) { support.fc().c_fn_falls = 1 }
@@ -290,7 +292,7 @@ fn parse_comptime_field_for(name_start int, name_len int, name_token int,
             return token.err_tok("内部错误：字段元信息展开没有消费完整函数体")
         }
         if (typed_for != 0) { support.fc().c_fn_falls = parent_falls }
-        support.scope_pop()
+        table.scope_pop()
         index += 1
     }
     token.ctx().pos = body_after
@@ -358,19 +360,19 @@ fn parse_comptime_for_body() int {
     if (typed_for == 0 && (lo.is_const == 0 || hi.is_const == 0)) {
         return token.err_tok("$for 区间边界必须是编译期常量")
     }
-    if (support.ty_is_integer(lo.type_id) == 0 || support.ty_is_integer(hi.type_id) == 0) {
+    if (table.ty_is_integer(lo.type_id) == 0 || table.ty_is_integer(hi.type_id) == 0) {
         return token.err_tok("$for 区间边界必须是整数")
     }
-    if (check.sem_can_assign(support.TY_I32, lo.type_id, lo.is_lit, lo.ival, lo.lit_big) != 0
-        || check.sem_can_assign(support.TY_I32, hi.type_id, hi.is_lit, hi.ival, hi.lit_big) != 0) {
+    if (check.sem_can_assign(types.TY_I32, lo.type_id, lo.is_lit, lo.ival, lo.lit_big) != 0
+        || check.sem_can_assign(types.TY_I32, hi.type_id, hi.is_lit, hi.ival, hi.lit_big) != 0) {
         return -1
     }
     if (typed_for != 0) {
         let parent_falls int = support.fc().c_fn_falls
-        support.scope_push()
-        let sym int = check.sym_push(name_start, name_len, support.SYM_CONST, support.TY_I32, 0)
+        table.scope_push()
+        let sym int = check.sym_push(name_start, name_len, table.SYM_CONST, types.TY_I32, 0)
         if (sym < 0) { return -1 }
-        support.ms().syms[sym].const_ready = 0
+        table.ms().syms[sym].const_ready = 0
         if (ast.ast_binding_add(sym, name_token, 0) != 0) { return -1 }
         support.fc().c_fn_falls = 1
         if (parse_block() != 0) { return -1 }
@@ -378,7 +380,7 @@ fn parse_comptime_for_body() int {
             return token.err_tok("内部错误：编译期 typed $for 没有消费完整函数体")
         }
         support.fc().c_fn_falls = parent_falls
-        support.scope_pop()
+        table.scope_pop()
         return 0
     }
     let count int = 0
@@ -406,11 +408,11 @@ fn parse_comptime_for_body() int {
             return -1
         }
         token.ctx().pos = body_first
-        support.scope_push()
-        let sym int = check.sym_push(name_start, name_len, support.SYM_CONST, support.TY_I32, 0)
+        table.scope_push()
+        let sym int = check.sym_push(name_start, name_len, table.SYM_CONST, types.TY_I32, 0)
         if (sym < 0) { return -1 }
-        support.ms().syms[sym].cval = value
-        support.ms().syms[sym].const_ready = 1
+        table.ms().syms[sym].cval = value
+        table.ms().syms[sym].const_ready = 1
         let saved_capture int = support.session().ast_capture
         if (use_template != 0 && value > lo.ival) { support.session().ast_capture = 0 }
         if (support.session().ast_capture != 0 && ast.ast_binding_add(sym, name_token, 0) != 0) {
@@ -433,7 +435,7 @@ fn parse_comptime_for_body() int {
                 return errors.fail("内部错误：编译期 `$for` typed AST 模板为空")
             }
         }
-        support.scope_pop()
+        table.scope_pop()
         value += 1
     }
     if (use_template != 0 && ast.ast_comptime_for_add(template_stmt,
@@ -498,12 +500,12 @@ fn parse_test_assert_call(res *support.Res, condition *support.Res, msg *support
     let nlen int = 16
     let noff int = support.tml_intern_str(name.to_type(*u8), 0, nlen)
     if (noff < 0) { return -1 }
-    let sym int = support.sym_lookup_off(noff, nlen)
-    if (sym < 0 || support.ms().syms[sym].kind != support.SYM_FN) {
+    let sym int = table.sym_lookup_off(noff, nlen)
+    if (sym < 0 || table.ms().syms[sym].kind != table.SYM_FN) {
         return token.err_tok("内部错误：缺少 __yh_test_assert 运行时入口")
     }
     let callee support.Res
-    support.res_reset(&callee, support.ms().syms[sym].type_id)
+    support.res_reset(&callee, table.ms().syms[sym].type_id)
     callee.sym = sym
     if (check.sem_call_begin(&callee) != 1) {
         return token.err_tok("内部错误：测试断言入口不是直接函数")
@@ -514,11 +516,11 @@ fn parse_test_assert_call(res *support.Res, condition *support.Res, msg *support
     let lit_first int = first
     let lit_last int = after
     let line_res support.Res
-    if (parse_test_assert_lit(&line_res, support.TY_I32, line.to_type(i64),
+    if (parse_test_assert_lit(&line_res, types.TY_I32, line.to_type(i64),
             lit_first, lit_last) != 0) { return -1 }
     if (check.sem_push_arg(&line_res, &callee) != 0) { return -1 }
     let col_res support.Res
-    if (parse_test_assert_lit(&col_res, support.TY_I32, col.to_type(i64),
+    if (parse_test_assert_lit(&col_res, types.TY_I32, col.to_type(i64),
             lit_first, lit_last) != 0) { return -1 }
     if (check.sem_push_arg(&col_res, &callee) != 0) { return -1 }
     if (check.sem_push_arg(msg, &callee) != 0) { return -1 }
@@ -551,7 +553,7 @@ fn parse_comptime_diag_call(res *support.Res, kind int, line int, col int) int {
     let msg_len int = 0
     if (kind == support.CT_DIAG_ASSERT) {
         let saved_fold int = support.fc().c_fold
-        let ct_body int = (support.fc().c_fn_flags & support.F_COMPTIME) != 0
+        let ct_body int = (support.fc().c_fn_flags & table.F_COMPTIME) != 0
         // test 体里的断言是运行期检查（YT2 接执行器）；先按普通表达式
         // 解析，不做强制常量折叠，否则 helper(...) 会被误判为非常量。
         if (support.session().compile != 0 && ct_body == 0 && ctx().test_body == 0) {
@@ -564,7 +566,7 @@ fn parse_comptime_diag_call(res *support.Res, kind int, line int, col int) int {
             if (condition.ct_diag != 0) {
                 return token.err_tok("编译期诊断不能嵌套使用")
             }
-            if (condition.type_id != support.TY_BOOL) {
+            if (condition.type_id != types.TY_BOOL) {
                 return token.err_tok("$assert 条件必须是 bool")
             }
             if (ct_body == 0 && condition.is_const == 0
@@ -582,7 +584,7 @@ fn parse_comptime_diag_call(res *support.Res, kind int, line int, col int) int {
                 }
                 if (parse_expr_iso(&msg) != 0) { return -1 }
             } else {
-                if (parse_test_assert_lit(&msg, check.ty_ptr(support.TY_CHAR), 0,
+                if (parse_test_assert_lit(&msg, check.ty_ptr(types.TY_CHAR), 0,
                         first, token.ctx().pos) != 0) { return -1 }
             }
             if (p_expect(token.TK_RPAREN, "编译期诊断调用期望 ')'") != 0) { return -1 }
@@ -609,7 +611,7 @@ fn parse_comptime_diag_call(res *support.Res, kind int, line int, col int) int {
         p_adv()
     }
     if (p_expect(token.TK_RPAREN, "编译期诊断调用期望 ')'") != 0) { return -1 }
-    support.res_reset(res, support.TY_VOID)
+    support.res_reset(res, types.TY_VOID)
     res.ct_diag = kind
     res.ct_diag_expr = kind == support.CT_DIAG_ASSERT ? condition.ast_id : -1
     res.ct_diag_line = line

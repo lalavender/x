@@ -8,7 +8,185 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
-## 2026-11-10：前端 S4 片——纯数据层外置与死调用删除（parse→check 194 → 150）
+## 2026-11-11：static_data 并入 table（ADR-0028）
+
+把静态数据目录从 support 并入 `table`，完成「语义存储全在 table」的收口。
+
+**结果**：
+- `support/static_data.yh`（目录单例/LIMIT/drop）整文件并入 `table/api.yh`；
+  `StaticDataObject`/`StaticDataReloc` 与 8 个 `static_data_*` 操作同迁。
+- 消费方 parse/comptime/check/lower 改 `table.static_data_*`、`table.StaticData*`，
+  补 `import table`（48 个文件已依赖 table）。
+- 复位改由 `check.sem_init_tables()` 调 `table.static_data_reset()`；support 不再
+  import table。
+- support 只剩 `api`/`base`/`task_ctx` 三文件（1,345 行）；table 1,316 行。
+
+**验证**（darwin-arm64，`YH_LLVM_HOST=0` + 全新 `FAST_DIR`）：
+- 冷编通过；`just test` 全绿（compiler-tests 10/10）。
+- `selfhost-native` 全绿：固定点一致（60 产物）、cc4 自解析、modules 19/19、
+  project cases 125/125。
+- 种子差分（含 `pub const` 数组静态数据的项目）：`obj/*.o` 与可执行文件逐字节一致，
+  运行结果正确。
+
+**同片收尾**：`support/base.yh`（`g_support`）与 `support/task_ctx.yh`（`g_front`）是单例占位空壳，
+两个 `let` 并入 `support/api.yh` 后删除；api.yh 顺带清理 31 段失效注释与多余空行（1,345 → 1,300）。
+
+**踩坑**：自动化加 `import table` 时把 `types/api.yh` 注释里提到的 `table.ModelStore`
+当成引用，导致 `table → types → table` 假环；按「去注释后仍无 `table.` 引用」清理 import。
+
+## 2026-11-11：table 模块——集中编译期语义存储（ADR-0027，V `ast.Table` 对等层）
+
+用户要求参考 V 语言 `ast.Table` 集中语义存储、消掉分散的 `model_store`。
+直接放 ast 会成环（ast→comptime CT 零拷贝镜像 + support 读 ms()），改新建底层模块。
+
+**结果**：
+- 新增 `compiler/table/`（`module table`，3 文件 / 1,278 行）：`api.yh` 集中
+  `ModelStore`/`CSym` + `g_model`/`ms()`/`mstore_reset`/`AGGTYPE_LIMIT` + 35 个表操作
+  （scope/ty_push/model_type_push/sym_lookup/ty_*/sig_add/fn_abi/cabi_*/iv_grow）
+  + 值规则（`vk_fold_*/vk_can_assign/sem_fold_*/fp64_norm_bits/vk_msg`）
+  + 字符串标签/枚举成员表 16 个 wrapper + `SYM_*/F_*/VK_*` 常量；
+  `value_kernel.yh`/`tables.yh` 整文件迁入；`tables_reset()` 新增。
+- `support` 收缩到 4 文件 / 1,552 行（缓冲/池/源/会话/目标/`FrontCtx`/`Res`/`ModuleSym`/
+  `static_data`/诊断），**不含任何语义存储、不 import table**；`state_init`/
+  `session_reset` 的表清零改由 `check.sem_init_tables` 调 `table.tables_reset()`。
+- 消费方 45 个文件改限定名 `support.<簇> → table.<簇>` + `import table`；删除 8 处
+  因搬迁变空的 `import support`，清理 support 里 31 段失效注释。
+- CT 镜像 `ct_facts`/`ct_facts_sync`、`ct_type_layout_ok`（`sizeof(CSym)`）随迁改指 table。
+- 测试接线：`build-check.py` 的 7 处模块拷贝清单补 `compiler/table`；6 个 fixture
+  源码改 `table.*`、清单补 table 依赖；`tools/compiler-tests.py` 对无 `.test.yh`
+  的模块输出 SKIP（不再假失败）。
+- 文档：ADR-0027、架构 §3.1/§3.2/§6.2/§6.3、模块职责、README。
+
+**验证**（darwin-arm64，`YH_LLVM_HOST=0` + 全新 `FAST_DIR`，独立 worktree 隔离验证后合并主树）：
+- 主树冷编通过；`just test` 全绿（含 compiler-tests 10/10）。
+- `just selfhost-native` 全绿：cc3→cc4 模块固定点一致（60 产物）、cc4 自解析、
+  modules 19/19、compiler-tests 10/10、project cases **125/125**。
+- 种子差分：同项目 `--emit-asm` 的 `.s`/`obj/*.o`、可执行文件逐字节一致。
+- 层序自检：`table → types/support/errors`；support 不 import table；无误依赖。
+
+**踩坑**：fixture 复制真实模块时漏拷 `table` 会报「模块不存在: table」；
+`tools/compiler-tests.py` 对无测试模块需 SKIP（本就无 `.test.yh` 的 support）。
+
+## 2026-11-11：support 收缩系列（ADR-0024/0025/0026）+ 死文件 model.yh 删除
+
+把 support 从「共享杂物层」收回到「编译器 libc + 语义存储」，平台宿主代码全部迁出。
+
+**ADR-0024（FileScope/front_stage/ABI）**：
+- `FileScope/ImportEnt/ModNsEnt/ModInfo` + `fs()/fscope_reset/绑定查找` → `proj/model.yh`；
+  `sym_sfx` 拆到 `support.msym()`（模块构建态，不属文件作用域）；`proj.init` 负责 fscope_reset。
+- `front_checked_begin/verify/end` → `check/front_stage.yh`（session.front_checked 字段留 support）。
+- `ABIValue/ABICursor/ABIArg/CABI_*` → `check/abi_c.yh`；删只写字段 `FrontCtx.c_cabi_cursor`。
+
+**ADR-0025（console/argv → cmd）**：6 个平台文件 + 2 包装 + 4 个 Win32 extern 迁 `cmd/yh`
+（module main，包装改私有 fn）；`clock.*` 留 support（build/性能消费）。
+
+**ADR-0026（clock 删除）**：删 `support/clock.*` 4 文件 + `clock_ns` 包装 +
+`QueryPerformanceCounter/Frequency` extern；testkit 超时改用 `time.monotonic_ns`（保留 --timeout）；
+lower 死计时清理（`LowerTiming`/`lower_elapsed`/全部 clock 调用，`CheckedLowerStats` 只留
+hits/misses/lowered，--stats 早已删除）；llvm_pipeline 空 stats 块移除。support 至此纯平台无关。
+
+**死文件清理**：删 `support/model.yh`（仅剩零引用死常量 `F_RUNTIME_USED` + 孤儿注释）；
+token/api.yh 两处指向它的过期注释改指 support/api.yh。
+
+**验证**（darwin-arm64，YH_LLVM_HOST=0 避开并行会话触发的 SDK 重编、全新 FAST_DIR）：
+- ADR-0024/0025：`just test` 全绿 + `selfhost-native` 两代固定点一致、project cases 125/125、
+  compiler-tests 10/10；种子差分 `.s`/`obj`/可执行文件逐字节一致。
+- ADR-0026（clock）：完整 `just test` 全绿（TEST_EXIT=0，含 compiler-tests）；种子差分可执行文件一致。
+- model.yh 删除：冷编通过。
+- **遗留**：完整固定点复跑被并行会话在途代码挡住——其新增 `support.cabi_scalar/cabi_param`
+  用裸 `TY_*/ATTR_*`（未跟上 types 拆分，support/api.yh:401），非本片改动；按用户决定等对方
+  自行调和后复跑 selfhost。本片所有失败均溯源到该函数，语料/libs/冷编均绿。
+
+## 2026-11-11：Darwin LLVM 缓存误判过期（整文件摘要 → 产物流配方）
+
+**问题**：每次 `just` 都把完好的 Darwin SDK 判成过期，重编整棵 LLVM（3368 个目标、约 30 分钟）；
+11-11 08:18 起主仓库 `just build` 与 `tmp/wt-s42c` 的 `just test` 两路同时撞同一缓存目录。
+
+**根因**：`vendor/llvm/sdk.lock.json` 在 4e026f5 新增了 `windows_source`/`windows_build` 段
+（Darwin 构建规格未变），而 `tools/llvm-darwin-sdk.py` 的 recipe 判定与
+`tools/llvm-darwin-host.py` 的 `manifest_sha256` 校验比的是**整文件 sha256**；产物校验
+（110 个静态归档 + 5 个工具）实际全部通过。
+
+**改动**：
+- `tools/llvm-darwin-sdk.py`：新增 `recipe_matches()`，配方只认 `darwin_build` 规格
+  （`build_spec()`）、Apple SDK 设置与工具链；身份记录不再写 `manifest_sha256`。
+- `tools/llvm-darwin-host.py`：`load_sdk_record`/`check` 去掉整文件摘要条件，删除 `MANIFEST` 常量。
+- `tools/llvm_recipe.py`：`host_recipe_digest` 去掉 `manifest` 项（`sdk_recipe` 已覆盖产物输入）。
+- `tests/selfhost/darwin/llvm-darwin-sdk.py`：新增配方身份 4 条用例（整文件摘要变化仍命中、
+  工具链变化失效、非 Release 拒绝）；用 importlib 注入临时锁文件（runpy 返回 globals 副本，
+  改 MANIFEST 不生效）。
+
+**验证**：`llvm-darwin-host.py prepare` 首次 16.4s（重编桥 + 探针，未碰 LLVM），二次 0.3s
+（sealed 命中）；`llvm-darwin-sdk.py` / `llvm-darwin-host.py` / `tools/link-closure.py check`
+全 PASS；`just build` 通过。
+
+## 2026-11-10：`types` 模块——语言类型模型从 support 拆出
+
+**结果**（[ADR-0023](adr/0023-yh-types模块独立.md)）：
+- 新增叶子模块 `compiler/types/api.yh`（`module types`）：`TY_*` 20 个类型种类常量
+  + `CType`/`SField`/`TName` 三个结构体；只放数据形状，不持有存储实例。
+- `support` 改为 `support → types`：`ModelStore` 的表字段引用 `types.CType` 等；
+  `ModelStore`/`CSym`/作用域栈/`Res`/ABI 分类结构/`TargetInfo` 不迁（存储机制与
+  语义结果，不是语言类型定义）。
+- 消费面 30 个文件（ast/builtin/check/lower/parse）统一改限定名
+  `support.TY_*`/`support.CType` 等 → `types.*` 并补 `import types`；
+  `lower/module_snapshot_lower_aggregate.yh` 因只剩 types 引用删除 `import support`。
+- `lower/module_snapshot_lower.yh` 的局部 `types`（IR 类型表参数/栈数组）改名
+  `ir_types`——它遮蔽了模块名，否则 `types.TY_*` 会被解析成结构体字段。
+- 文档：架构 §2.1/§3.1/§3.2/§6.2/§6.3 增加 `types` 与 `support → types`；
+  模块职责、编译流程基线、`compiler/README.md` 同步 19 模块。
+- 测试接线：`tests/modules/build-check.py` 所有复制 `compiler/support` 的 fixture
+  （astcheck/support/token/llvmtarget+llvmfront/ctfacts/llvmchecked/llvmlower）
+  同步复制 `compiler/types`，子项目清单补 `types` 依赖；ast/check 子项目依赖补 types。
+- 测试源同步：`tests/modules/projects/{support,llvmfront,ctfacts,gen-split,llvmchecked}`
+  的类型引用改 `types.*` 并补 `import types`；support/llvmfront 的 `project.toml`
+  增加 `types = { path = "types" }`。
+- **顺带修复 HEAD 已有回归**：`d055c87` 把 `scope_push/scope_pop/ty_push` 从 `check`
+  移到 `support`，但 `llvmfront`/`ctfacts`/`llvmlower`/`llvmchecked` 四个 fixture 仍
+  调用 `check.scope_push` 或裸名 `ty_push`，HEAD 上 `just selfhost-native` 的
+  build-check 本就会红；本次按新落点改为 `support.*`（不属于 `types` 拆分本身）。
+
+**验证**（2026-11-10，darwin-arm64）：
+- `YH_CACHE=off just build` 冷编通过；`FAST_DIR=/tmp/yh-fast-types just test` 全绿
+  （377/379，含 libs、modules/test-check、build-cache 与 front-* 门）。
+- `FAST_DIR=/tmp/yh-fast-types-sh SKIP_CORPUS=1 just selfhost-native` 全绿：
+  cc3→cc4 模块固定点一致、cc4 自解析 183 文件 OK、modules 19/19、
+  compiler-tests 10/10、project cases 125/125。
+- 与种子 `bin/yh-darwin-arm64` 差分：同项目 `--emit-asm` 的 `.s`、`obj/*.o`、
+  同一 `-o` 路径可执行文件逐字节相同。
+- 踩坑：共享 `FAST_DIR` 里上一轮中断的暂存会制造 24 个「找不到 `.yh-tmp.o`」
+  假失败；门禁失败先换全新 `FAST_DIR` 复跑。
+
+## 2026-11-10：管线 B0——ModuleJob / WorkerSlot / 命名阶段（编排显式化）
+
+**结果**（[ADR-0022](adr/0022-yh-管线数据结构契约.md)，方案 §6 B0）：
+- `build.api.yh` 新增 `ModuleJob`（模块/mode 位标志/依赖接口表/符号后缀/构建目录/
+  汇编目录/缓存指纹），成为 worker 唯一输入；`mb_job_make` 统一组装，
+  `mb_emit_indexed_module(m, main_off, main_len, out_dir, salt)` 改为
+  `mb_emit_job(*ModuleJob)`（`mb_emit_module` 已被 `--emit-module` 入口占用）。
+- `build_scheduler.yh` 用 `WorkerSlot{state,pid,action_id}` 取代
+  `states/pids/keys` 三平行数组，状态改 `SLOT_*` 命名常量；`fork`/`YH_NO_FORK`/
+  Windows 子进程三条路径都改为传 job，`--emit-module` argv 协议不变。
+- `module_emit.yh` 定义 `MB_PASS2_*` 常量取代 `mb_pass2_file` 魔数 0–5；
+  `mb_llvm_module_paths`/`mb_llvm_emit_module` 改收 `build_off/build_len`
+  （父进程已解析，worker 不再重算 `proj.build_dir`）。
+- 过渡边界（写进代码注释）：`job.mode` 在 worker 入口落回会话开关，B1 收编后删除；
+  `job.dep` 与 `bc().dep` 共享底层缓冲，父进程调度用的依赖表暂留 `BuildCtx`。
+
+**验证**（2026-11-10，darwin-arm64；并行会话占主树，按约定用 HEAD 快照树
+`git archive` + 本片补丁隔离验证）：
+- 快照树 `YH_CACHE=off just build`；`just test` 全绿（三层语料、libs、
+  test-check、build-cache、tools 门含 front-* 影子门）。
+- 与种子 `bin/yh-darwin-arm64` 同项目差分：`--emit-asm` 的 `.s`、`obj/*.o`
+  逐字节相同；同一 `-o` 路径构建的可执行文件逐字节相同。
+- 未新增 `.yh` 用例：本片是零行为变化的纯搬移，多模块/依赖/缓存/测试模式
+  已由 `tests/modules/test-check.py`、`build-cache/check.py` 与 `libs` 语料覆盖。
+
+**踩坑记录**：并行会话改 `ast`/`check`/`link` 时在主树跑 `just dev` 增量构建，
+编译到一半的源码会产出不一致的编译器二进制（表现为随机的「重复的顶层声明」
+或 TOML 误读）；验证必须用 `just build` 冷编或快照树。
+
+
 
 **结果**：
 - 纯 `Res` 操作上移 `support`：新增 `support.res_copy`（与既有 `support.res_reset`

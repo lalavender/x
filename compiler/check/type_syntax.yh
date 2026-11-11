@@ -3,7 +3,9 @@ import ast
 import comptime
 import errors
 import proj
+import types
 import support
+import table
 import token
 
 // ============================================================================
@@ -19,20 +21,20 @@ import token
 
 // type_syntax_builtin：内建类型 token → 类型表编号。
 fn type_syntax_builtin(k int) int {
-    if (k == token.TK_INT) { return support.TY_I32 }
-    if (k == token.TK_I8) { return support.TY_I8 }
-    if (k == token.TK_I16) { return support.TY_I16 }
-    if (k == token.TK_I32) { return support.TY_I32 }
-    if (k == token.TK_I64) { return support.TY_I64 }
-    if (k == token.TK_U8) { return support.TY_U8 }
-    if (k == token.TK_U16) { return support.TY_U16 }
-    if (k == token.TK_U32) { return support.TY_U32 }
-    if (k == token.TK_U64) { return support.TY_U64 }
-    if (k == token.TK_F32) { return support.TY_F32 }
-    if (k == token.TK_F64) { return support.TY_F64 }
-    if (k == token.TK_BOOL) { return support.TY_BOOL }
-    if (k == token.TK_CHAR) { return support.TY_CHAR }
-    return support.TY_VOID
+    if (k == token.TK_INT) { return types.TY_I32 }
+    if (k == token.TK_I8) { return types.TY_I8 }
+    if (k == token.TK_I16) { return types.TY_I16 }
+    if (k == token.TK_I32) { return types.TY_I32 }
+    if (k == token.TK_I64) { return types.TY_I64 }
+    if (k == token.TK_U8) { return types.TY_U8 }
+    if (k == token.TK_U16) { return types.TY_U16 }
+    if (k == token.TK_U32) { return types.TY_U32 }
+    if (k == token.TK_U64) { return types.TY_U64 }
+    if (k == token.TK_F32) { return types.TY_F32 }
+    if (k == token.TK_F64) { return types.TY_F64 }
+    if (k == token.TK_BOOL) { return types.TY_BOOL }
+    if (k == token.TK_CHAR) { return types.TY_CHAR }
+    return types.TY_VOID
 }
 
 // type_syntax_named：解析单段或模块限定（m.T）类型名。
@@ -42,25 +44,25 @@ fn type_syntax_named(t ast.AstType) int {
         if (support.module_mode() == 0) {
             return errors.err_lc(t.err_line, t.err_col, "限定类型只在模块模式可用")
         }
-        let qb int = support.mod_file_binding_pool(t.qual_off, t.qual_len)
+        let qb int = proj.mod_file_binding_pool(t.qual_off, t.qual_len)
         if (qb < 0) {
             return errors.err_lc(t.line, t.col, "点号左侧不是导入的模块名")
         }
-        let qe int = support.mod_ns_lookup_pool(qb, t.name_off, t.name_len, 1)
+        let qe int = proj.mod_ns_lookup_pool(qb, t.name_off, t.name_len, 1)
         if (qe < 0) {
             return errors.err_lc(t.line, t.col, "模块没有导出该类型")
         }
         let qi int = 0
-        for qi < support.fs().import_n {
-            if (support.fs().import_mod[qi] == qb) {
-                support.fs().import_used[qi] = 1
+        for qi < proj.fs().import_n {
+            if (proj.fs().import_mod[qi] == qb) {
+                proj.fs().import_used[qi] = 1
                 break
             }
             qi += 1
         }
-        return support.fs().mods[qb].ns[qe].tid
+        return proj.fs().mods[qb].ns[qe].tid
     }
-    let tid int = support.ty_lookup_name_pool(t.name_off, t.name_len)
+    let tid int = table.ty_lookup_name_pool(t.name_off, t.name_len)
     if (tid < 0) {
         return errors.err_lc(t.err_line, t.err_col, "未知类型（类型必须先定义）")
     }
@@ -86,7 +88,7 @@ fn type_syntax_array(t ast.AstType) int {
     if (t.len < 0) {
         return errors.fail("内部错误：数组类型缺少长度")
     }
-    if (support.ms().types[elem].size < 0) {
+    if (table.ms().types[elem].size < 0) {
         return comptime.ct_layout_array(elem, t.len, -1, t.line, t.col)
     }
     return ty_array(elem, t.len)
@@ -109,14 +111,14 @@ fn type_syntax_fn(t ast.AstType) int {
         pts[i] = pt
         i += 1
     }
-    let ret int = support.TY_VOID
+    let ret int = types.TY_VOID
     if (t.child >= 0) {
         ret = type_syntax_resolve(t.child)
         if (ret < 0) {
             return -1
         }
     }
-    let first int = support.ms().sigparam_n
+    let first int = table.ms().sigparam_n
     i = 0
     for i < t.param_n {
         if (ty_sig_param(pts[i]) != 0) {
@@ -169,11 +171,11 @@ fn type_syntax_resolve(id int) int {
 // type_syntax_length_sym：数组长度写成单个标识符时，若是尚未就绪的整数
 // 常量则返回符号，供 parse 登记延迟布局请求；否则 -1。
 fn type_syntax_length_sym(start int, n int) int {
-    let sym int = support.sym_lookup(start, n)
-    if (sym >= 0 && sym < support.ms().sym_n
-        && support.ms().syms[sym].kind == support.SYM_CONST
-        && support.ms().syms[sym].const_ready == 0
-        && support.ty_is_integer(support.ms().syms[sym].type_id) != 0) {
+    let sym int = table.sym_lookup(start, n)
+    if (sym >= 0 && sym < table.ms().sym_n
+        && table.ms().syms[sym].kind == table.SYM_CONST
+        && table.ms().syms[sym].const_ready == 0
+        && table.ty_is_integer(table.ms().syms[sym].type_id) != 0) {
         return sym
     }
     return -1
@@ -211,28 +213,28 @@ fn type_syntax_sizeof_path(first int, after int) int {
         if (i != after) {
             return -2
         }
-        let qb int = support.mod_file_binding(name_start, name_len)
+        let qb int = proj.mod_file_binding(name_start, name_len)
         if (qb < 0) {
             return -2
         }
-        let qe int = support.mod_ns_lookup(qb, tstart, tlen, 1)
+        let qe int = proj.mod_ns_lookup(qb, tstart, tlen, 1)
         if (qe < 0) {
             return -2
         }
         let qi int = 0
-        for qi < support.fs().import_n {
-            if (support.fs().import_mod[qi] == qb) {
-                support.fs().import_used[qi] = 1
+        for qi < proj.fs().import_n {
+            if (proj.fs().import_mod[qi] == qb) {
+                proj.fs().import_used[qi] = 1
                 break
             }
             qi += 1
         }
-        tid = support.fs().mods[qb].ns[qe].tid
+        tid = proj.fs().mods[qb].ns[qe].tid
     } else {
         if (i != after) {
             return -2
         }
-        tid = support.ty_lookup_name(name_start, name_len)
+        tid = table.ty_lookup_name(name_start, name_len)
         if (tid < 0) {
             return -2
         }

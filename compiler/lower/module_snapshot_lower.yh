@@ -1,7 +1,9 @@
 module lower
 import token
 import check
+import types
 import support
+import table
 import ast
 import ir
 import proj
@@ -57,8 +59,8 @@ fn checked_lower_report(l *CheckedLower, message *char) void {
 // checked_lower_runtime_name：隔离 yh 分配器符号，避免覆盖内嵌 LLVM 的 libc 分配器。
 fn checked_lower_runtime_name(flags int, length *int) *char {
     let name *char = 0.to_type(*char)
-    if ((flags & support.F_RUNTIME_MALLOC) != 0) { name = "__yh_runtime_malloc" }
-    if ((flags & support.F_RUNTIME_FREE) != 0) { name = "__yh_runtime_free" }
+    if ((flags & table.F_RUNTIME_MALLOC) != 0) { name = "__yh_runtime_malloc" }
+    if ((flags & table.F_RUNTIME_FREE) != 0) { name = "__yh_runtime_free" }
     if (name == 0) { length[0] = 0; return 0.to_type(*char) }
     let n int = 0
     for name[n] != 0 { n += 1 }
@@ -74,17 +76,17 @@ fn checked_lower_name(l *CheckedLower, off int, length int, flags int, source_ty
     let source_name *char = (l.store.names + off).to_type(*char)
     let entry_main int = support.cstr_eq(source_name, "main") != 0 &&
         (l.store.is_entry != 0 || l.store.suffix_len == 0)
-    if ((flags & (support.F_EXTERN | support.F_CABI | support.F_INTRINSIC | support.F_LINUX_SYSCALL)) != 0
+    if ((flags & (table.F_EXTERN | table.F_CABI | table.F_INTRINSIC | table.F_LINUX_SYSCALL)) != 0
         || entry_main != 0) { suffix = 0 }
     let runtime_name_len int = 0
     let runtime_name *char = checked_lower_runtime_name(flags, &runtime_name_len)
     let original *char = runtime_name != 0 ? runtime_name : source_name
     let name_len int = runtime_name != 0 ? runtime_name_len : length
     let source_sig int = source_type >= 0 && source_type < l.store.type_n &&
-        l.store.types[source_type].kind == support.TY_FN ? l.store.types[source_type].sub : -1
+        l.store.types[source_type].kind == types.TY_FN ? l.store.types[source_type].sub : -1
     let versioned int = source_sig >= 0 && l.store.sig_abi[source_sig] == support.ABI_YH &&
-        ((flags & support.F_EXTERN) == 0 || (flags & support.F_MODULE_IMPORT) != 0) &&
-        (flags & (support.F_CABI | support.F_INTRINSIC | support.F_LINUX_SYSCALL)) == 0 &&
+        ((flags & table.F_EXTERN) == 0 || (flags & table.F_MODULE_IMPORT) != 0) &&
+        (flags & (table.F_CABI | table.F_INTRINSIC | table.F_LINUX_SYSCALL)) == 0 &&
         entry_main == 0 ? 1 : 0
     if (suffix > 0 && check.checked_name_valid(l.store, l.store.suffix_off, suffix) == 0) { return 0 }
     let version *char = versioned != 0 ? "$yhllvmv1" : ""
@@ -103,15 +105,15 @@ fn checked_lower_name(l *CheckedLower, off int, length int, flags int, source_ty
 fn checked_lower_signature(l *CheckedLower, off int, length int, flags int,
     source_type int, defined int, source int, offset int) int {
     if (source_type < 0 || source_type >= l.store.type_n
-        || l.store.types[source_type].kind != support.TY_FN) { return -1 }
+        || l.store.types[source_type].kind != types.TY_FN) { return -1 }
     let sig int = l.store.types[source_type].sub
     let vararg int = l.store.sig_vararg[sig]
-    let runtime int = flags & (support.F_RUNTIME_MEMCPY | support.F_RUNTIME_STRLEN
-        | support.F_RUNTIME_MALLOC | support.F_RUNTIME_FREE | support.F_RUNTIME_PRINTF)
-    let syscall int = flags & support.F_LINUX_SYSCALL
-    if (vararg == 1 && (flags & (support.F_EXTERN | support.F_INTRINSIC)) == 0
+    let runtime int = flags & (table.F_RUNTIME_MEMCPY | table.F_RUNTIME_STRLEN
+        | table.F_RUNTIME_MALLOC | table.F_RUNTIME_FREE | table.F_RUNTIME_PRINTF)
+    let syscall int = flags & table.F_LINUX_SYSCALL
+    if (vararg == 1 && (flags & (table.F_EXTERN | table.F_INTRINSIC)) == 0
         || vararg == 2 && l.store.sig_abi[sig] != support.ABI_YH
-        || (flags & support.F_INTRINSIC) != 0 && runtime == 0 && syscall == 0) {
+        || (flags & table.F_INTRINSIC) != 0 && runtime == 0 && syscall == 0) {
         return -2
     }
     let ret int = checked_lower_module_type(l, l.store.sig_ret[sig])
@@ -140,9 +142,9 @@ fn checked_lower_signature(l *CheckedLower, off int, length int, flags int,
     symbol.abi = l.store.sig_abi[sig] == support.ABI_YH ?
         ir.IR_ABI_YH_LLVM_V1 : l.store.sig_abi[sig]
     symbol.variadic = l.store.sig_vararg[sig]
-    symbol.no_return = ((flags & support.F_NORETURN) != 0).to_type(int)
+    symbol.no_return = ((flags & table.F_NORETURN) != 0).to_type(int)
     // extern 定义提供裸 C 符号；即使未标 pub，也必须对模块外链接方可见。
-    symbol.linkage = defined == 0 || (flags & (support.F_CABI | support.F_PUB)) != 0 ?
+    symbol.linkage = defined == 0 || (flags & (table.F_CABI | table.F_PUB)) != 0 ?
         ir.IR_MODULE_LINK_EXTERNAL : ir.IR_MODULE_LINK_PRIVATE
     symbol.defined = defined
     symbol.source = source
@@ -154,19 +156,19 @@ fn checked_lower_signature(l *CheckedLower, off int, length int, flags int,
 
 // checked_lower_tables：创建 canonical 私有类型表和独立模块类型表，并建立显式快照映射。
 // f32/f64 以 LLVM 原生标量宽度进入快照映射，其他尚未 lowering 的类型仍由逐项检查拒绝。
-fn checked_lower_tables(l *CheckedLower, types *ir.IRType) int {
+fn checked_lower_tables(l *CheckedLower, ir_types *ir.IRType) int {
     let i int = 0
     for i <= ir.IR_TY_PTR_LAST {
-        types[i].kind = i
-        types[i].elem = -1
-        types[i].bits = 0
-        if (i == ir.IR_TY_BOOL || i == ir.IR_TY_I8 || i == ir.IR_TY_U8) { types[i].bits = 8 }
-        if (i == ir.IR_TY_I16 || i == ir.IR_TY_U16) { types[i].bits = 16 }
-        if (i == ir.IR_TY_I32 || i == ir.IR_TY_U32 || i == ir.IR_TY_F32) { types[i].bits = 32 }
+        ir_types[i].kind = i
+        ir_types[i].elem = -1
+        ir_types[i].bits = 0
+        if (i == ir.IR_TY_BOOL || i == ir.IR_TY_I8 || i == ir.IR_TY_U8) { ir_types[i].bits = 8 }
+        if (i == ir.IR_TY_I16 || i == ir.IR_TY_U16) { ir_types[i].bits = 16 }
+        if (i == ir.IR_TY_I32 || i == ir.IR_TY_U32 || i == ir.IR_TY_F32) { ir_types[i].bits = 32 }
         if (i == ir.IR_TY_I64 || i == ir.IR_TY_U64 || i == ir.IR_TY_F64 || i >= ir.IR_TY_PTR) {
-            types[i].bits = 64
+            ir_types[i].bits = 64
         }
-        if (i >= ir.IR_TY_PTR) { types[i].elem = i - ir.IR_TY_PTR }
+        if (i >= ir.IR_TY_PTR) { ir_types[i].elem = i - ir.IR_TY_PTR }
         let layout ir.IRModuleType
         if (i >= ir.IR_TY_PTR) {
             // 模块层指针统一 IR_TY_PTR；元素经 type_map 精确对照，LLVM 文本仍是 opaque ptr。
@@ -177,8 +179,8 @@ fn checked_lower_tables(l *CheckedLower, types *ir.IRType) int {
             layout.elem = l.private_type_map[i - ir.IR_TY_PTR]
         } else {
             layout.kind = i
-            layout.bits = types[i].bits
-            layout.size = types[i].bits / 8
+            layout.bits = ir_types[i].bits
+            layout.size = ir_types[i].bits / 8
             layout.align = layout.size == 0 ? 1 : layout.size
             layout.elem = -1
         }
@@ -187,9 +189,9 @@ fn checked_lower_tables(l *CheckedLower, types *ir.IRType) int {
         l.private_type_map[i] = added
         i += 1
     }
-    types[ir.IR_TY_FN_PTR].kind = ir.IR_TY_FN_PTR
-    types[ir.IR_TY_FN_PTR].elem = -1
-    types[ir.IR_TY_FN_PTR].bits = 64
+    ir_types[ir.IR_TY_FN_PTR].kind = ir.IR_TY_FN_PTR
+    ir_types[ir.IR_TY_FN_PTR].elem = -1
+    ir_types[ir.IR_TY_FN_PTR].bits = 64
     l.private_type_map[ir.IR_TY_FN_PTR] = l.private_type_map[ir.IR_TY_PTR]
     i = 0
     for i < l.store.type_n {
@@ -218,14 +220,14 @@ fn checked_lower_tables(l *CheckedLower, types *ir.IRType) int {
 fn checked_lower_is_aggregate(store *check.CheckedStorage, source_type int) int {
     if (source_type < 0 || source_type >= store.type_n) { return 0 }
     let kind int = store.types[source_type].kind
-    return (kind == support.TY_ARRAY || kind == support.TY_STRUCT || kind == support.TY_UNION
-        || kind == support.TY_SLICE).to_type(int)
+    return (kind == types.TY_ARRAY || kind == types.TY_STRUCT || kind == types.TY_UNION
+        || kind == types.TY_SLICE).to_type(int)
 }
 
 // checked_lower_module_type：把函数签名类型登记到模块类型表，聚合递归保留完整布局。
 fn checked_lower_function_type(l *CheckedLower, source_type int) int {
     if (source_type < 0 || source_type >= l.store.type_n
-        || l.store.types[source_type].kind != support.TY_FN) { return -1 }
+        || l.store.types[source_type].kind != types.TY_FN) { return -1 }
     if (l.function_type_map[source_type] >= 0) { return l.function_type_map[source_type] }
     let sig int = l.store.types[source_type].sub
     if (sig < 0 || sig >= l.store.sig_n) { return -1 }
@@ -264,7 +266,7 @@ fn checked_lower_function_type(l *CheckedLower, source_type int) int {
 
 fn checked_lower_module_type(l *CheckedLower, source_type int) int {
     if (source_type < 0 || source_type >= l.store.type_n) { return -1 }
-    if (l.store.types[source_type].kind == support.TY_FN) {
+    if (l.store.types[source_type].kind == types.TY_FN) {
         return checked_lower_function_type(l, source_type)
     }
     if (checked_lower_is_aggregate(l.store, source_type) != 0) {
@@ -285,7 +287,7 @@ fn checked_lower_mark_taken(l *CheckedLower) void {
         if (node.kind == ast.AST_EXPR_UNARY && node.op == token.TK_AMP && node.child0 >= 0) {
             let child ast.AstExpr = l.store.expressions[node.child0]
             if (child.kind == ast.AST_EXPR_PRIMARY && child.child0 < 0
-                && child.sym_kind == support.SYM_VAR) {
+                && child.sym_kind == table.SYM_VAR) {
                 let row int = checked_lower_binding(l, &child)
                 if (row >= 0) {
                     let binding ast.AstBinding = l.store.bindings[row]
@@ -302,7 +304,7 @@ fn checked_lower_mark_taken(l *CheckedLower) void {
 }
 
 // checked_lower_function：以快照绑定初始化纯 builder，产物经模块增建接口深拷贝后释放临时表。
-fn checked_lower_function(l *CheckedLower, symbol int, types *ir.IRType) int {
+fn checked_lower_function(l *CheckedLower, symbol int, ir_types *ir.IRType) int {
     let ctx *check.CheckedFunction = &l.function
     let decl ast.AstDecl = l.store.declarations[ctx.decl_row]
     let sig int = l.store.types[decl.type_id].sub
@@ -323,7 +325,7 @@ fn checked_lower_function(l *CheckedLower, symbol int, types *ir.IRType) int {
     if (ast_ir_b_init(b, params, count, 16) != 0) { ast_ir_b_release(b); return -1 }
     b.binding_first = ctx.binding_first
     b.ret_ir_type = ret
-    b.types = types
+    b.types = ir_types
     let entry int = ast_ir_b_alloc_block(b)
     ast_ir_b_enter_block(b, entry)
     let param_index int = 0
@@ -414,7 +416,7 @@ fn checked_lower_function(l *CheckedLower, symbol int, types *ir.IRType) int {
     for scan < ctx.expr_after && scan < l.store.expression_n {
         let enode ast.AstExpr = l.store.expressions[scan]
         if (enode.kind == ast.AST_EXPR_ARRAY && checked_lower_is_slice(l.store, enode.type_id) != 0) {
-            let sty support.CType = l.store.types[enode.type_id]
+            let sty types.CType = l.store.types[enode.type_id]
             if (sty.elem < 0 || sty.elem >= l.store.type_n) {
                 ast_ir_b_release(b); return -2
             }
@@ -451,9 +453,9 @@ fn checked_lower_function(l *CheckedLower, symbol int, types *ir.IRType) int {
         let binding ast.AstBinding = l.store.bindings[ctx.binding_first + i]
         let addr int = -1
         if (checked_lower_is_aggregate(l.store, binding.sym_type_id) != 0) {
-            let aty support.CType = l.store.types[binding.sym_type_id]
-            if ((aty.kind != support.TY_ARRAY && aty.kind != support.TY_STRUCT
-                && aty.kind != support.TY_UNION && aty.kind != support.TY_SLICE)
+            let aty types.CType = l.store.types[binding.sym_type_id]
+            if ((aty.kind != types.TY_ARRAY && aty.kind != types.TY_STRUCT
+                && aty.kind != types.TY_UNION && aty.kind != types.TY_SLICE)
                 || aty.size <= 0 || aty.align <= 0) {
                 l.last_token = binding.name_token
                 l.reason = "首片仅支持定长数组/结构体/联合体/切片聚合存储"
@@ -487,7 +489,7 @@ fn checked_lower_function(l *CheckedLower, symbol int, types *ir.IRType) int {
     let body ir.IRFunction
     body.abi = l.store.sig_abi[sig] == support.ABI_YH ?
         ir.IR_ABI_YH_LLVM_V1 : l.store.sig_abi[sig]; body.target_id = l.output.target.key
-    body.ret_type = ret; body.types = types; body.type_count = ir.IR_TY_LAST + 1
+    body.ret_type = ret; body.types = ir_types; body.type_count = ir.IR_TY_LAST + 1
     body.insts = b.insts; body.inst_count = b.inst_count
     body.blocks = b.blocks; body.block_count = b.block_count
     body.phis = b.phis; body.phi_count = b.phi_count
@@ -510,8 +512,8 @@ fn checked_lower_function(l *CheckedLower, symbol int, types *ir.IRType) int {
 // checked_lower_prepare_tables：建立 canonical 类型/来源/静态数据/全局映射。
 // 先完成 checked_lower_tables（函数签名登记依赖模块类型下标），再登记静态数据
 // 与有运行期实体的全局声明；返回 0、-2（首片不支持）或 -1（内部错误）。
-fn checked_lower_prepare_tables(l *CheckedLower, types *ir.IRType) int {
-    let result int = checked_lower_tables(l, types)
+fn checked_lower_prepare_tables(l *CheckedLower, ir_types *ir.IRType) int {
+    let result int = checked_lower_tables(l, ir_types)
     if (result != 0) { return result }
     result = checked_lower_static_data(l)
     if (result != 0) { return result }
@@ -535,9 +537,9 @@ fn checked_lower_declare_functions(l *CheckedLower) int {
         l.function = l.store.functions[i]
         l.flow.loop_depth = 0
         let node ast.AstDecl = l.store.declarations[l.function.decl_row]
-        let symbol support.CSym = l.store.symbols[node.sym_id]
+        let symbol table.CSym = l.store.symbols[node.sym_id]
         l.last_token = node.first
-        if ((symbol.flags & support.F_COMPTIME) == 0) {
+        if ((symbol.flags & table.F_COMPTIME) == 0) {
             l.reason = "首片不支持此函数签名"
             let declared int = checked_lower_signature(l, symbol.name_off, symbol.name_len,
                 symbol.flags, node.type_id, 1, l.source_map[node.file_id],
@@ -562,19 +564,17 @@ fn checked_lower_declare_functions(l *CheckedLower) int {
 //   * 匿名全局/重定位：static_data 行、按 label 去重的字符串与模块 global reloc；
 //   * 来源：source_map、函数 locs 与 token 偏移，命中后必须按当前源码重建位置。
 // 其他函数体不是每个函数的输入依赖；缓存键不能整模块源码哈希。
-fn checked_lower_build_functions(l *CheckedLower, types *ir.IRType,
-    timing *LowerTiming) int {
+fn checked_lower_build_functions(l *CheckedLower, ir_types *ir.IRType) int {
     let i int = 0
     for i < l.store.function_n {
         l.function = l.store.functions[i]
         l.flow.loop_depth = 0
         let node ast.AstDecl = l.store.declarations[l.function.decl_row]
-        let symbol support.CSym = l.store.symbols[node.sym_id]
+        let symbol table.CSym = l.store.symbols[node.sym_id]
         l.last_token = node.first; l.reason = "首片不支持此语句或表达式"
-        if ((symbol.flags & support.F_COMPTIME) == 0) {
+        if ((symbol.flags & table.F_COMPTIME) == 0) {
             // PL1b：符号名构造 + 线性符号查找。这里的查找是 O(函数数)，
             // 单模块放很多函数时会变成 O(n²)——PL2 的超线性就有它一份。
-            let t_lookup u64 = support.clock_ns()
             let name *char = checked_lower_name(l, symbol.name_off, symbol.name_len,
                 symbol.flags, node.type_id)
             if (name == 0) {
@@ -594,12 +594,8 @@ fn checked_lower_build_functions(l *CheckedLower, types *ir.IRType,
                 l.reason = "内部错误：函数符号缺失"
                 return -1
             }
-            if (timing != 0) {
-                timing.lookup_ns += lower_elapsed(t_lookup, support.clock_ns())
-            }
             // LA3：函数键只覆盖本函数 token 流与模块环境；命中时合并迷你模块，
             // 未命中才重新 lowering。cache 禁用时行为与 LA2b 完全相同。
-            let t_cache u64 = support.clock_ns()
             let key [ir.IR_FUNCTION_CACHE_KEY_SIZE]u8
             let cacheable int = 0
             if (l.cache_enabled != 0
@@ -634,9 +630,6 @@ fn checked_lower_build_functions(l *CheckedLower, types *ir.IRType,
                             free(name.to_type(*void))
                             return -1
                         }
-                        if (timing != 0) {
-                            timing.cache_ns += lower_elapsed(t_cache, support.clock_ns())
-                        }
                         free(name.to_type(*void))
                         i += 1
                         continue
@@ -649,14 +642,7 @@ fn checked_lower_build_functions(l *CheckedLower, types *ir.IRType,
                 }
                 l.cache_misses += 1
             }
-            if (timing != 0) {
-                timing.cache_ns += lower_elapsed(t_cache, support.clock_ns())
-            }
-            let t_fn u64 = support.clock_ns()
-            let result int = checked_lower_function(l, found, types)
-            if (timing != 0) {
-                timing.fn_ns += lower_elapsed(t_fn, support.clock_ns())
-            }
+            let result int = checked_lower_function(l, found, ir_types)
             if (result != 0) {
                 free(name.to_type(*void))
                 return result
@@ -664,7 +650,6 @@ fn checked_lower_build_functions(l *CheckedLower, types *ir.IRType,
             l.cache_lowered += 1
             if (cacheable != 0 && l.cache_out != 0) {
                 // 未命中后把本函数 IR 序列化进缓存（PC2 v3）：写缓存构建的大头。
-                let t_capture u64 = support.clock_ns()
                 let data *u8 = 0
                 let size int = 0
                 let captured int = ir.ir_function_cache_capture(l.output,
@@ -679,9 +664,6 @@ fn checked_lower_build_functions(l *CheckedLower, types *ir.IRType,
                 } else if (captured < 0) {
                     free(name.to_type(*void))
                     return -1
-                }
-                if (timing != 0) {
-                    timing.capture_ns += lower_elapsed(t_capture, support.clock_ns())
                 }
             }
             free(name.to_type(*void))
@@ -710,12 +692,6 @@ fn checked_lower_release(l *CheckedLower) void {
         l.flow.loops = 0.to_type(*CheckedLoop)
         l.flow.loop_depth = 0
     }
-}
-
-// lower_elapsed：两个单调时刻的差；时钟失败（0）或逆序时返回 0，
-// 避免把「时钟不可用」记成巨大的正延迟。
-fn lower_elapsed(start u64, end u64) u64 {
-    return end >= start ? end - start : 0
 }
 
 // lower_module_impl：prepare → declare → build（可查/写函数缓存）→ 模块 verifier。
@@ -775,37 +751,18 @@ fn lower_module_impl(unit *check.CheckedModule, out *ir.IRModule,
     if (l.store.static_data_n > 0 && l.static_map == 0) { tables_ok = 0 }
     let type_map [ir.IR_TY_LAST + 1]int
     l.private_type_map = &type_map[0]
-    let types [ir.IR_TY_LAST + 1]ir.IRType
+    let ir_types [ir.IR_TY_LAST + 1]ir.IRType
     let result int = -1
     // 先建立 canonical 类型映射与模块来源，函数签名才能在符号表里登记模块类型下标。
     if (l.source_map != 0 && l.source_type_map != 0 && flow.loops != 0
         && tables_ok != 0) {
-        // PL1：四段互斥计时；时钟失败（0）时 lower_elapsed 给 0，不会出负数。
-        let t0 u64 = support.clock_ns()
-        result = checked_lower_prepare_tables(&l, &types[0])
-        let t1 u64 = support.clock_ns()
+        result = checked_lower_prepare_tables(&l, &ir_types[0])
         if (result == 0) { result = checked_lower_declare_functions(&l) }
-        let t2 u64 = support.clock_ns()
-        let timing LowerTiming
-        timing.lookup_ns = 0; timing.cache_ns = 0; timing.fn_ns = 0
-        timing.capture_ns = 0
         if (result == 0) {
-            result = checked_lower_build_functions(&l, &types[0], &timing)
+            result = checked_lower_build_functions(&l, &ir_types[0])
         }
-        let t3 u64 = support.clock_ns()
         if (result == 0 && ir.ir_module_verify(&candidate) != 0) {
             result = -1; l.reason = "内部错误：模块校验失败"
-        }
-        let t4 u64 = support.clock_ns()
-        if (stats != 0) {
-            stats.prep_ns += lower_elapsed(t0, t1)
-            stats.decl_ns += lower_elapsed(t1, t2)
-            stats.build_ns += lower_elapsed(t2, t3)
-            stats.verify_ns += lower_elapsed(t3, t4)
-            stats.lookup_ns += timing.lookup_ns
-            stats.cache_ns += timing.cache_ns
-            stats.fn_ns += timing.fn_ns
-            stats.capture_ns += timing.capture_ns
         }
     }
     if (stats != 0) {

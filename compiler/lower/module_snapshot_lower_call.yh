@@ -1,6 +1,8 @@
 module lower
 import check
+import types
 import support
+import table
 import ast
 import ir
 
@@ -46,12 +48,12 @@ fn checked_lower_call_args(l *CheckedLower, flow *CheckedFlow, link int, sig int
         if (l.store.sig_vararg[sig] != 2 || l.store.sig_abi[sig] != support.ABI_YH) { return -1 }
         let slice_type int = l.store.sig_params[l.store.sig_first[sig] + fixed_count]
         if (slice_type < 0 || slice_type >= l.store.type_n
-            || l.store.types[slice_type].kind != support.TY_SLICE) { return -1 }
+            || l.store.types[slice_type].kind != types.TY_SLICE) { return -1 }
         let elem_type int = l.store.types[slice_type].elem
         let value int = -1
         let value_kind int = checked_lower_type(l, elem_type)
         if (checked_lower_is_aggregate(l.store, elem_type) != 0) {
-            let elem support.CType = l.store.types[elem_type]
+            let elem types.CType = l.store.types[elem_type]
             if (elem.size <= 0 || elem.align <= 0) { return -2 }
             value = ast_ir_b_add_alloca(&l.builder, elem.size, elem.align)
             if (value < 0) { return -1 }
@@ -73,7 +75,7 @@ fn checked_lower_call_args(l *CheckedLower, flow *CheckedFlow, link int, sig int
     }
     let source_type int = l.store.sig_params[l.store.sig_first[sig] + next[0]]
     if (checked_lower_is_aggregate(l.store, source_type) != 0) {
-        let ty support.CType = l.store.types[source_type]
+        let ty types.CType = l.store.types[source_type]
         let copy int = ast_ir_b_add_alloca(&l.builder, ty.size, ty.align)
         if (copy < 0) { return -1 }
         let copied int = checked_lower_aggregate_store(l, flow, copy, source_type, item.child1)
@@ -84,9 +86,9 @@ fn checked_lower_call_args(l *CheckedLower, flow *CheckedFlow, link int, sig int
         let arg ast.AstExpr = l.store.expressions[item.child1]
         let value int = -1
         if (source_type >= 0 && source_type < l.store.type_n
-            && l.store.types[source_type].kind == support.TY_PTR
+            && l.store.types[source_type].kind == types.TY_PTR
             && arg.type_id >= 0 && arg.type_id < l.store.type_n
-            && l.store.types[arg.type_id].kind == support.TY_ARRAY) {
+            && l.store.types[arg.type_id].kind == types.TY_ARRAY) {
             value = checked_lower_array_decay(l, flow, item.child1, source_type)
         } else {
             value = checked_lower_expr_inner(l, flow, item.child1)
@@ -126,11 +128,11 @@ fn checked_lower_call_arg_count(l *CheckedLower, link int) int {
 fn checked_lower_pack_call_varargs(l *CheckedLower, values *ir.IRCallArg,
     fixed_count int, tail_count int, result_shift int, slice_type int) int {
     if (slice_type < 0 || slice_type >= l.store.type_n || tail_count < 0
-        || l.store.types[slice_type].kind != support.TY_SLICE) { return -2 }
+        || l.store.types[slice_type].kind != types.TY_SLICE) { return -2 }
     let b *AstIRBuilder = &l.builder
-    let slice support.CType = l.store.types[slice_type]
+    let slice types.CType = l.store.types[slice_type]
     let elem_type int = slice.elem
-    let elem support.CType = l.store.types[elem_type]
+    let elem types.CType = l.store.types[elem_type]
     if (elem.size <= 0 || elem.align <= 0
         || tail_count > 0 && elem.size > 2147483647 / tail_count) { return -2 }
     let backing int = -1
@@ -176,17 +178,17 @@ fn checked_lower_call(l *CheckedLower, flow *CheckedFlow, expr_id int) int {
     if (node.child0 < 0 || node.child0 >= l.store.expression_n) { return -2 }
     let base ast.AstExpr = l.store.expressions[node.child0]
     let direct int = (base.kind == ast.AST_EXPR_PRIMARY && base.child0 < 0
-        && base.sym_kind == support.SYM_FN).to_type(int)
+        && base.sym_kind == table.SYM_FN).to_type(int)
     let function_type int = direct != 0 ? base.sym_type_id : base.type_id
     if (function_type < 0 || function_type >= l.store.type_n
-        || l.store.types[function_type].kind != support.TY_FN) { return -2 }
+        || l.store.types[function_type].kind != types.TY_FN) { return -2 }
     // 快照符号表在作用域弹出后可能复用槽位：被调目标必须仍解析到同名同型的
     // 函数符号，回收槽造成的身份错配一律拒绝，不按陈旧 sym_id 静默取名。
     if (direct != 0) {
-        if ((base.sym_flags & support.F_COMPTIME) != 0 || base.sym_id < 0
+        if ((base.sym_flags & table.F_COMPTIME) != 0 || base.sym_id < 0
             || base.sym_id >= l.store.symbol_n) { return -2 }
-        let callee_sym support.CSym = l.store.symbols[base.sym_id]
-        if (callee_sym.kind != support.SYM_FN || callee_sym.type_id != base.sym_type_id
+        let callee_sym table.CSym = l.store.symbols[base.sym_id]
+        if (callee_sym.kind != table.SYM_FN || callee_sym.type_id != base.sym_type_id
             || callee_sym.name_len != base.sym_name_len
             || support.cstr_eq((l.store.names + callee_sym.name_off).to_type(*char),
                 (l.store.names + base.sym_name_off).to_type(*char)) == 0) { return -2 }
@@ -196,13 +198,13 @@ fn checked_lower_call(l *CheckedLower, flow *CheckedFlow, expr_id int) int {
         || l.store.sig_vararg[sig] == 2 && l.store.sig_abi[sig] != support.ABI_YH
         || (l.store.sig_abi[sig] != support.ABI_YH && l.store.sig_abi[sig] != support.ABI_C)) { return -2 }
     if (l.store.sig_vararg[sig] == 1 && direct != 0
-        && (base.sym_flags & (support.F_EXTERN | support.F_INTRINSIC)) == 0) { return -2 }
+        && (base.sym_flags & (table.F_EXTERN | table.F_INTRINSIC)) == 0) { return -2 }
     let aggregate_result int = checked_lower_is_aggregate(l.store, l.store.sig_ret[sig])
-    let no_return int = direct != 0 && (base.sym_flags & support.F_NORETURN) != 0 ? 1 : 0
+    let no_return int = direct != 0 && (base.sym_flags & table.F_NORETURN) != 0 ? 1 : 0
     if (no_return != 0 && (aggregate_result != 0
-        || l.store.types[l.store.sig_ret[sig]].kind != support.TY_VOID)) { return -2 }
+        || l.store.types[l.store.sig_ret[sig]].kind != types.TY_VOID)) { return -2 }
     let result int = aggregate_result != 0 ? ir.IR_TY_PTR : checked_lower_type(l, node.type_id)
-    if (result == -1 && checked_lower_kind(l.store, node.type_id) != support.TY_VOID) { return -2 }
+    if (result == -1 && checked_lower_kind(l.store, node.type_id) != types.TY_VOID) { return -2 }
     if (l.store.sig_ret[sig] < 0 || l.store.sig_ret[sig] >= l.store.type_n) { return -2 }
     let want_result int = checked_lower_module_type(l, l.store.sig_ret[sig])
     let indirect_signature int = direct == 0 ? checked_lower_module_type(l, function_type) : -1
@@ -234,7 +236,7 @@ fn checked_lower_call(l *CheckedLower, flow *CheckedFlow, expr_id int) int {
     }
     let aggregate_buffer int = -1
     if (aggregate_result != 0) {
-        let layout support.CType = l.store.types[l.store.sig_ret[sig]]
+        let layout types.CType = l.store.types[l.store.sig_ret[sig]]
         aggregate_buffer = ast_ir_b_add_alloca(b, layout.size, layout.align)
         if (aggregate_buffer < 0) {
             if (heap_values != 0) { free(values.to_type(*void)) }
@@ -293,13 +295,13 @@ fn checked_lower_call(l *CheckedLower, flow *CheckedFlow, expr_id int) int {
         if (call_inst < 0) { return -1 }
         return ast_ir_b_add_gep_const(b, aggregate_buffer, 0, ir.IR_TY_PTR)
     }
-    if (checked_lower_kind(l.store, node.type_id) == support.TY_VOID) {
+    if (checked_lower_kind(l.store, node.type_id) == types.TY_VOID) {
         let call_inst int = ast_ir_b_add_call(b, call_id, -1)
         if (call_inst < 0) { return -1 }
         return call_inst
     }
     if (result < 0) { return -2 }
-    if (l.store.types[l.store.sig_ret[sig]].kind == support.TY_FN) {
+    if (l.store.types[l.store.sig_ret[sig]].kind == types.TY_FN) {
         if (result != ir.IR_TY_FN_PTR) { return -2 }
     } else if (want_result != result) { return -2 }
     return ast_ir_b_add_call(b, call_id, result)
@@ -312,14 +314,14 @@ fn checked_lower_call_append(l *CheckedLower, flow *CheckedFlow, off int, length
     let suffix int = l.store.suffix_len
     let entry_main int = checked_lower_name_is_main(l, off, length) != 0 &&
         (l.store.is_entry != 0 || l.store.suffix_len == 0)
-    if ((flags & (support.F_EXTERN | support.F_CABI | support.F_INTRINSIC | support.F_LINUX_SYSCALL)) != 0
+    if ((flags & (table.F_EXTERN | table.F_CABI | table.F_INTRINSIC | table.F_LINUX_SYSCALL)) != 0
         || entry_main != 0) { suffix = 0 }
     let runtime_name_len int = 0
     let runtime_name *char = checked_lower_runtime_name(flags, &runtime_name_len)
     let name_len int = runtime_name != 0 ? runtime_name_len : length
     let versioned int = l.store.sig_abi[sig] == support.ABI_YH &&
-        ((flags & support.F_EXTERN) == 0 || (flags & support.F_MODULE_IMPORT) != 0) &&
-        (flags & (support.F_CABI | support.F_INTRINSIC | support.F_LINUX_SYSCALL)) == 0 &&
+        ((flags & table.F_EXTERN) == 0 || (flags & table.F_MODULE_IMPORT) != 0) &&
+        (flags & (table.F_CABI | table.F_INTRINSIC | table.F_LINUX_SYSCALL)) == 0 &&
         entry_main == 0 ? 1 : 0
     let version_len int = versioned != 0 ? 9 : 0
     let total int = name_len + suffix + version_len

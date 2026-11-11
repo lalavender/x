@@ -1,7 +1,9 @@
 module check
 
 import errors
+import types
 import support
+import table
 import token
 import ast
 import ir
@@ -62,7 +64,7 @@ pub struct CheckedStaticData {
     size int
     align int
     data *u8
-    relocs *support.StaticDataReloc
+    relocs *table.StaticDataReloc
     reloc_n int
 }
 
@@ -86,11 +88,11 @@ pub struct CheckedStorage {
     declaration_n int
     functions *CheckedFunction
     function_n int
-    types *support.CType
+    types *types.CType
     type_n int
-    fields *support.SField
+    fields *types.SField
     field_n int
-    type_names *support.TName
+    type_names *types.TName
     type_name_n int
     type_home *int
     sig_abi *int
@@ -101,13 +103,13 @@ pub struct CheckedStorage {
     sig_n int
     sig_params *int
     sig_param_n int
-    symbols *support.CSym
+    symbols *table.CSym
     symbol_n int
     names *u8
     name_n int
     files *proj.PFile
     file_n int
-    imports *support.ModInfo
+    imports *proj.ModInfo
     import_n int
     bss_symbols *int
     bss_n int
@@ -138,11 +140,11 @@ pub struct CheckedModuleView {
     declaration_n int
     functions *CheckedFunction
     function_n int
-    types *support.CType
+    types *types.CType
     type_n int
-    fields *support.SField
+    fields *types.SField
     field_n int
-    type_names *support.TName
+    type_names *types.TName
     type_name_n int
     type_home *int
     sig_abi *int
@@ -153,13 +155,13 @@ pub struct CheckedModuleView {
     sig_n int
     sig_params *int
     sig_param_n int
-    symbols *support.CSym
+    symbols *table.CSym
     symbol_n int
     names *u8
     name_n int
     files *proj.PFile
     file_n int
-    imports *support.ModInfo
+    imports *proj.ModInfo
     import_n int
     bss_symbols *int
     bss_n int
@@ -185,8 +187,11 @@ pub const IFACE_VERSION_MAX int = 3
 
 pub const CTIFACE_VERSION int = 1
 
+// C ABI 分类结构（ABIValue/ABICursor/ABIArg）与 CABI_* 常量定义在
+// check/abi_c.yh（文件名字节序早于本文件）；下面的 abi_c_* 使用它们。
+
 // abi_c_cursor_init：开始一份独立签名分类，调用方显式指定目标平台。
-pub fn abi_c_cursor_init(c *support.ABICursor, darwin int) void {
+pub fn abi_c_cursor_init(c *ABICursor, darwin int) void {
     c.gpr = 0
     c.fpr = 0
     c.stack = 0
@@ -195,8 +200,8 @@ pub fn abi_c_cursor_init(c *support.ABICursor, darwin int) void {
 
 // abi_c_place：按 AAPCS64/Apple arm64 固定参数规则分配一个值。
 // HFA 先于大聚合处理；HFA/GPR 聚合均不拆分到寄存器与栈。
-pub fn abi_c_place(v *support.ABIValue, c *support.ABICursor, out *support.ABIArg) void {
-    out.kind = support.CABI_VOID
+pub fn abi_c_place(v *ABIValue, c *ABICursor, out *ABIArg) void {
+    out.kind = CABI_VOID
     out.reg = 0
     out.count = 0
     out.stack = 0
@@ -208,7 +213,7 @@ pub fn abi_c_place(v *support.ABIValue, c *support.ABICursor, out *support.ABIAr
     let align int = v.align
     if (v.fp_count > 0) {
         if (c.fpr + v.fp_count <= 8) {
-            out.kind = support.CABI_FPR
+            out.kind = CABI_FPR
             out.reg = c.fpr
             out.count = v.fp_count
             c.fpr += v.fp_count
@@ -224,7 +229,7 @@ pub fn abi_c_place(v *support.ABIValue, c *support.ABICursor, out *support.ABIAr
         let count int = (size + 7) / 8
         if (align >= 16 && c.darwin == 0) { c.gpr = (c.gpr + 1) / 2 * 2 }
         if (c.gpr + count <= 8) {
-            out.kind = support.CABI_GPR
+            out.kind = CABI_GPR
             out.reg = c.gpr
             out.count = count
             c.gpr += count
@@ -237,7 +242,7 @@ pub fn abi_c_place(v *support.ABIValue, c *support.ABICursor, out *support.ABIAr
         size = (size + 7) / 8 * 8
     }
     c.stack = (c.stack + align - 1) / align * align
-    out.kind = support.CABI_STACK
+    out.kind = CABI_STACK
     out.stack = c.stack
     c.stack += size
 }
@@ -412,7 +417,7 @@ pub fn checked_module_function(unit *CheckedModule, row int, out *CheckedFunctio
 }
 
 // checked_module_type：复制一个布局条目；类型 ID 只在该 CheckedModule 内有意义。
-pub fn checked_module_type(unit *CheckedModule, row int, out *support.CType) int {
+pub fn checked_module_type(unit *CheckedModule, row int, out *types.CType) int {
     if (unit == 0 || unit.storage == 0 || out == 0) { return -1 }
     let store *CheckedStorage = unit.storage.to_type(*CheckedStorage)
     if (row < 0 || row >= store.type_n) { return -1 }
@@ -509,7 +514,7 @@ pub fn checked_slice_capture(unit *CheckedModule, function_index int,
     if (ctx.decl_row >= 0 && ctx.decl_row < store.declaration_n) {
         let decl ast.AstDecl = store.declarations[ctx.decl_row]
         if (decl.sym_id >= 0 && decl.sym_id < store.symbol_n
-            && (store.symbols[decl.sym_id].flags & support.F_COMPTIME) != 0) {
+            && (store.symbols[decl.sym_id].flags & table.F_COMPTIME) != 0) {
             return 1
         }
     }
@@ -522,8 +527,8 @@ pub fn checked_slice_capture(unit *CheckedModule, function_index int,
     let str_first int = checked_check_str_first[snap_row]
     let static_first int = checked_check_static_first[snap_row]
     if (type_first < 0 || str_first < 0 || static_first < 0
-        || support.ty_count() != type_first
-        || support.static_data_count() != static_first) { return 1 }
+        || table.ty_count() != type_first
+        || table.static_data_count() != static_first) { return 1 }
     let expr_n int = ctx.expr_after - ctx.expr_first
     let stmt_n int = ctx.stmt_after - ctx.stmt_first
     let edge_n int = ctx.edge_after - ctx.edge_first
@@ -546,7 +551,7 @@ pub fn checked_slice_capture(unit *CheckedModule, function_index int,
         let soff int = 0
         let slen int = 0
         let squoted int = 0
-        if (support.data_str_lookup(node.const_bits.to_type(int), &soff, &slen, &squoted) != 0
+        if (table.data_str_lookup(node.const_bits.to_type(int), &soff, &slen, &squoted) != 0
             && soff >= 0 && slen >= 0 && store.name_n - soff >= slen) {
             string_n += 1
             string_bytes += slen
@@ -708,7 +713,7 @@ pub fn checked_slice_capture(unit *CheckedModule, function_index int,
     // 符号闭包：名字字节单独存放，导入时重新 intern 并追加局部符号。
     i = 0
     for i < symbol_n {
-        let sym support.CSym = store.symbols[symbol_order[i]]
+        let sym table.CSym = store.symbols[symbol_order[i]]
         checked_slice_put_int(data, &cursor, symbol_order[i])
         checked_slice_put_int(data, &cursor, sym.name_len)
         checked_slice_put_int(data, &cursor, sym.kind)
@@ -741,7 +746,7 @@ pub fn checked_slice_capture(unit *CheckedModule, function_index int,
         let squoted int = 0
         // 与计数循环用**同一个**谓词：任一条件不满足就不是可携带的字符串，
         // 否则发射字节数会超出按计数分配的空间（曾导致堆破坏与自旋）。
-        if (support.data_str_lookup(node.const_bits.to_type(int), &soff, &slen, &squoted) == 0
+        if (table.data_str_lookup(node.const_bits.to_type(int), &soff, &slen, &squoted) == 0
             || soff < 0 || slen < 0 || store.name_n - soff < slen) {
             i += 1
             continue
@@ -791,7 +796,7 @@ pub fn checked_slice_import(data *u8, size int, decl_row_override int,
     let new_first int = v.decl_nodes[target_decl].first
     let token_delta int = new_first - old_first
     let file_token_n int = proj.file(file_id).token_n
-    let max_old int = support.ms().sym_n
+    let max_old int = table.ms().sym_n
     let si int = 0
     for si < slice.symbol_n {
         if (slice.symbols[si].old_id >= max_old) { max_old = slice.symbols[si].old_id + 1 }
@@ -808,7 +813,7 @@ pub fn checked_slice_import(data *u8, size int, decl_row_override int,
         let have_off int = 0
         let have_len int = 0
         let have_quoted int = 0
-        let same int = support.data_str_lookup(item.label, &have_off,
+        let same int = table.data_str_lookup(item.label, &have_off,
             &have_len, &have_quoted)
         if (same != 0 && (have_len != item.len || have_quoted != item.quoted)) {
             same = 0
@@ -837,11 +842,11 @@ pub fn checked_slice_import(data *u8, size int, decl_row_override int,
         if (name_off < 0) {
             free(sym_map.to_type(*void)); checked_slice_release(&slice); return -1
         }
-        if ((sym.flags & support.F_GLOBAL) != 0) {
-            let found int = support.sym_lookup_off(name_off, sym.name_len)
-            if (found < 0 || support.ms().syms[found].type_id != sym.type_id
-                || support.ms().syms[found].kind != sym.kind
-                || support.ms().syms[found].flags != sym.flags) {
+        if ((sym.flags & table.F_GLOBAL) != 0) {
+            let found int = table.sym_lookup_off(name_off, sym.name_len)
+            if (found < 0 || table.ms().syms[found].type_id != sym.type_id
+                || table.ms().syms[found].kind != sym.kind
+                || table.ms().syms[found].flags != sym.flags) {
                 free(sym_map.to_type(*void)); checked_slice_release(&slice); return 1
             }
             sym_map[sym.old_id] = found
@@ -851,15 +856,15 @@ pub fn checked_slice_import(data *u8, size int, decl_row_override int,
             if (added < 0) {
                 free(sym_map.to_type(*void)); checked_slice_release(&slice); return -1
             }
-            support.ms().syms[added].offset = sym.offset
-            support.ms().syms[added].cval = sym.cval
-            support.ms().syms[added].const_ready = sym.const_ready
-            support.ms().syms[added].const_expr_off = -1
-            support.ms().syms[added].const_expr_len = 0
-            support.ms().syms[added].const_expr_kind = 0
-            support.ms().syms[added].def_line = sym.def_line
-            support.ms().syms[added].def_col = sym.def_col
-            support.ms().syms[added].ast_binding_row = -1
+            table.ms().syms[added].offset = sym.offset
+            table.ms().syms[added].cval = sym.cval
+            table.ms().syms[added].const_ready = sym.const_ready
+            table.ms().syms[added].const_expr_off = -1
+            table.ms().syms[added].const_expr_len = 0
+            table.ms().syms[added].const_expr_kind = 0
+            table.ms().syms[added].def_line = sym.def_line
+            table.ms().syms[added].def_col = sym.def_col
+            table.ms().syms[added].ast_binding_row = -1
             sym_map[sym.old_id] = added
         }
         si += 1
@@ -915,13 +920,13 @@ pub fn checked_slice_import(data *u8, size int, decl_row_override int,
             free(binding_sym.to_type(*void)); free(sym_map.to_type(*void))
             checked_slice_release(&slice); return -1
         }
-        support.ms().syms[added].offset = binding.sym_offset
-        support.ms().syms[added].const_expr_off = -1
-        support.ms().syms[added].const_expr_len = 0
-        support.ms().syms[added].const_expr_kind = 0
-        support.ms().syms[added].def_line = tok.line
-        support.ms().syms[added].def_col = tok.col
-        support.ms().syms[added].ast_binding_row = -1
+        table.ms().syms[added].offset = binding.sym_offset
+        table.ms().syms[added].const_expr_off = -1
+        table.ms().syms[added].const_expr_len = 0
+        table.ms().syms[added].const_expr_kind = 0
+        table.ms().syms[added].def_line = tok.line
+        table.ms().syms[added].def_col = tok.col
+        table.ms().syms[added].ast_binding_row = -1
         binding_sym[si] = added
         si += 1
     }
@@ -960,8 +965,8 @@ pub fn checked_slice_import(data *u8, size int, decl_row_override int,
         }
         if (mapped >= 0) {
             dest.sym_id = mapped
-            dest.sym_name_off = support.ms().syms[mapped].name_off
-            dest.sym_name_len = support.ms().syms[mapped].name_len
+            dest.sym_name_off = table.ms().syms[mapped].name_off
+            dest.sym_name_len = table.ms().syms[mapped].name_len
         } else {
             dest.sym_id = -1
             dest.sym_name_off = -1
@@ -1125,9 +1130,9 @@ pub fn checked_slice_snapshot(decl_row int) void {
     }
     if (checked_check_type_first == 0 || checked_check_str_first == 0
         || checked_check_static_first == 0) { return }
-    checked_check_type_first[decl_row] = support.ty_count()
-    checked_check_str_first[decl_row] = support.data_str_count()
-    checked_check_static_first[decl_row] = support.static_data_count()
+    checked_check_type_first[decl_row] = table.ty_count()
+    checked_check_str_first[decl_row] = table.data_str_count()
+    checked_check_static_first[decl_row] = table.static_data_count()
 }
 
 // checked_check_store_key：保存 pass2b 前的函数键（供 capture 使用）。
@@ -1138,9 +1143,9 @@ pub fn checked_check_store_key(decl_row int, key *u8) void {
     // v3：同一时刻记录模块表规模，capture 用差值判断能否复用切片。
     if (checked_check_type_first != 0 && checked_check_str_first != 0
         && checked_check_static_first != 0) {
-        checked_check_type_first[decl_row] = support.ty_count()
-        checked_check_str_first[decl_row] = support.data_str_count()
-        checked_check_static_first[decl_row] = support.static_data_count()
+        checked_check_type_first[decl_row] = table.ty_count()
+        checked_check_str_first[decl_row] = table.data_str_count()
+        checked_check_static_first[decl_row] = table.static_data_count()
     }
     let i int = 0
     for i < ir.IR_FUNCTION_CACHE_KEY_SIZE {
@@ -1294,8 +1299,8 @@ pub fn convert_returns(view *ast.AstView) int {
         let fn_ctx ast.AstFunctionContext = view.function_nodes[fi]
         if (fn_ctx.decl_row < 0 || fn_ctx.decl_row >= view.decl_count) { fi += 1; continue }
         let decl ast.AstDecl = view.decl_nodes[fn_ctx.decl_row]
-        if (decl.type_id < 0 || decl.type_id >= support.ms().type_n) { fi += 1; continue }
-        let ret_tid int = support.ms().types[decl.type_id].elem
+        if (decl.type_id < 0 || decl.type_id >= table.ms().type_n) { fi += 1; continue }
+        let ret_tid int = table.ms().types[decl.type_id].elem
         let s int = fn_ctx.stmt_first
         for s < fn_ctx.stmt_after {
             if (view.stmt_nodes[s].kind == ast.AST_STMT_RETURN) {
@@ -1304,7 +1309,7 @@ pub fn convert_returns(view *ast.AstView) int {
                     let expr_id int = view.stmt_exprs[edge].expr_id
                     if (expr_id >= 0 && expr_id < view.expr_count) {
                         let value ast.AstExpr = view.expr_nodes[expr_id]
-                        let code int = support.vk_can_assign(ret_tid, value.type_id,
+                        let code int = table.vk_can_assign(ret_tid, value.type_id,
                             value.is_lit, value.const_bits, value.lit_big)
                         if (code != 0) {
                             return diag_file_at(value.file_id,
@@ -1338,7 +1343,7 @@ pub fn convert_assigns(view *ast.AstView) int {
                     if (rhs_id >= 0 && rhs_id < view.expr_count) {
                         let lhs ast.AstExpr = view.expr_nodes[lhs_id]
                         let rhs ast.AstExpr = view.expr_nodes[rhs_id]
-                        let code int = support.vk_can_assign(lhs.type_id, rhs.type_id,
+                        let code int = table.vk_can_assign(lhs.type_id, rhs.type_id,
                             rhs.is_lit, rhs.const_bits, rhs.lit_big)
                         if (code != 0) {
                             return diag_file_at(rhs.file_id,
@@ -1356,39 +1361,39 @@ pub fn convert_assigns(view *ast.AstView) int {
 
 // ct_types_sync：只绑定类型表槽（保留给只需要类型的调用方）。
 pub fn ct_types_sync() void {
-    comptime.ct_types_bind((&support.ms().types).to_type(*void), &support.ms().type_n)
+    comptime.ct_types_bind((&table.ms().types).to_type(*void), &table.ms().type_n)
 }
 
 // ct_facts_sync：把类型表与符号表的「槽」一次绑定到 CT 镜像。
 // 只传槽地址（不是表内容），表扩容/搬迁后镜像自动读到最新值；每任务一次。
 pub fn ct_facts_sync() void {
-    comptime.ct_types_bind((&support.ms().types).to_type(*void), &support.ms().type_n)
-    comptime.ct_syms_bind((&support.ms().syms).to_type(*void), &support.ms().sym_n)
-    comptime.ct_fields_bind((&support.ms().fields).to_type(*void), &support.ms().field_n)
+    comptime.ct_types_bind((&table.ms().types).to_type(*void), &table.ms().type_n)
+    comptime.ct_syms_bind((&table.ms().syms).to_type(*void), &table.ms().sym_n)
+    comptime.ct_fields_bind((&table.ms().fields).to_type(*void), &table.ms().field_n)
     // 前端模式位：CT 读折叠开关、写结果寻址（两个标量槽）。
     comptime.ct_mode_bind((&support.fc().c_fold).to_type(*void), (&support.fc().c_res_is_addr).to_type(*void))
     // 文件导入表：CT 登记函数时要把导入别名一起带进 IR 目标描述。
-    comptime.ct_imports_bind((&support.fs().imports).to_type(*void), &support.fs().import_n,
-        (&support.fs().import_mod).to_type(*void))
+    comptime.ct_imports_bind((&proj.fs().imports).to_type(*void), &proj.fs().import_n,
+        (&proj.fs().import_mod).to_type(*void))
     // 字符串标签 / 枚举成员：gen 里的模块级表，用槽地址绑定。
     // 字符串标签/枚举成员表是固定容量全局数组，不随扩容搬迁：镜像直接持有基址。
     let ds_lbl *int
     let ds_off *int
     let ds_len *int
     let ds_q *int
-    support.data_str_slots((&ds_lbl).to_type(**int), (&ds_off).to_type(**int),
+    table.data_str_slots((&ds_lbl).to_type(**int), (&ds_off).to_type(**int),
         (&ds_len).to_type(**int), (&ds_q).to_type(**int))
     let em_off *int
     let em_len *int
     let em_val *i64
     let em_ready *int
-    support.em_slots((&em_off).to_type(**int), (&em_len).to_type(**int),
+    table.em_slots((&em_off).to_type(**int), (&em_len).to_type(**int),
         (&em_val).to_type(**i64), (&em_ready).to_type(**int))
     comptime.ct_tables_bind(ds_lbl, ds_off, ds_len, ds_q,
-        support.data_str_n_slot(),
-        em_off, em_len, em_val, em_ready, support.em_n_slot(),
-        support.static_data_rows_slot().to_type(**comptime.CtStaticRow),
-        support.static_data_n_slot())
+        table.data_str_n_slot(),
+        em_off, em_len, em_val, em_ready, table.em_n_slot(),
+        table.static_data_rows_slot().to_type(**comptime.CtStaticRow),
+        table.static_data_n_slot())
 }
 
 // ct_import_count / ct_import_alias / ct_import_module：导入表镜像的只读窄口。
@@ -1415,34 +1420,34 @@ pub fn ct_res_is_addr_set(v int) void { comptime.ct_res_is_addr_set(v) }
 // ct_type_layout_ok：镜像与 gen 逐项一致返回 1，否则 0。
 // 覆盖 struct 尺寸与全部 TY_* 常量值；字段顺序由 struct 定义保证。
 pub fn ct_type_layout_ok() int {
-    if (sizeof(support.CType) != sizeof(comptime.CtTypeRow)) { return 0 }
-    if (sizeof(support.CSym) != sizeof(comptime.CtSymRow)) { return 0 }
-    if (sizeof(support.SField) != sizeof(comptime.CtFieldRow)) { return 0 }
+    if (sizeof(types.CType) != sizeof(comptime.CtTypeRow)) { return 0 }
+    if (sizeof(table.CSym) != sizeof(comptime.CtSymRow)) { return 0 }
+    if (sizeof(types.SField) != sizeof(comptime.CtFieldRow)) { return 0 }
     // 导入表镜像按结构体布局零拷贝读取；字段漂移会让别名读取错位。
-    if (sizeof(support.ImportEnt) != sizeof(comptime.CtImportRow)) { return 0 }
+    if (sizeof(proj.ImportEnt) != sizeof(comptime.CtImportRow)) { return 0 }
     if (support.CT_DIAG_ASSERT != comptime.CT_DIAG_ASSERT
         || support.CT_DIAG_ERROR != comptime.CT_DIAG_ERROR
         || support.CT_DIAG_WARN != comptime.CT_DIAG_WARN) { return 0 }
-    if (support.SYM_VAR != comptime.CT_SYM_VAR || support.SYM_CONST != comptime.CT_SYM_CONST
-        || support.SYM_FN != comptime.CT_SYM_FN
-        || support.F_GLOBAL != comptime.CT_F_GLOBAL || support.F_PARAM != comptime.CT_F_PARAM
-        || support.F_PUB != comptime.CT_F_PUB || support.F_EXTERN != comptime.CT_F_EXTERN
-        || support.F_ADDR != comptime.CT_F_ADDR || support.F_AGGPARAM != comptime.CT_F_AGGPARAM
-        || support.F_CABI != comptime.CT_F_CABI || support.F_COMPTIME != comptime.CT_F_COMPTIME
-        || support.F_ENUM_MEMBER != comptime.CT_F_ENUM_MEMBER
-        || support.F_ENUM_META != comptime.CT_F_ENUM_META
-        || support.F_FIELD_META != comptime.CT_F_FIELD_META
-        || support.F_MODULE_IMPORT != comptime.CT_F_MODULE_IMPORT) { return 0 }
-    if (support.TY_VOID != comptime.CT_TY_VOID || support.TY_BOOL != comptime.CT_TY_BOOL
-        || support.TY_CHAR != comptime.CT_TY_CHAR || support.TY_I8 != comptime.CT_TY_I8
-        || support.TY_I16 != comptime.CT_TY_I16 || support.TY_I32 != comptime.CT_TY_I32
-        || support.TY_I64 != comptime.CT_TY_I64 || support.TY_U8 != comptime.CT_TY_U8
-        || support.TY_U16 != comptime.CT_TY_U16 || support.TY_U32 != comptime.CT_TY_U32
-        || support.TY_U64 != comptime.CT_TY_U64 || support.TY_F32 != comptime.CT_TY_F32
-        || support.TY_F64 != comptime.CT_TY_F64 || support.TY_PTR != comptime.CT_TY_PTR
-        || support.TY_ARRAY != comptime.CT_TY_ARRAY || support.TY_SLICE != comptime.CT_TY_SLICE
-        || support.TY_STRUCT != comptime.CT_TY_STRUCT || support.TY_UNION != comptime.CT_TY_UNION
-        || support.TY_ENUM != comptime.CT_TY_ENUM || support.TY_FN != comptime.CT_TY_FN) { return 0 }
+    if (table.SYM_VAR != comptime.CT_SYM_VAR || table.SYM_CONST != comptime.CT_SYM_CONST
+        || table.SYM_FN != comptime.CT_SYM_FN
+        || table.F_GLOBAL != comptime.CT_F_GLOBAL || table.F_PARAM != comptime.CT_F_PARAM
+        || table.F_PUB != comptime.CT_F_PUB || table.F_EXTERN != comptime.CT_F_EXTERN
+        || table.F_ADDR != comptime.CT_F_ADDR || table.F_AGGPARAM != comptime.CT_F_AGGPARAM
+        || table.F_CABI != comptime.CT_F_CABI || table.F_COMPTIME != comptime.CT_F_COMPTIME
+        || table.F_ENUM_MEMBER != comptime.CT_F_ENUM_MEMBER
+        || table.F_ENUM_META != comptime.CT_F_ENUM_META
+        || table.F_FIELD_META != comptime.CT_F_FIELD_META
+        || table.F_MODULE_IMPORT != comptime.CT_F_MODULE_IMPORT) { return 0 }
+    if (types.TY_VOID != comptime.CT_TY_VOID || types.TY_BOOL != comptime.CT_TY_BOOL
+        || types.TY_CHAR != comptime.CT_TY_CHAR || types.TY_I8 != comptime.CT_TY_I8
+        || types.TY_I16 != comptime.CT_TY_I16 || types.TY_I32 != comptime.CT_TY_I32
+        || types.TY_I64 != comptime.CT_TY_I64 || types.TY_U8 != comptime.CT_TY_U8
+        || types.TY_U16 != comptime.CT_TY_U16 || types.TY_U32 != comptime.CT_TY_U32
+        || types.TY_U64 != comptime.CT_TY_U64 || types.TY_F32 != comptime.CT_TY_F32
+        || types.TY_F64 != comptime.CT_TY_F64 || types.TY_PTR != comptime.CT_TY_PTR
+        || types.TY_ARRAY != comptime.CT_TY_ARRAY || types.TY_SLICE != comptime.CT_TY_SLICE
+        || types.TY_STRUCT != comptime.CT_TY_STRUCT || types.TY_UNION != comptime.CT_TY_UNION
+        || types.TY_ENUM != comptime.CT_TY_ENUM || types.TY_FN != comptime.CT_TY_FN) { return 0 }
     return 1
 }
 
@@ -1497,23 +1502,23 @@ pub fn iface_emit(path *char, sym_base int, tname_base int) int {
     // 无属性接口保持 v1；已有函数属性使用 v2；公开 comptime 签名使用 v3。
     let iface_version int = 1
     let ti0 int = tname_base
-    for ti0 < support.ms().name_n {
-        if (support.ms().names[ti0].is_pub != 0
-            && (support.ms().names[ti0].attrs & token.ATTR_EXTERN) != 0) {
+    for ti0 < table.ms().name_n {
+        if (table.ms().names[ti0].is_pub != 0
+            && (table.ms().names[ti0].attrs & token.ATTR_EXTERN) != 0) {
             if (iface_version < 2) { iface_version = 2 }
         }
         ti0 += 1
     }
     let si0 int = sym_base
-    for si0 < support.ms().sym_n {
-        let flags int = support.ms().syms[si0].flags
-        if ((flags & support.F_PUB) != 0
-            && ((flags & support.F_EXTERN) == 0 || (flags & support.F_CABI) != 0)
-            && (flags & support.F_COMPTIME) != 0) {
+    for si0 < table.ms().sym_n {
+        let flags int = table.ms().syms[si0].flags
+        if ((flags & table.F_PUB) != 0
+            && ((flags & table.F_EXTERN) == 0 || (flags & table.F_CABI) != 0)
+            && (flags & table.F_COMPTIME) != 0) {
             iface_version = 3
-        } else if ((flags & support.F_PUB) != 0
-            && ((flags & support.F_EXTERN) == 0 || (flags & support.F_CABI) != 0)
-            && (flags & (support.F_CABI | support.F_INLINE | support.F_NORETURN)) != 0
+        } else if ((flags & table.F_PUB) != 0
+            && ((flags & table.F_EXTERN) == 0 || (flags & table.F_CABI) != 0)
+            && (flags & (table.F_CABI | table.F_INLINE | table.F_NORETURN)) != 0
             && iface_version < 2) {
             iface_version = 2
         }
@@ -1526,58 +1531,58 @@ pub fn iface_emit(path *char, sym_base int, tname_base int) int {
     } else if (if_puts("// yh-iface v1 arch=") != 0) { return -1 }
     if (if_puts(support.target_arch_token()) != 0) { return -1 }
     if (if_puts(" suffix=") != 0) { return -1 }
-    if (if_put_np(support.fs().sym_sfx_off, support.fs().sym_sfx_len) != 0) { return -1 }
+    if (if_put_np(support.msym().off, support.msym().len) != 0) { return -1 }
     if (if_put('\n') != 0) { return -1 }
     // 类型（声明序）
     let ti int = tname_base
-    for ti < support.ms().name_n {
-        if (support.ms().names[ti].is_pub == 0) {
+    for ti < table.ms().name_n {
+        if (table.ms().names[ti].is_pub == 0) {
             ti += 1
             continue
         }
-        let tid int = support.ms().names[ti].type_id
-        if (support.ms().names[ti].form == 1 || support.ms().names[ti].form == 2) {
-            if ((support.ms().names[ti].attrs & token.ATTR_EXTERN) != 0
+        let tid int = table.ms().names[ti].type_id
+        if (table.ms().names[ti].form == 1 || table.ms().names[ti].form == 2) {
+            if ((table.ms().names[ti].attrs & token.ATTR_EXTERN) != 0
                 && if_puts("@[extern]\n") != 0) { return -1 }
             if (if_puts("pub ") != 0) { return -1 }
-            if (support.ms().names[ti].form == 1) {
+            if (table.ms().names[ti].form == 1) {
                 if (if_puts("struct ") != 0) { return -1 }
             } else {
                 if (if_puts("union ") != 0) { return -1 }
             }
-            if (if_put_np(support.ms().names[ti].name_off, support.ms().names[ti].name_len) != 0) { return -1 }
+            if (if_put_np(table.ms().names[ti].name_off, table.ms().names[ti].name_len) != 0) { return -1 }
             if (if_puts(" {\n") != 0) { return -1 }
-            let st int = support.ms().types[tid].sub
-            let nf int = support.ms().types[tid].len
+            let st int = table.ms().types[tid].sub
+            let nf int = table.ms().types[tid].len
             let fi int = 0
             for fi < nf {
-                if (support.ms().fields[st + fi].is_pub != 0) {
+                if (table.ms().fields[st + fi].is_pub != 0) {
                     if (if_puts("    pub ") != 0) { return -1 }
                 } else {
                     if (if_puts("    ") != 0) { return -1 }
                 }
-                if (if_put_np(support.ms().fields[st + fi].name_off, support.ms().fields[st + fi].name_len) != 0) { return -1 }
+                if (if_put_np(table.ms().fields[st + fi].name_off, table.ms().fields[st + fi].name_len) != 0) { return -1 }
                 if (if_put(' ') != 0) { return -1 }
-                if (if_emit_type(support.ms().fields[st + fi].type_id, tname_base) != 0) { return -1 }
+                if (if_emit_type(table.ms().fields[st + fi].type_id, tname_base) != 0) { return -1 }
                 if (if_puts(";\n") != 0) { return -1 }
                 fi += 1
             }
             if (if_puts("}\n") != 0) { return -1 }
-        } else if (support.ms().names[ti].form == 3) {
-            if ((support.ms().names[ti].attrs & token.ATTR_EXTERN) != 0
+        } else if (table.ms().names[ti].form == 3) {
+            if ((table.ms().names[ti].attrs & token.ATTR_EXTERN) != 0
                 && if_puts("@[extern]\n") != 0) { return -1 }
             if (if_puts("pub enum ") != 0) { return -1 }
-            if (if_put_np(support.ms().names[ti].name_off, support.ms().names[ti].name_len) != 0) { return -1 }
+            if (if_put_np(table.ms().names[ti].name_off, table.ms().names[ti].name_len) != 0) { return -1 }
             if (if_puts(" {\n") != 0) { return -1 }
             // 成员 = 类型为该枚举的全局常量（本模块登记的）
             let si int = sym_base
-            for si < support.ms().sym_n {
-                if (support.ms().syms[si].kind == support.SYM_CONST && support.ms().syms[si].type_id == tid
-                    && (support.ms().syms[si].flags & support.F_EXTERN) == 0) {
+            for si < table.ms().sym_n {
+                if (table.ms().syms[si].kind == table.SYM_CONST && table.ms().syms[si].type_id == tid
+                    && (table.ms().syms[si].flags & table.F_EXTERN) == 0) {
                     if (if_puts("    ") != 0) { return -1 }
-                    if (if_put_np(support.ms().syms[si].name_off, support.ms().syms[si].name_len) != 0) { return -1 }
+                    if (if_put_np(table.ms().syms[si].name_off, table.ms().syms[si].name_len) != 0) { return -1 }
                     if (if_puts(" = ") != 0) { return -1 }
-                    if (if_puti(support.ms().syms[si].cval.to_type(int)) != 0) { return -1 }
+                    if (if_puti(table.ms().syms[si].cval.to_type(int)) != 0) { return -1 }
                     if (if_puts(";\n") != 0) { return -1 }
                 }
                 si += 1
@@ -1586,7 +1591,7 @@ pub fn iface_emit(path *char, sym_base int, tname_base int) int {
         } else {
             // type 别名
             if (if_puts("pub type ") != 0) { return -1 }
-            if (if_put_np(support.ms().names[ti].name_off, support.ms().names[ti].name_len) != 0) { return -1 }
+            if (if_put_np(table.ms().names[ti].name_off, table.ms().names[ti].name_len) != 0) { return -1 }
             if (if_puts(" = ") != 0) { return -1 }
             if (if_emit_type(tid, tname_base) != 0) { return -1 }
             if (if_puts(";\n") != 0) { return -1 }
@@ -1595,49 +1600,49 @@ pub fn iface_emit(path *char, sym_base int, tname_base int) int {
     }
     // 值符号：fn / const / let
     let si2 int = sym_base
-    for si2 < support.ms().sym_n {
-        let fl int = support.ms().syms[si2].flags
-        if ((fl & support.F_PUB) == 0
-            || ((fl & support.F_EXTERN) != 0 && (fl & support.F_CABI) == 0)) {
+    for si2 < table.ms().sym_n {
+        let fl int = table.ms().syms[si2].flags
+        if ((fl & table.F_PUB) == 0
+            || ((fl & table.F_EXTERN) != 0 && (fl & table.F_CABI) == 0)) {
             si2 += 1
             continue
         }
-        if (support.ms().syms[si2].kind == support.SYM_FN) {
+        if (table.ms().syms[si2].kind == table.SYM_FN) {
             // 类型化变参/裸变参不导出（前者为模块私有便利，后者仅 prelude）
-            let ftid int = support.ms().syms[si2].type_id
-            let sig int = support.ms().types[ftid].sub
-            if (support.ms().sig_vararg[sig] != 0) {
+            let ftid int = table.ms().syms[si2].type_id
+            let sig int = table.ms().types[ftid].sub
+            if (table.ms().sig_vararg[sig] != 0) {
                 return token.err_tok("变参函数不能导出为 pub")
             }
-            let has_cabi int = ((fl & support.F_CABI) != 0).to_type(int)
-            if ((fl & (support.F_CABI | support.F_INLINE | support.F_NORETURN
-                    | support.F_COMPTIME)) != 0) {
+            let has_cabi int = ((fl & table.F_CABI) != 0).to_type(int)
+            if ((fl & (table.F_CABI | table.F_INLINE | table.F_NORETURN
+                    | table.F_COMPTIME)) != 0) {
                 if (if_puts("@[") != 0) { return -1 }
                 let wrote int = 0
                 if (has_cabi != 0) {
                     if (if_puts("extern") != 0) { return -1 }
                     wrote = 1
                 }
-                if ((fl & support.F_INLINE) != 0) {
+                if ((fl & table.F_INLINE) != 0) {
                     if (wrote != 0 && if_puts(", ") != 0) { return -1 }
                     if (if_puts("inline") != 0) { return -1 }
                     wrote = 1
                 }
-                if ((fl & support.F_NORETURN) != 0) {
+                if ((fl & table.F_NORETURN) != 0) {
                     if (wrote != 0 && if_puts(", ") != 0) { return -1 }
                     if (if_puts("noreturn") != 0) { return -1 }
                     wrote = 1
                 }
-                if ((fl & support.F_COMPTIME) != 0) {
+                if ((fl & table.F_COMPTIME) != 0) {
                     if (wrote != 0 && if_puts(", ") != 0) { return -1 }
                     if (if_puts("comptime") != 0) { return -1 }
                 }
                 if (if_puts("]\n") != 0) { return -1 }
             }
             if (if_puts("pub fn ") != 0) { return -1 }
-            if (if_put_np(support.ms().syms[si2].name_off, support.ms().syms[si2].name_len) != 0) { return -1 }
+            if (if_put_np(table.ms().syms[si2].name_off, table.ms().syms[si2].name_len) != 0) { return -1 }
             if (if_put('(') != 0) { return -1 }
-            let np2 int = support.ms().sig_np[sig]
+            let np2 int = table.ms().sig_np[sig]
             let i int = 0
             for i < np2 {
                 if (i > 0) {
@@ -1646,18 +1651,18 @@ pub fn iface_emit(path *char, sym_base int, tname_base int) int {
                 if (if_puts("p") != 0) { return -1 }
                 if (if_puti(i) != 0) { return -1 }
                 if (if_put(' ') != 0) { return -1 }
-                if (if_emit_type(support.ms().sig_params[support.ms().sig_first[sig] + i], tname_base) != 0) { return -1 }
+                if (if_emit_type(table.ms().sig_params[table.ms().sig_first[sig] + i], tname_base) != 0) { return -1 }
                 i += 1
             }
             if (if_puts(") ") != 0) { return -1 }
-            if (if_emit_type(support.ms().sig_ret[sig], tname_base) != 0) { return -1 }
+            if (if_emit_type(table.ms().sig_ret[sig], tname_base) != 0) { return -1 }
             if (has_cabi != 0) {
                 if (if_puts(";\n") != 0) { return -1 }
             } else if (if_puts(" { }\n") != 0) { return -1 }
-        } else if (support.ms().syms[si2].kind == support.SYM_CONST) {
+        } else if (table.ms().syms[si2].kind == table.SYM_CONST) {
             // enum 成员常量已随 pub enum 体导出（成员行），这里跳过——
             // 否则接口里重复登记，加载侧报重定义。
-            if (support.ms().types[support.ms().syms[si2].type_id].kind == support.TY_ENUM) {
+            if (table.ms().types[table.ms().syms[si2].type_id].kind == types.TY_ENUM) {
                 si2 += 1
                 continue
             }
@@ -1665,19 +1670,19 @@ pub fn iface_emit(path *char, sym_base int, tname_base int) int {
             // （const_expr_kind = 4），导入侧按模块模式重新解析：编译期建模、
             // 运行期在导入方物化本单元副本（本地数据标签，见 em_data_symbol_header）。
             // 与 .s.ct 闭包的聚合常量重放共用同一份源文本。
-            let ck3 int = support.ms().types[support.ms().syms[si2].type_id].kind
-            if (ck3 == support.TY_STRUCT || ck3 == support.TY_ARRAY
-                    || ck3 == support.TY_SLICE) {
-                let ck4 int = support.ms().syms[si2].const_expr_kind
+            let ck3 int = table.ms().types[table.ms().syms[si2].type_id].kind
+            if (ck3 == types.TY_STRUCT || ck3 == types.TY_ARRAY
+                    || ck3 == types.TY_SLICE) {
+                let ck4 int = table.ms().syms[si2].const_expr_kind
                 if ((ck4 != 4 && ck4 != 5)
-                    || support.ms().syms[si2].const_expr_len <= 0) {
+                    || table.ms().syms[si2].const_expr_len <= 0) {
                     return token.err_tok("pub 聚合常量暂只支持字面量或 $ 调用初始化式导出")
                 }
                 if (if_puts("pub const ") != 0) { return -1 }
-                if (if_put_np(support.ms().syms[si2].name_off,
-                        support.ms().syms[si2].name_len) != 0) { return -1 }
+                if (if_put_np(table.ms().syms[si2].name_off,
+                        table.ms().syms[si2].name_len) != 0) { return -1 }
                 if (if_put(' ') != 0) { return -1 }
-                if (if_emit_type(support.ms().syms[si2].type_id, tname_base) != 0) {
+                if (if_emit_type(table.ms().syms[si2].type_id, tname_base) != 0) {
                     return -1
                 }
                 if (if_puts(" = ") != 0) { return -1 }
@@ -1686,20 +1691,20 @@ pub fn iface_emit(path *char, sym_base int, tname_base int) int {
                 si2 += 1
                 continue
             }
-            if ((fl & support.F_ADDR) != 0) {
+            if ((fl & table.F_ADDR) != 0) {
                 // 字符串字面量指针常量：原样重放声明（含引号与转义），导入方按
                 // 与函数体内字面量相同的规则重新登记只读字节池。
                 // 引用式（`pub const A *char = B;`）由共用追链函数追到最终字面式。
                 let lit_off int = 0
                 let lit_len int = 0
-                if (support.sym_ct_lit_text(si2, &lit_off, &lit_len) != 0 || lit_len < 2) {
+                if (table.sym_ct_lit_text(si2, &lit_off, &lit_len) != 0 || lit_len < 2) {
                     return token.err_tok("pub 指针常量（字符串）暂不支持跨模块导出")
                 }
                 if (if_puts("pub const ") != 0) { return -1 }
-                if (if_put_np(support.ms().syms[si2].name_off,
-                        support.ms().syms[si2].name_len) != 0) { return -1 }
+                if (if_put_np(table.ms().syms[si2].name_off,
+                        table.ms().syms[si2].name_len) != 0) { return -1 }
                 if (if_put(' ') != 0) { return -1 }
-                if (if_emit_type(support.ms().syms[si2].type_id, tname_base) != 0) { return -1 }
+                if (if_emit_type(table.ms().syms[si2].type_id, tname_base) != 0) { return -1 }
                 if (if_puts(" = ") != 0) { return -1 }
                 if (if_put_np(lit_off, lit_len) != 0) { return -1 }
                 if (if_puts(";\n") != 0) { return -1 }
@@ -1707,15 +1712,15 @@ pub fn iface_emit(path *char, sym_base int, tname_base int) int {
                 continue
             }
             if (if_puts("pub const ") != 0) { return -1 }
-            if (if_put_np(support.ms().syms[si2].name_off, support.ms().syms[si2].name_len) != 0) { return -1 }
+            if (if_put_np(table.ms().syms[si2].name_off, table.ms().syms[si2].name_len) != 0) { return -1 }
             if (if_put(' ') != 0) { return -1 }
-            if (if_emit_type(support.ms().syms[si2].type_id, tname_base) != 0) { return -1 }
+            if (if_emit_type(table.ms().syms[si2].type_id, tname_base) != 0) { return -1 }
             if (if_puts(" = ") != 0) { return -1 }
             // 值文本与 .s.ct 闭包共用：按声明宽度输出（窄化到宿主 int 会把
             // u32 的 0xfeedfacf 打成负数、把 0x80000000 打成空的负号）
             if (iface_emit_const_value(si2) != 0) { return -1 }
             if (if_puts(";\n") != 0) { return -1 }
-        } else if (support.ms().syms[si2].kind == support.SYM_VAR) {
+        } else if (table.ms().syms[si2].kind == table.SYM_VAR) {
             // 2026-10-02「let 不导出」：可变全局不再跨模块导出，接口停发
             // pub let 行；编译器状态经 support.fc()/support.ctl() 窄口访问。
         }
@@ -1856,15 +1861,15 @@ pub fn iface_header_suffix(path *char, off *int, olen *int) int {
 
 // sym_mangle：把符号名改写为「短名+后缀」。
 pub fn sym_mangle(si int, sfx_off int, sfx_len int) int {
-    let nlen int = support.ms().syms[si].name_len + sfx_len
+    let nlen int = table.ms().syms[si].name_len + sfx_len
     let tmp [512]u8
     if (nlen > 500) {
         return errors.fail("符号名过长")
     }
     let n int = 0
     let i int = 0
-    for i < support.ms().syms[si].name_len {
-        tmp[n] = support.pool_ctx().data[support.ms().syms[si].name_off + i]
+    for i < table.ms().syms[si].name_len {
+        tmp[n] = support.pool_ctx().data[table.ms().syms[si].name_off + i]
         n += 1
         i += 1
     }
@@ -1878,22 +1883,22 @@ pub fn sym_mangle(si int, sfx_off int, sfx_len int) int {
     if (off < 0) {
         return -1
     }
-    support.ms().syms[si].name_off = off
-    support.ms().syms[si].name_len = n
+    table.ms().syms[si].name_off = off
+    table.ms().syms[si].name_len = n
     return 0
 }
 
 // tname_mangle：类型名同样改写（避免与使用者同名类型冲突）。
 pub fn tname_mangle(ti int, sfx_off int, sfx_len int) int {
-    let nlen int = support.ms().names[ti].name_len + sfx_len
+    let nlen int = table.ms().names[ti].name_len + sfx_len
     let tmp [512]u8
     if (nlen > 500) {
         return errors.fail("类型名过长")
     }
     let n int = 0
     let i int = 0
-    for i < support.ms().names[ti].name_len {
-        tmp[n] = support.pool_ctx().data[support.ms().names[ti].name_off + i]
+    for i < table.ms().names[ti].name_len {
+        tmp[n] = support.pool_ctx().data[table.ms().names[ti].name_off + i]
         n += 1
         i += 1
     }
@@ -1907,8 +1912,8 @@ pub fn tname_mangle(ti int, sfx_off int, sfx_len int) int {
     if (off < 0) {
         return -1
     }
-    support.ms().names[ti].name_off = off
-    support.ms().names[ti].name_len = n
+    table.ms().names[ti].name_off = off
+    table.ms().names[ti].name_len = n
     return 0
 }
 
@@ -1916,11 +1921,11 @@ pub fn tname_mangle(ti int, sfx_off int, sfx_len int) int {
 // 同一模块内所有闭包函数共用稳定后缀，避免与运行期符号或其他模块碰撞。
 pub fn iface_ct_name(sym_id int, suffix_off int, suffix_len int,
     name_off *int, name_len *int) int {
-    if (sym_id < 0 || sym_id >= support.ms().sym_n || suffix_off < 0
+    if (sym_id < 0 || sym_id >= table.ms().sym_n || suffix_off < 0
         || suffix_len < 0) {
         return errors.fail("内部错误：CT 接口函数身份无效")
     }
-    let sym support.CSym = support.ms().syms[sym_id]
+    let sym table.CSym = table.ms().syms[sym_id]
     if (sym.name_len >= 7
         && support.pool_ctx().data[sym.name_off] == '_'
         && support.pool_ctx().data[sym.name_off + 1] == '_'
@@ -2107,7 +2112,7 @@ pub fn iface_ct_emit(path *char, sym_base int) int {
     if (if_puts("// yh-ctiface v1 arch=") != 0
         || if_puts(support.target_arch_token()) != 0
         || if_puts(" suffix=") != 0
-        || if_put_np(support.fs().sym_sfx_off, support.fs().sym_sfx_len) != 0
+        || if_put_np(support.msym().off, support.msym().len) != 0
         || if_put('\n') != 0) { return -1 }
     let count int = comptime.ct_iface_count()
     let reachable *int = malloc(((count + 1) * sizeof(int)).to_type(u64)) .
@@ -2118,10 +2123,10 @@ pub fn iface_ct_emit(path *char, sym_base int) int {
     i = 0
     for i < count {
         let item comptime.CtFunction = comptime.ct_iface_function(i)
-        if (item.sym_id >= sym_base && item.sym_id < support.ms().sym_n
-            && (support.ms().syms[item.sym_id].flags
-                & (support.F_COMPTIME | support.F_PUB))
-                == (support.F_COMPTIME | support.F_PUB)) {
+        if (item.sym_id >= sym_base && item.sym_id < table.ms().sym_n
+            && (table.ms().syms[item.sym_id].flags
+                & (table.F_COMPTIME | table.F_PUB))
+                == (table.F_COMPTIME | table.F_PUB)) {
             reachable[i] = 1
         }
         i += 1
@@ -2135,7 +2140,7 @@ pub fn iface_ct_emit(path *char, sym_base int) int {
         if (paf_row >= 0 && paf_row < count) {
             let paf_item comptime.CtFunction =
                 comptime.ct_iface_function(paf_row)
-            if (paf_item.sym_id >= sym_base && paf_item.sym_id < support.ms().sym_n) {
+            if (paf_item.sym_id >= sym_base && paf_item.sym_id < table.ms().sym_n) {
                 reachable[paf_row] = 1
             }
         }
@@ -2211,8 +2216,8 @@ pub fn iface_ct_emit(path *char, sym_base int) int {
     }
     i = 0
     for i < const_n {
-        if (iface_ct_emit_const(closure_consts[i], support.fs().sym_sfx_off,
-                support.fs().sym_sfx_len) != 0) {
+        if (iface_ct_emit_const(closure_consts[i], support.msym().off,
+                support.msym().len) != 0) {
             if (closure_consts != 0) { free(closure_consts.to_type(*void)) }
             free(reachable.to_type(*void))
             return -1
@@ -2223,8 +2228,8 @@ pub fn iface_ct_emit(path *char, sym_base int) int {
     i = 0
     for i < count {
         if (reachable[i] != 0
-            && iface_ct_emit_function(i, support.fs().sym_sfx_off,
-                support.fs().sym_sfx_len) != 0) {
+            && iface_ct_emit_function(i, support.msym().off,
+                support.msym().len) != 0) {
             free(reachable.to_type(*void))
             return -1
         }
@@ -2271,12 +2276,12 @@ pub fn sem_call_begin(callee *support.Res) int {
     support.fc().c_call_base[support.fc().c_call_depth] = support.fc().c_arg_n
     support.fc().c_call_direct[support.fc().c_call_depth] = 0
     support.fc().c_call_abi[support.fc().c_call_depth] = support.ABI_YH
-    if (support.ms().types[callee.type_id].kind == support.TY_FN) {
-        support.fc().c_call_abi[support.fc().c_call_depth] = support.ms().sig_abi[support.ms().types[callee.type_id].sub]
+    if (table.ms().types[callee.type_id].kind == types.TY_FN) {
+        support.fc().c_call_abi[support.fc().c_call_depth] = table.ms().sig_abi[table.ms().types[callee.type_id].sub]
     }
     support.fc().c_call_depth += 1
     if (callee.sym >= 0) {
-        if (support.ms().syms[callee.sym].kind == support.SYM_FN) {
+        if (table.ms().syms[callee.sym].kind == table.SYM_FN) {
             support.fc().c_call_direct[support.fc().c_call_depth - 1] = 1
             return 1
         }
@@ -2302,20 +2307,20 @@ pub fn sem_push_arg(r *support.Res, callee *support.Res) int {
     if (support.fc().c_fold != 0) {
         return 0
     }
-    let kind int = support.ms().types[r.type_id].kind
+    let kind int = table.ms().types[r.type_id].kind
     let copy int = 0
     if (support.fc().c_call_depth > 0) {
         let depth int = support.fc().c_call_depth - 1
-        if (support.fc().c_call_abi[depth] == support.ABI_C && (kind == support.TY_STRUCT || kind == support.TY_UNION)) {
+        if (support.fc().c_call_abi[depth] == support.ABI_C && (kind == types.TY_STRUCT || kind == types.TY_UNION)) {
             copy = 1
         }
-        if (support.ms().types[callee.type_id].kind == support.TY_FN) {
-            let sig int = support.ms().types[callee.type_id].sub
+        if (table.ms().types[callee.type_id].kind == types.TY_FN) {
+            let sig int = table.ms().types[callee.type_id].sub
             let position int = support.fc().c_arg_n - support.fc().c_call_base[depth] - 1
-            if (position < support.ms().sig_np[sig]) {
-                let want int = support.ms().sig_params[support.ms().sig_first[sig] + position]
-                if (support.ms().types[want].kind == kind
-                    && (kind == support.TY_ARRAY || kind == support.TY_SLICE || kind == support.TY_STRUCT || kind == support.TY_UNION)) {
+            if (position < table.ms().sig_np[sig]) {
+                let want int = table.ms().sig_params[table.ms().sig_first[sig] + position]
+                if (table.ms().types[want].kind == kind
+                    && (kind == types.TY_ARRAY || kind == types.TY_SLICE || kind == types.TY_STRUCT || kind == types.TY_UNION)) {
                     copy = 1
                 }
             }
@@ -2331,20 +2336,20 @@ pub fn sem_call(callee *support.Res, r *support.Res) int {
         sem_res_reset(r, 0)
         return 0
     }
-    if (support.ms().types[callee.type_id].kind != support.TY_FN) {
+    if (table.ms().types[callee.type_id].kind != types.TY_FN) {
         return token.err_tok("被调用的表达式不是函数")
     }
     support.fc().c_call_depth -= 1
     let base int = support.fc().c_call_base[support.fc().c_call_depth]
     let direct int = support.fc().c_call_direct[support.fc().c_call_depth]
-    let sig int = support.ms().types[callee.type_id].sub
-    let np int = support.ms().sig_np[sig]
-    let vararg int = support.ms().sig_vararg[sig]
-    let ret int = support.ms().sig_ret[sig]
+    let sig int = table.ms().types[callee.type_id].sub
+    let np int = table.ms().sig_np[sig]
+    let vararg int = table.ms().sig_vararg[sig]
+    let ret int = table.ms().sig_ret[sig]
     let na int = support.fc().c_arg_n - base
     let noreturn int = 0
     if (direct != 0 && callee.sym >= 0
-        && (support.ms().syms[callee.sym].flags & support.F_NORETURN) != 0) {
+        && (table.ms().syms[callee.sym].flags & table.F_NORETURN) != 0) {
         noreturn = 1
     }
     // vararg==2：类型化变参（末尾打包为切片）；==1：裸 C 变参（仅 prelude）
@@ -2356,37 +2361,37 @@ pub fn sem_call(callee *support.Res, r *support.Res) int {
         return token.err_tok("实参个数与函数签名不符")
     }
     // 实参类型检查
-    let first int = support.ms().sig_first[sig]
+    let first int = table.ms().sig_first[sig]
     let i int = 0
     for i < na {
         let want int = 0
         if (i < np) {
-            want = support.ms().sig_params[first + i]
+            want = table.ms().sig_params[first + i]
         } else {
             want = -1
         }
         if (want >= 0) {
             // C ABI 回调的函数类型必须保存 C 调用约定；直接函数、变量、
             // 返回值和字段均按完整签名检查，普通 yh 函数不能穿过边界。
-            if (support.ms().types[want].kind == support.TY_FN && support.ms().sig_abi[sig] == support.ABI_C) {
+            if (table.ms().types[want].kind == types.TY_FN && table.ms().sig_abi[sig] == support.ABI_C) {
                 let arg_tid int = support.fc().c_args[base + i].type_id
-                if (support.ms().types[arg_tid].kind != support.TY_FN
-                    || support.ms().sig_abi[support.ms().types[arg_tid].sub] != support.ABI_C) {
+                if (table.ms().types[arg_tid].kind != types.TY_FN
+                    || table.ms().sig_abi[table.ms().types[arg_tid].sub] != support.ABI_C) {
                     return token.err_tok("C ABI 回调实参必须是 extern 函数")
                 }
             }
             // 数组实参按指针形参退化
             let wat int = support.fc().c_args[base + i].type_id
-            if (support.ms().types[wat].kind == support.TY_ARRAY && support.ms().types[want].kind == support.TY_PTR) {
-                if (support.ms().types[wat].elem != support.ms().types[want].elem && support.ms().types[want].elem != support.TY_VOID) {
+            if (table.ms().types[wat].kind == types.TY_ARRAY && table.ms().types[want].kind == types.TY_PTR) {
+                if (table.ms().types[wat].elem != table.ms().types[want].elem && table.ms().types[want].elem != types.TY_VOID) {
                     return token.err_tok("数组元素类型与指针形参不匹配")
                 }
                 i += 1
                 continue
             }
             // 切片实参按切片形参（同元素类型；长度不参与相容判断）
-            if (support.ms().types[wat].kind == support.TY_SLICE && support.ms().types[want].kind == support.TY_SLICE) {
-                if (support.ms().types[wat].elem != support.ms().types[want].elem && support.ms().types[want].elem != support.TY_VOID) {
+            if (table.ms().types[wat].kind == types.TY_SLICE && table.ms().types[want].kind == types.TY_SLICE) {
+                if (table.ms().types[wat].elem != table.ms().types[want].elem && table.ms().types[want].elem != types.TY_VOID) {
                     return token.err_tok("切片元素类型不匹配")
                 }
                 i += 1
@@ -2397,18 +2402,18 @@ pub fn sem_call(callee *support.Res, r *support.Res) int {
             }
         } else if (vararg == 2) {
             // 类型化变参：尾部实参类型须与元素类型相容
-            let velem_t int = support.ms().types[support.ms().sig_params[first + np]].elem
+            let velem_t int = table.ms().types[table.ms().sig_params[first + np]].elem
             if (sem_can_assign(velem_t, support.fc().c_args[base + i].type_id, support.fc().c_args[base + i].is_lit, support.fc().c_args[base + i].ival, support.fc().c_args[base + i].lit_big) != 0) {
                 return -1
             }
         } else {
             // 裸变参位置：整数/指针按 C 提升进寄存器
             let at2 int = support.fc().c_args[base + i].type_id
-            let k2 int = support.ms().types[at2].kind
-            if (support.ty_is_float(at2) != 0) {
+            let k2 int = table.ms().types[at2].kind
+            if (table.ty_is_float(at2) != 0) {
                 return token.err_tok("裸变参的浮点实参将在 B7 支持")
             }
-            if (k2 == support.TY_STRUCT || k2 == support.TY_UNION || k2 == support.TY_ARRAY || k2 == support.TY_SLICE) {
+            if (k2 == types.TY_STRUCT || k2 == types.TY_UNION || k2 == types.TY_ARRAY || k2 == types.TY_SLICE) {
                 return token.err_tok("聚合类型不能传给裸变参")
             }
         }
@@ -2417,11 +2422,11 @@ pub fn sem_call(callee *support.Res, r *support.Res) int {
     if (support.fc().c_fold != 0) {
         return token.err_tok("函数调用不是编译期常量")
     }
-    if (support.ms().sig_abi[sig] == support.ABI_C) {
+    if (table.ms().sig_abi[sig] == support.ABI_C) {
         // LL12：C ABI 的寄存器/栈搬运由 lowering 处理，语义层只记录结果形态。
-        let ret_c int = support.ms().sig_ret[sig]
-        let ret_agg_c int = (support.ms().types[ret_c].kind == support.TY_STRUCT
-            || support.ms().types[ret_c].kind == support.TY_UNION).to_type(int)
+        let ret_c int = table.ms().sig_ret[sig]
+        let ret_agg_c int = (table.ms().types[ret_c].kind == types.TY_STRUCT
+            || table.ms().types[ret_c].kind == types.TY_UNION).to_type(int)
         support.fc().c_arg_n = base
         sem_res_reset(r, ret_c)
         support.fc().c_res_is_addr = ret_agg_c
@@ -2432,7 +2437,7 @@ pub fn sem_call(callee *support.Res, r *support.Res) int {
     // 类型化变参：尾部实参打包为切片参数（数据由 lowering 生成）。
     let na2 int = na
     if (vararg == 2) {
-        let vslice int = support.ms().sig_params[first + np]
+        let vslice int = table.ms().sig_params[first + np]
         // 尾部已变成切片参数，后续分类不能沿用第一个浮点变参的类型。
         support.fc().c_args[base + np].type_id = vslice
         na2 = np + 1
@@ -2443,18 +2448,18 @@ pub fn sem_call(callee *support.Res, r *support.Res) int {
     let nfp int = 0
     let k int = base
     for k < base + regn {
-        if (support.ty_is_float(support.fc().c_args[k].type_id) != 0) { nfp += 1 }
+        if (table.ty_is_float(support.fc().c_args[k].type_id) != 0) { nfp += 1 }
         k += 1
     }
     if (nfp > support.TG_ARG_REGS) {
         return token.err_tok("过多的浮点参数暂不支持")
     }
-    let retk int = support.ms().types[ret].kind
+    let retk int = table.ms().types[ret].kind
     if (noreturn != 0) { support.fc().c_expr_noreturn = 1 }
     support.fc().c_arg_n = base
     sem_res_reset(r, ret)
-    support.fc().c_res_is_addr = (retk == support.TY_STRUCT || retk == support.TY_UNION
-        || retk == support.TY_ARRAY || retk == support.TY_SLICE).to_type(int)
+    support.fc().c_res_is_addr = (retk == types.TY_STRUCT || retk == types.TY_UNION
+        || retk == types.TY_ARRAY || retk == types.TY_SLICE).to_type(int)
     return 0
 }
 
@@ -2477,7 +2482,7 @@ pub fn sem_struct_lit_begin(tid int) int {
     if (support.session().compile == 0 || support.fc().c_fold != 0) {
         return 0
     }
-    if (support.ty_is_opaque(tid) != 0) {
+    if (table.ty_is_opaque(tid) != 0) {
         return token.err_tok("不透明 C 类型不能构造实例")
     }
     // pub struct 一等化：字段一律公开，跨模块位置式构造不再检查字段 pub。
@@ -2498,9 +2503,9 @@ pub fn sem_struct_lit_field(tid int, fidx int) int {
     if (support.session().compile == 0 || support.fc().c_fold != 0) {
         return 0
     }
-    let ftid int = support.ms().fields[fidx].type_id
-    let foff int = support.ms().fields[fidx].offset
-    let fk int = support.ms().types[ftid].kind
+    let ftid int = table.ms().fields[fidx].type_id
+    let foff int = table.ms().fields[fidx].offset
+    let fk int = table.ms().types[ftid].kind
     if (sem_can_assign(ftid, support.fc().c_lit_last_type, support.fc().c_lit_last_lit, support.fc().c_lit_last_ival, 0) != 0) {
         return -1
     }
@@ -2520,10 +2525,10 @@ pub fn sem_struct_lit_end(tid int) int {
 
 pub fn sem_fn_begin(idx int) int {
     support.fc().c_fn_sym = idx
-    support.fc().c_fn_flags = support.ms().syms[idx].flags
+    support.fc().c_fn_flags = table.ms().syms[idx].flags
     support.fc().c_fn_falls = 1
     support.fc().c_expr_noreturn = 0
-    support.fc().c_fn_ret = support.ms().types[support.ms().syms[idx].type_id].elem
+    support.fc().c_fn_ret = table.ms().types[table.ms().syms[idx].type_id].elem
     // LL12：标签、栈槽、序言与体缓冲等机器状态由 LLVM lowering 生成，
     // 语义层只保留类型事实与诊断状态。
     support.fc().c_temp_off = 0
@@ -2534,48 +2539,47 @@ pub fn sem_fn_begin(idx int) int {
     support.fc().c_fp_argn = 0
     support.fc().c_ret_ptr_off = 0
     support.fc().c_ret_agg_val = 0
-    abi_c_cursor_init(&support.fc().c_cabi_cursor, support.tg_darwin())
     support.fc().c_fp_off = 16
     // 聚合返回：记录间接返回事实，返回缓冲地址由 lowering 处理。
-    let rk int = support.ms().types[support.fc().c_fn_ret].kind
+    let rk int = table.ms().types[support.fc().c_fn_ret].kind
     let indirect_ret int = 1
-    if ((support.fc().c_fn_flags & support.F_CABI) != 0) {
-        let result support.ABIArg
+    if ((support.fc().c_fn_flags & table.F_CABI) != 0) {
+        let result ABIArg
         abi_c_result(support.fc().c_fn_ret, &result)
         indirect_ret = result.indirect
     }
-    if (indirect_ret != 0 && (rk == support.TY_STRUCT || rk == support.TY_UNION
-        || rk == support.TY_ARRAY || rk == support.TY_SLICE)) {
+    if (indirect_ret != 0 && (rk == types.TY_STRUCT || rk == types.TY_UNION
+        || rk == types.TY_ARRAY || rk == types.TY_SLICE)) {
         support.fc().c_ret_agg = 1
     } else {
         support.fc().c_ret_agg = 0
     }
-    support.scope_push()
+    table.scope_push()
     return 0
 }
 
 pub fn sem_declare_param(start int, n int, tid int, regidx int) int {
-    if (support.ty_has_opaque_value(tid) != 0) {
+    if (table.ty_has_opaque_value(tid) != 0) {
         return token.err_tok("不透明 C 类型只能通过指针传递")
     }
     // LL12：C ABI 的寄存器/栈分类由 LLVM lowering 处理，语义层只登记参数。
-    let pk int = support.ms().types[tid].kind
-    let is_agg int = ((pk == support.TY_ARRAY) || (pk == support.TY_STRUCT) || (pk == support.TY_UNION)
-                      || (pk == support.TY_SLICE)).to_type(int)
-    let idx int = sym_push(start, n, support.SYM_VAR, tid, support.F_PARAM)
+    let pk int = table.ms().types[tid].kind
+    let is_agg int = ((pk == types.TY_ARRAY) || (pk == types.TY_STRUCT) || (pk == types.TY_UNION)
+                      || (pk == types.TY_SLICE)).to_type(int)
+    let idx int = sym_push(start, n, table.SYM_VAR, tid, table.F_PARAM)
     if (idx < 0) {
         return -1
     }
     if (is_agg != 0) {
         // 聚合按值：形参持有调用方副本；独立副本与栈槽由 lowering 生成。
-        support.ms().syms[idx].flags |= support.F_AGGPARAM
+        table.ms().syms[idx].flags |= table.F_AGGPARAM
         support.fc().c_aggparam_n += 1
         return 0
     }
-    if (support.ty_is_float(tid) != 0) {
+    if (table.ty_is_float(tid) != 0) {
         // yh 内部函数的浮点参数上限由旧 ABI 约定决定；C 函数按 lowering 的
         // ABI 分类处理（HFA 逐成员占寄存器，不受此上限约束）。
-        if ((support.fc().c_fn_flags & support.F_CABI) == 0) {
+        if ((support.fc().c_fn_flags & table.F_CABI) == 0) {
             if (support.fc().c_fp_argn >= support.TG_ARG_REGS) {
                 return token.err_tok("过多的浮点参数暂不支持")
             }
@@ -2590,8 +2594,8 @@ pub fn sem_fn_end() int {
     if (sem_glabels_verify() != 0) {
         return -1
     }
-    if ((support.fc().c_fn_flags & support.F_NORETURN) != 0) {
-        if (support.fc().c_fn_ret != support.TY_VOID) {
+    if ((support.fc().c_fn_flags & table.F_NORETURN) != 0) {
+        if (support.fc().c_fn_ret != types.TY_VOID) {
             return token.err_tok("noreturn 函数必须返回 void")
         }
         if (support.fc().c_fn_falls != 0) {
@@ -2599,50 +2603,50 @@ pub fn sem_fn_end() int {
         }
     }
     // LL12：落底返回、prologue、聚合参数入口拷贝与 epilogue 由 lowering 生成。
-    support.scope_pop()
+    table.scope_pop()
     return 0
 }
 
 // sem_add_field：为 struct/union 登记一个字段（pass 1）。
 // pub struct 一等化后字段一律公开，is_pub 恒 1（.s.i 接口按此发射）。
 pub fn sem_add_field(stid int, start int, n int, ftid int) int {
-    if (support.ty_has_opaque_value(ftid) != 0) {
+    if (table.ty_has_opaque_value(ftid) != 0) {
         return token.err_tok("不透明 C 类型只能通过指针使用")
     }
-    let fk int = support.ms().types[ftid].kind
-    if ((support.ty_name_attrs(stid) & token.ATTR_EXTERN) != 0 && ty_c_layout(ftid) == 0) {
+    let fk int = table.ms().types[ftid].kind
+    if ((table.ty_name_attrs(stid) & token.ATTR_EXTERN) != 0 && ty_c_layout(ftid) == 0) {
         return token.err_tok("extern struct/union 字段不是 C 兼容布局类型")
     }
-    if ((fk == support.TY_STRUCT || fk == support.TY_UNION) && support.ms().types[ftid].size == 0) {
+    if ((fk == types.TY_STRUCT || fk == types.TY_UNION) && table.ms().types[ftid].size == 0) {
         return token.err_tok("字段使用了不完整的类型")
     }
-    if (support.ms().field_n == support.ms().field_cap) {
-        let ncap int = support.ms().field_cap * 2
+    if (table.ms().field_n == table.ms().field_cap) {
+        let ncap int = table.ms().field_cap * 2
         if (ncap == 0) {
             ncap = 64
         }
-        let nd *support.SField = malloc((ncap * sizeof(support.SField)).to_type(u64)).to_type(*support.SField)
+        let nd *types.SField = malloc((ncap * sizeof(types.SField)).to_type(u64)).to_type(*types.SField)
         if (nd == 0) {
             return errors.fail("内存分配失败")
         }
-        if (support.ms().field_n > 0) {
-            memcpy(nd, support.ms().fields, (support.ms().field_n * sizeof(support.SField)).to_type(u64))
+        if (table.ms().field_n > 0) {
+            memcpy(nd, table.ms().fields, (table.ms().field_n * sizeof(types.SField)).to_type(u64))
         }
-        free(support.ms().fields)
-        support.ms().fields = nd
-        support.ms().field_cap = ncap
+        free(table.ms().fields)
+        table.ms().fields = nd
+        table.ms().field_cap = ncap
     }
     let off int = support.name_intern(start, n)
     if (off < 0) {
         return -1
     }
-    support.ms().fields[support.ms().field_n].name_off = off
-    support.ms().fields[support.ms().field_n].name_len = n
-    support.ms().fields[support.ms().field_n].type_id = ftid
-    support.ms().fields[support.ms().field_n].offset = 0
-    support.ms().fields[support.ms().field_n].is_pub = 1
-    support.ms().field_n += 1
-    support.ms().types[stid].len = support.ms().field_n - support.ms().types[stid].sub
+    table.ms().fields[table.ms().field_n].name_off = off
+    table.ms().fields[table.ms().field_n].name_len = n
+    table.ms().fields[table.ms().field_n].type_id = ftid
+    table.ms().fields[table.ms().field_n].offset = 0
+    table.ms().fields[table.ms().field_n].is_pub = 1
+    table.ms().field_n += 1
+    table.ms().types[stid].len = table.ms().field_n - table.ms().types[stid].sub
     return 0
 }
 
@@ -2666,20 +2670,20 @@ pub fn sem_binop(op int, lhs *support.Res, rhs *support.Res) int {
     if (op == token.TK_EQEQ || op == token.TK_NEQ || op == token.TK_LT || op == token.TK_LEQ
         || op == token.TK_GT || op == token.TK_GEQ) {
         // 指针只参与 ==/!=（与 0 或同型）
-        if (support.ms().types[lhs.type_id].kind == support.TY_PTR || support.ms().types[rhs.type_id].kind == support.TY_PTR) {
+        if (table.ms().types[lhs.type_id].kind == types.TY_PTR || table.ms().types[rhs.type_id].kind == types.TY_PTR) {
             if (op != token.TK_EQEQ && op != token.TK_NEQ) {
                 return token.err_tok("指针只支持 == / != 比较")
             }
             let ok int = 0
             if (lhs.type_id == rhs.type_id) { ok = 1 }
-            if (support.ms().types[lhs.type_id].elem == support.TY_VOID) { ok = 1 }
-            if (support.ms().types[rhs.type_id].elem == support.TY_VOID) { ok = 1 }
+            if (table.ms().types[lhs.type_id].elem == types.TY_VOID) { ok = 1 }
+            if (table.ms().types[rhs.type_id].elem == types.TY_VOID) { ok = 1 }
             if (rhs.is_lit != 0 && rhs.is_const != 0 && rhs.ival == 0) { ok = 1 }
             if (lhs.is_lit != 0 && lhs.is_const != 0 && lhs.ival == 0) { ok = 1 }
             if (ok == 0) {
                 return token.err_tok("指针比较类型不匹配")
             }
-            support.sem_res_const(lhs, support.TY_BOOL, 0)
+            support.sem_res_const(lhs, types.TY_BOOL, 0)
             if (support.fc().c_fold == 0) {
             }
             support.fc().c_res_is_addr = 0
@@ -2687,25 +2691,25 @@ pub fn sem_binop(op int, lhs *support.Res, rhs *support.Res) int {
         }
     }
     // 字面量适配：一侧是字面量时借用另一侧类型
-    if (rhs.is_lit != 0 && support.ty_is_scalar(lhs.type_id) != 0
-        && support.ty_is_integer(lhs.type_id) != 0 && support.ty_is_integer(rhs.type_id) != 0) {
-        if (support.sem_lit_fits(lhs.type_id, rhs.ival) != 0) {
+    if (rhs.is_lit != 0 && table.ty_is_scalar(lhs.type_id) != 0
+        && table.ty_is_integer(lhs.type_id) != 0 && table.ty_is_integer(rhs.type_id) != 0) {
+        if (table.sem_lit_fits(lhs.type_id, rhs.ival) != 0) {
             rhs.type_id = lhs.type_id
         }
     }
-    if (lhs.is_lit != 0 && support.ty_is_scalar(rhs.type_id) != 0
-        && support.ty_is_integer(lhs.type_id) != 0 && support.ty_is_integer(rhs.type_id) != 0) {
-        if (support.sem_lit_fits(rhs.type_id, lhs.ival) != 0) {
+    if (lhs.is_lit != 0 && table.ty_is_scalar(rhs.type_id) != 0
+        && table.ty_is_integer(lhs.type_id) != 0 && table.ty_is_integer(rhs.type_id) != 0) {
+        if (table.sem_lit_fits(rhs.type_id, lhs.ival) != 0) {
             lhs.type_id = rhs.type_id
         }
     }
     // 指针算术：p + i / p - i（按元素大小缩放下标）；指针比较另走分支
-    let lk int = support.ms().types[lhs.type_id].kind
-    let rk int = support.ms().types[rhs.type_id].kind
-    if ((lk == support.TY_PTR && rk == support.TY_PTR) || lk == support.TY_ARRAY || rk == support.TY_ARRAY) {
+    let lk int = table.ms().types[lhs.type_id].kind
+    let rk int = table.ms().types[rhs.type_id].kind
+    if ((lk == types.TY_PTR && rk == types.TY_PTR) || lk == types.TY_ARRAY || rk == types.TY_ARRAY) {
         return token.err_tok("指针/数组不参与该运算")
     }
-    if (lk == support.TY_PTR && support.ty_is_integer(rhs.type_id) != 0) {
+    if (lk == types.TY_PTR && table.ty_is_integer(rhs.type_id) != 0) {
         if (op == token.TK_PLUS || op == token.TK_MINUS) {
             if (support.fc().c_fold != 0) {
                 return token.err_tok("指针运算不是编译期常量")
@@ -2715,7 +2719,7 @@ pub fn sem_binop(op int, lhs *support.Res, rhs *support.Res) int {
         }
         return token.err_tok("指针只支持 + / - 整数")
     }
-    if (rk == support.TY_PTR && support.ty_is_integer(lhs.type_id) != 0 && op == token.TK_PLUS) {
+    if (rk == types.TY_PTR && table.ty_is_integer(lhs.type_id) != 0 && op == token.TK_PLUS) {
         if (support.fc().c_fold != 0) {
             return token.err_tok("指针运算不是编译期常量")
         }
@@ -2726,7 +2730,7 @@ pub fn sem_binop(op int, lhs *support.Res, rhs *support.Res) int {
         return 0
     }
     tid = sem_promote(lhs.type_id, rhs.type_id)
-    if (support.ty_is_float(tid) != 0) {
+    if (table.ty_is_float(tid) != 0) {
         // 浮点二元/比较：折叠时直接按位模式求值，运行期左 d1、右 d0（值栈已按序压入）
         if (support.fc().c_fold != 0) {
             if (lhs.is_const == 0 || rhs.is_const == 0) {
@@ -2739,7 +2743,7 @@ pub fn sem_binop(op int, lhs *support.Res, rhs *support.Res) int {
             let fp_cmp int = (op == token.TK_EQEQ || op == token.TK_NEQ || op == token.TK_LT
                 || op == token.TK_LEQ || op == token.TK_GT || op == token.TK_GEQ).to_type(int)
             if (fp_cmp != 0) {
-                support.sem_res_const(lhs, support.TY_BOOL, value)
+                support.sem_res_const(lhs, types.TY_BOOL, value)
             } else {
                 support.sem_res_const(lhs, tid, value)
                 lhs.fval_bits = value
@@ -2753,7 +2757,7 @@ pub fn sem_binop(op int, lhs *support.Res, rhs *support.Res) int {
             return token.err_tok("浮点不支持该运算")
         }
         if (iscmp != 0) {
-            support.sem_res_const(lhs, support.TY_BOOL, 0)
+            support.sem_res_const(lhs, types.TY_BOOL, 0)
         } else {
             sem_res_reset(lhs, tid)
         }
@@ -2761,7 +2765,7 @@ pub fn sem_binop(op int, lhs *support.Res, rhs *support.Res) int {
         support.fc().c_res_is_addr = 0
         return 0
     }
-    if (support.ty_is_scalar(tid) == 0) {
+    if (table.ty_is_scalar(tid) == 0) {
         return token.err_tok("该类型不支持算术运算")
     }
     let is_cmp int = 0
@@ -2776,16 +2780,16 @@ pub fn sem_binop(op int, lhs *support.Res, rhs *support.Res) int {
         let value i64 = 0
         if (sem_fold_const_binop(op, tid, lhs.ival, rhs.ival, &value) != 0) { return -1 }
         if (is_cmp != 0) {
-            support.sem_res_const(lhs, support.TY_BOOL, value)
+            support.sem_res_const(lhs, types.TY_BOOL, value)
         } else {
             support.sem_res_const(lhs, tid, value)
             // 浮点常量同时保留位模式，供 const 初始化与浮点装载使用。
-            if (support.ty_is_float(tid) != 0) { lhs.fval_bits = value }
+            if (table.ty_is_float(tid) != 0) { lhs.fval_bits = value }
         }
         return 0
     }
     if (is_cmp != 0) {
-        support.sem_res_const(lhs, support.TY_BOOL, 0)
+        support.sem_res_const(lhs, types.TY_BOOL, 0)
     } else {
         // 运算按 64 位计算，源结果先恢复定宽位型，随后扩大转换不能读取高位残留。
         sem_res_reset(lhs, tid)
@@ -2802,7 +2806,7 @@ pub fn sem_shortcircuit(op int, lhs *support.Res) int {
         return 0
     }
     if (support.fc().c_fold != 0) {
-        if (support.ty_is_scalar(lhs.type_id) == 0 || support.ty_is_float(lhs.type_id) != 0) {
+        if (table.ty_is_scalar(lhs.type_id) == 0 || table.ty_is_float(lhs.type_id) != 0) {
             return token.err_tok("逻辑运算要求非浮点标量")
         }
         if (lhs.is_const == 0) {
@@ -2814,7 +2818,7 @@ pub fn sem_shortcircuit(op int, lhs *support.Res) int {
         support.fc().sc_sc_false_stk[support.fc().sc_sc_depth] = (lhs.ival != 0).to_type(int)
         support.fc().sc_sc_depth += 1
         support.fc().c_res_is_addr = 0
-        return sem_res_reset(lhs, support.TY_BOOL)
+        return sem_res_reset(lhs, types.TY_BOOL)
     }
     // 保存外层短路标签（嵌套 a&&b||c&&d 时内层不破坏外层）
     support.fc().sc_sc_false_stk[support.fc().sc_sc_depth] = support.fc().sc_lbl_false
@@ -2825,7 +2829,7 @@ pub fn sem_shortcircuit(op int, lhs *support.Res) int {
     if (op == token.TK_ANDAND) {
     } else {
     }
-    sem_res_reset(lhs, support.TY_BOOL)
+    sem_res_reset(lhs, types.TY_BOOL)
     support.fc().c_res_is_addr = 0
     return 0
 }
@@ -2836,7 +2840,7 @@ pub fn sem_shortcircuit_end(op int, lhs *support.Res) int {
         return 0
     }
     if (support.fc().c_fold != 0) {
-        if (support.ty_is_scalar(lhs.type_id) == 0 || support.ty_is_float(lhs.type_id) != 0) {
+        if (table.ty_is_scalar(lhs.type_id) == 0 || table.ty_is_float(lhs.type_id) != 0) {
             return token.err_tok("逻辑运算要求非浮点标量")
         }
         if (lhs.is_const == 0) {
@@ -2849,7 +2853,7 @@ pub fn sem_shortcircuit_end(op int, lhs *support.Res) int {
         if (op == token.TK_ANDAND) { value = (left != 0 && right != 0).to_type(int) }
         else { value = (left != 0 || right != 0).to_type(int) }
         support.fc().c_res_is_addr = 0
-        return support.sem_res_const(lhs, support.TY_BOOL, value.to_type(i64))
+        return support.sem_res_const(lhs, types.TY_BOOL, value.to_type(i64))
     }
     if (op == token.TK_ANDAND) {
         // 左真且右真 → 结果 1
@@ -2911,13 +2915,13 @@ pub fn sem_unary(op int, operand *support.Res) int {
         return 0
     }
     if (op == token.TK_STAR) {
-        if (support.ms().types[operand.type_id].kind != support.TY_PTR) {
+        if (table.ms().types[operand.type_id].kind != types.TY_PTR) {
             return token.err_tok("解引用的操作数必须是指针")
         }
-        let elem int = support.ms().types[operand.type_id].elem
-        let ek int = support.ms().types[elem].kind
-        let agg int = (ek == support.TY_STRUCT || ek == support.TY_UNION
-            || ek == support.TY_ARRAY || ek == support.TY_SLICE).to_type(int)
+        let elem int = table.ms().types[operand.type_id].elem
+        let ek int = table.ms().types[elem].kind
+        let agg int = (ek == types.TY_STRUCT || ek == types.TY_UNION
+            || ek == types.TY_ARRAY || ek == types.TY_SLICE).to_type(int)
         if (support.fc().c_lvalue == 0 && support.fc().c_fold == 0 && agg == 0) {
             // x0 = 指针值（地址）→ 装入点值
         }
@@ -2925,7 +2929,7 @@ pub fn sem_unary(op int, operand *support.Res) int {
         // 解引用聚合**不装入**，x0 保持地址；按标量装入会把对象开头 8 字节
         // 当成地址（`*dst = *src` 曾因此块拷贝到野地址而段错误）。
         support.fc().c_res_is_addr = 1
-        sem_res_reset(operand, support.ms().types[operand.type_id].elem)
+        sem_res_reset(operand, table.ms().types[operand.type_id].elem)
         operand.is_const = 0
         return 0
     }
@@ -2940,7 +2944,7 @@ pub fn sem_unary(op int, operand *support.Res) int {
     }
     if (operand.is_const != 0) {
         // 常量（含字面量）：折叠求值并保留字面量性（如 let n i8 = -100）
-        if (support.ty_is_float(operand.type_id) != 0) {
+        if (table.ty_is_float(operand.type_id) != 0) {
             let fp_value i64 = 0
             if (sem_fold_const_unary(op, operand.type_id, operand.ival,
                     operand.is_lit, &fp_value) != 0) { return -1 }
@@ -2951,14 +2955,14 @@ pub fn sem_unary(op int, operand *support.Res) int {
             return 0
         }
         let unary_type int = operand.type_id
-        if (support.ms().types[unary_type].kind == support.TY_BOOL) { unary_type = support.TY_I32 }
-        if (support.ty_is_integer(operand.type_id) != 0) {
+        if (table.ms().types[unary_type].kind == types.TY_BOOL) { unary_type = types.TY_I32 }
+        if (table.ty_is_integer(operand.type_id) != 0) {
             // 超出当前整数宽度的负数字面量先提升为 i64，保留完整值供赋值与二元运算适配。
             if (op == token.TK_MINUS && operand.is_lit != 0 && operand.ival >= 0) {
                 let negative i64 = 0 - operand.ival
-                if (support.sem_lit_fits(unary_type, negative) == 0
-                    && support.sem_lit_fits(support.TY_I64, negative) != 0) {
-                    unary_type = support.TY_I64
+                if (table.sem_lit_fits(unary_type, negative) == 0
+                    && table.sem_lit_fits(types.TY_I64, negative) != 0) {
+                    unary_type = types.TY_I64
                 }
             }
             let value i64 = 0
@@ -2967,7 +2971,7 @@ pub fn sem_unary(op int, operand *support.Res) int {
             operand.ival = value
         } else {
             operand.ival = fold_unary(op, operand.ival)
-            unary_type = support.TY_I32
+            unary_type = types.TY_I32
         }
         // 常量与动态一元结果类型一致；bool 已升为 int，其他整数保留原宽度/符号性。
         operand.type_id = unary_type
@@ -2976,7 +2980,7 @@ pub fn sem_unary(op int, operand *support.Res) int {
         return 0
     }
     let tid int = operand.type_id
-    if (support.ty_is_float(tid) != 0) {
+    if (table.ty_is_float(tid) != 0) {
         if (op == token.TK_MINUS) {
             sem_res_reset(operand, tid)
             support.fc().c_res_is_addr = 0
@@ -2987,10 +2991,10 @@ pub fn sem_unary(op int, operand *support.Res) int {
         }
         return token.err_tok("浮点只支持一元 +/-")
     }
-    if (support.ms().types[tid].kind == support.TY_BOOL) {
-        tid = support.TY_I32
+    if (table.ms().types[tid].kind == types.TY_BOOL) {
+        tid = types.TY_I32
     }
-    if (support.ty_is_scalar(tid) == 0) {
+    if (table.ty_is_scalar(tid) == 0) {
         return token.err_tok("该类型不支持一元运算")
     }
     sem_res_reset(operand, tid)
@@ -3003,17 +3007,17 @@ pub fn sem_index(base *support.Res, idx *support.Res) int {
         base.type_id = 0
         return 0
     }
-    if (support.ty_is_integer(idx.type_id) == 0) {
+    if (table.ty_is_integer(idx.type_id) == 0) {
         return token.err_tok("下标必须是整数")
     }
-    let bk int = support.ms().types[base.type_id].kind
+    let bk int = table.ms().types[base.type_id].kind
     let elem int = 0
-    if (bk == support.TY_PTR) {
-        elem = support.ms().types[base.type_id].elem
-    } else if (bk == support.TY_ARRAY) {
-        elem = support.ms().types[base.type_id].elem
-    } else if (bk == support.TY_SLICE) {
-        elem = support.ms().types[base.type_id].elem
+    if (bk == types.TY_PTR) {
+        elem = table.ms().types[base.type_id].elem
+    } else if (bk == types.TY_ARRAY) {
+        elem = table.ms().types[base.type_id].elem
+    } else if (bk == types.TY_SLICE) {
+        elem = table.ms().types[base.type_id].elem
     } else {
         return token.err_tok("该类型不支持下标访问")
     }
@@ -3021,28 +3025,28 @@ pub fn sem_index(base *support.Res, idx *support.Res) int {
         return token.err_tok("下标访问不是编译期常量")
     }
     // lvalue 模式下指针变量的基址是「变量的地址」——先装入指针值
-    if (bk == support.TY_PTR && support.fc().c_lvalue != 0) {
+    if (bk == types.TY_PTR && support.fc().c_lvalue != 0) {
     }
     // 切片：基址是切片数据指针（槽内偏移 8），需先取 data 字段
-    if (bk == support.TY_SLICE) {
+    if (bk == types.TY_SLICE) {
     }
     // 地址 = 基址(x9) + 下标(x0) * 元素大小
-    let esz int = support.ms().types[elem].size
+    let esz int = table.ms().types[elem].size
     if (esz == 2) {
     } else if (esz == 4) {
     } else if (esz == 8) {
     } else if (esz != 1) {
         // 任意大小的聚合元素（如 20 字节的 Tok）：乘法缩放
     }
-    let ek int = support.ms().types[elem].kind
-    if (ek == support.TY_STRUCT || ek == support.TY_UNION || ek == support.TY_ARRAY || ek == support.TY_SLICE) {
+    let ek int = table.ms().types[elem].kind
+    if (ek == types.TY_STRUCT || ek == types.TY_UNION || ek == types.TY_ARRAY || ek == types.TY_SLICE) {
         // 聚合元素：保留地址语义（成员/下标链后续再加偏移）
         support.fc().c_res_is_addr = 1
     } else if (support.fc().c_lvalue == 0) {
-        if (support.ty_is_float(elem) != 0) {
+        if (table.ty_is_float(elem) != 0) {
             // 浮点元素：装入浮点寄存器
             let fsfx *char = "d"
-            if (support.ms().types[elem].size == 4) { fsfx = "s" }
+            if (table.ms().types[elem].size == 4) { fsfx = "s" }
         } else {
         }
         support.fc().c_res_is_addr = 0
@@ -3061,18 +3065,18 @@ pub fn sem_slice(base *support.Res, sres *support.Res, eres *support.Res) int {
     if (support.fc().c_fold != 0) {
         return token.err_tok("切片表达式不是编译期常量")
     }
-    let bk int = support.ms().types[base.type_id].kind
-    if (bk != support.TY_ARRAY && bk != support.TY_SLICE) {
+    let bk int = table.ms().types[base.type_id].kind
+    if (bk != types.TY_ARRAY && bk != types.TY_SLICE) {
         return token.err_tok("切片表达式需要数组或切片")
     }
-    if (support.ty_is_integer(sres.type_id) == 0 || support.ty_is_integer(eres.type_id) == 0) {
+    if (table.ty_is_integer(sres.type_id) == 0 || table.ty_is_integer(eres.type_id) == 0) {
         return token.err_tok("切片下标必须是整数")
     }
-    let elem int = support.ms().types[base.type_id].elem
-    let esz int = support.ms().types[elem].size
+    let elem int = table.ms().types[base.type_id].elem
+    let esz int = table.ms().types[elem].size
     // x0 = end → x11 暂存；弹 start → x0；弹 base → x10
     // 切片基址取 data 字段（{len, data} 的偏移 8）
-    if (bk == support.TY_SLICE) {
+    if (bk == types.TY_SLICE) {
     }
     // x9 = max(0, end - start)
     let l_pos int = 0
@@ -3104,14 +3108,14 @@ pub fn sem_member(base *support.Res, name_start int, name_len int) int {
     //     不得再间接一次——否则多解一层，字段访问落在野地址上。
     // 枚举基底：`EnumName.member` 里枚举类型名在模块模式下会被求值成枚举值
     //（类型名登记成常量符号，形态随 pass 变化），此时按成员名查符号表取成员常量。
-    if (base.type_id >= 0 && support.ms().types[base.type_id].kind == support.TY_ENUM) {
-        let msym int = support.sym_lookup(name_start, name_len)
+    if (base.type_id >= 0 && table.ms().types[base.type_id].kind == types.TY_ENUM) {
+        let msym int = table.sym_lookup(name_start, name_len)
         if (msym < 0) {
             // 名字表里查不到时按名字反查枚举成员表（登记时快照名字与值，不经过符号表）：
             // 模块 worker 二次解析编译期正文时枚举成员符号不可见（实测）。
-            let eidx int = support.em_find(name_start, name_len)
-            if (eidx >= 0 && support.em_get_ready(eidx) != 0) {
-                let evalue i64 = support.em_get_val(eidx)
+            let eidx int = table.em_find(name_start, name_len)
+            if (eidx >= 0 && table.em_get_ready(eidx) != 0) {
+                let evalue i64 = table.em_get_val(eidx)
                 support.sem_res_const(base, base.type_id, evalue)
                 return 0
             }
@@ -3119,7 +3123,7 @@ pub fn sem_member(base *support.Res, name_start int, name_len int) int {
 
         // 不校验成员符号的 type_id：模块模式下枚举成员登记时的类型上下文与基底
         // 枚举类型 id 不总一致；枚举成员注册在全局名字表里，同名成员本就不能共存。
-        if (msym < 0 || (support.ms().syms[msym].flags & support.F_ENUM_MEMBER) == 0) {
+        if (msym < 0 || (table.ms().syms[msym].flags & table.F_ENUM_MEMBER) == 0) {
             // 模块模式：枚举类型名会被求值成枚举值，而此时成员符号在当前编译单元的
             // 名字表里已经查不到（实测），因此这里只能给出可操作的诊断。同模块顶层
             // 常量引用同一成员是正常的，推荐用常量中转。
@@ -3128,41 +3132,41 @@ pub fn sem_member(base *support.Res, name_start int, name_len int) int {
             }
             return token.err_tok("枚举没有这个成员")
         }
-        if (support.ms().syms[msym].const_ready == 0) {
+        if (table.ms().syms[msym].const_ready == 0) {
             return token.err_tok("编译期常量尚未就绪")
         }
-        let value i64 = support.ms().syms[msym].cval
+        let value i64 = table.ms().syms[msym].cval
         support.sem_res_const(base, base.type_id, value)
         return 0
     }
     let base_indirect int = support.fc().c_res_is_addr
-    let bk int = support.ms().types[base.type_id].kind
+    let bk int = table.ms().types[base.type_id].kind
     let stid int = 0
-    if (bk == support.TY_PTR) {
-        stid = support.ms().types[base.type_id].elem
-        if (support.ms().types[stid].kind != support.TY_STRUCT && support.ms().types[stid].kind != support.TY_UNION) {
+    if (bk == types.TY_PTR) {
+        stid = table.ms().types[base.type_id].elem
+        if (table.ms().types[stid].kind != types.TY_STRUCT && table.ms().types[stid].kind != types.TY_UNION) {
             return token.err_tok("『.』的左侧不是结构体或结构体指针")
         }
-    } else if (bk == support.TY_STRUCT || bk == support.TY_UNION) {
+    } else if (bk == types.TY_STRUCT || bk == types.TY_UNION) {
         stid = base.type_id
     } else {
         return token.err_tok("『.』的左侧不是结构体或结构体指针")
     }
-    if (support.ty_is_opaque(stid) != 0) {
+    if (table.ty_is_opaque(stid) != 0) {
         return token.err_tok("不透明 C 类型没有可访问字段")
     }
     // 字段查找
-    let st int = support.ms().types[stid].sub
-    let nf int = support.ms().types[stid].len
+    let st int = table.ms().types[stid].sub
+    let nf int = table.ms().types[stid].len
     let found int = -1
     let i int = 0
     for i < nf {
         let f int = st + i
-        if (support.ms().fields[f].name_len == name_len) {
+        if (table.ms().fields[f].name_len == name_len) {
             let match int = 1
             let j int = 0
             for j < name_len {
-                if (support.pool_ctx().data[support.ms().fields[f].name_off + j] != support.src_ctx().data[name_start + j]) {
+                if (support.pool_ctx().data[table.ms().fields[f].name_off + j] != support.src_ctx().data[name_start + j]) {
                     match = 0
                     break
                 }
@@ -3183,8 +3187,8 @@ pub fn sem_member(base *support.Res, name_start int, name_len int) int {
     if (support.fc().c_fold != 0) {
         return token.err_tok("字段访问不是编译期常量")
     }
-    let off int = support.ms().fields[found].offset
-    if (bk == support.TY_PTR) {
+    let off int = table.ms().fields[found].offset
+    if (bk == types.TY_PTR) {
         if (support.fc().c_lvalue != 0 && base_indirect != 0) {
             // x0 = 指针变量的地址 → 装入指针值
         }
@@ -3197,10 +3201,10 @@ pub fn sem_member(base *support.Res, name_start int, name_len int) int {
             // （与 em_lea_local* 的深帧约定一致：调用方不依赖 x12 跨 lea 存活）。
         }
     }
-    let ftid int = support.ms().fields[found].type_id
+    let ftid int = table.ms().fields[found].type_id
     if (support.fc().c_lvalue == 0) {
-        let fk int = support.ms().types[ftid].kind
-        if (fk != support.TY_STRUCT && fk != support.TY_UNION && fk != support.TY_ARRAY && fk != support.TY_SLICE) {
+        let fk int = table.ms().types[ftid].kind
+        if (fk != types.TY_STRUCT && fk != types.TY_UNION && fk != types.TY_ARRAY && fk != types.TY_SLICE) {
             support.fc().c_res_is_addr = 0
         } else {
             // 聚合字段：保持地址语义
@@ -3214,14 +3218,14 @@ pub fn sem_member(base *support.Res, name_start int, name_len int) int {
 }
 
 pub fn sem_sizeof(tid int, r *support.Res) int {
-    sem_res_reset(r, support.TY_I32)
+    sem_res_reset(r, types.TY_I32)
     if (support.session().compile == 0) {
         return 0
     }
-    if (support.ty_is_opaque(tid) != 0) {
+    if (table.ty_is_opaque(tid) != 0) {
         return token.err_tok("不透明 C 类型不能用于 sizeof")
     }
-    if (support.ms().types[tid].size < 0) {
+    if (table.ms().types[tid].size < 0) {
         // typed CT 函数先保存 sizeof 的目标类型，等布局调度器完成依赖后再执行。
         if (support.session().ast_capture != 0 && support.session().pass == 2) {
             r.layout_type_id = tid
@@ -3231,7 +3235,7 @@ pub fn sem_sizeof(tid int, r *support.Res) int {
     }
     r.is_const = 1
     r.is_lit = 0
-    r.ival = support.ms().types[tid].size.to_type(i64)
+    r.ival = table.ms().types[tid].size.to_type(i64)
     return 0
 }
 
@@ -3240,22 +3244,22 @@ pub fn sem_len(r *support.Res) int {
         r.type_id = 0
         return 0
     }
-    let k int = support.ms().types[r.type_id].kind
-    if (k == support.TY_ARRAY) {
+    let k int = table.ms().types[r.type_id].kind
+    if (k == types.TY_ARRAY) {
         // 编译期折叠为常量并直接装 x0（同 sem_sizeof：折叠出的常量由
         // 这里物化，消费端不负责）。必须清 support.fc().c_res_is_addr——实参（数组
         // 标识符）的聚合地址语义会残留，否则 x0 里的数组地址被当成
         // 结果（曾致 return len(arr) 返回地址而非长度）。
         support.fc().c_res_is_addr = 0
-        support.sem_res_const(r, support.TY_I32, support.ms().types[r.type_id].len.to_type(i64))
+        support.sem_res_const(r, types.TY_I32, table.ms().types[r.type_id].len.to_type(i64))
         return 0
     }
-    if (k == support.TY_SLICE) {
+    if (k == types.TY_SLICE) {
         if (support.fc().c_fold != 0) {
             return token.err_tok("切片长度不是编译期常量")
         }
         // 切片值在 x0（地址）；读 [x0] 的长度
-        sem_res_reset(r, support.TY_I32)
+        sem_res_reset(r, types.TY_I32)
         support.fc().c_res_is_addr = 0
         return 0
     }
@@ -3267,28 +3271,28 @@ pub fn sem_cast(operand *support.Res, tid int) int {
         operand.type_id = 0
         return 0
     }
-    let ok int = support.ms().types[tid].kind
-    if (ok == support.TY_VOID) {
+    let ok int = table.ms().types[tid].kind
+    if (ok == types.TY_VOID) {
         return token.err_tok("不能转换为 void")
     }
-    let sk int = support.ms().types[operand.type_id].kind
-    if (sk == support.TY_FN && ok == support.TY_FN
-        && support.ms().sig_abi[support.ms().types[operand.type_id].sub] != support.ms().sig_abi[support.ms().types[tid].sub]) {
+    let sk int = table.ms().types[operand.type_id].kind
+    if (sk == types.TY_FN && ok == types.TY_FN
+        && table.ms().sig_abi[table.ms().types[operand.type_id].sub] != table.ms().sig_abi[table.ms().types[tid].sub]) {
         return token.err_tok("函数类型转换不能改变 C/yh 调用约定")
     }
     let scalar_to_scalar int = 0
-    if (support.ty_is_scalar(tid) != 0 && support.ty_is_scalar(operand.type_id) != 0) {
+    if (table.ty_is_scalar(tid) != 0 && table.ty_is_scalar(operand.type_id) != 0) {
         scalar_to_scalar = 1
     }
     // 数组 → 切片视图：构造 {len, data} 临时聚合（ADR-0002 的规范化视图）
-    if (sk == support.TY_ARRAY && ok == support.TY_SLICE) {
-        if (support.ms().types[operand.type_id].elem != support.ms().types[tid].elem) {
+    if (sk == types.TY_ARRAY && ok == types.TY_SLICE) {
+        if (table.ms().types[operand.type_id].elem != table.ms().types[tid].elem) {
             return token.err_tok("数组元素类型与目标切片不一致")
         }
         if (support.fc().c_fold != 0) {
             return token.err_tok("数组转切片不是编译期常量")
         }
-        let arrlen int = support.ms().types[operand.type_id].len
+        let arrlen int = table.ms().types[operand.type_id].len
         // x0 = 数组地址（数组值即地址）
         let soff int = 0
         operand.type_id = tid
@@ -3302,12 +3306,12 @@ pub fn sem_cast(operand *support.Res, tid int) int {
     }
     // 编译期常量转换：浮点参与的转换写位模式，整数转换按目标宽度归一。
     if (support.fc().c_fold != 0 && operand.is_const != 0) {
-        if (support.ty_is_float(operand.type_id) != 0 || support.ty_is_float(tid) != 0) {
-            let value i64 = support.sem_fold_float_convert(operand.type_id, tid, operand.ival)
+        if (table.ty_is_float(operand.type_id) != 0 || table.ty_is_float(tid) != 0) {
+            let value i64 = table.sem_fold_float_convert(operand.type_id, tid, operand.ival)
             operand.ival = value
             operand.fval_bits = value
         } else {
-            operand.ival = support.sem_fold_norm(tid, operand.ival)
+            operand.ival = table.sem_fold_norm(tid, operand.ival)
         }
         operand.type_id = tid
         support.fc().c_res_is_addr = 0
@@ -3315,21 +3319,21 @@ pub fn sem_cast(operand *support.Res, tid int) int {
     }
     if (support.fc().c_fold == 0 && support.fc().c_res_is_addr == 0) {
         // 运行时转换
-        let from_fp int = support.ty_is_float(operand.type_id)
-        let to_fp int = support.ty_is_float(tid)
+        let from_fp int = table.ty_is_float(operand.type_id)
+        let to_fp int = table.ty_is_float(tid)
         if (to_fp != 0 && from_fp == 0) {
-            let src_signed int = support.ty_is_signed(operand.type_id)
+            let src_signed int = table.ty_is_signed(operand.type_id)
         } else if (to_fp != 0 && from_fp != 0) {
             // 浮点宽度转换：f32<->f64（d0/s0 互转）
-            if (support.ms().types[operand.type_id].size != support.ms().types[tid].size) {
-                if (support.ms().types[tid].size == 4) {
+            if (table.ms().types[operand.type_id].size != table.ms().types[tid].size) {
+                if (table.ms().types[tid].size == 4) {
                 } else {
                 }
             }
         } else if (to_fp == 0 && from_fp != 0) {
-            let dst_signed int = support.ty_is_signed(tid)
-        } else if (support.ms().types[operand.type_id].size != support.ms().types[tid].size
-                   || support.ty_is_signed(operand.type_id) != support.ty_is_signed(tid)) {
+            let dst_signed int = table.ty_is_signed(tid)
+        } else if (table.ms().types[operand.type_id].size != table.ms().types[tid].size
+                   || table.ty_is_signed(operand.type_id) != table.ty_is_signed(tid)) {
             // 整数 → 整数：x0 中按源类型已扩展，需按目标宽度/符号性重新扩展。
             // 例如 i64 → int 必须截断到低 32 位并符号扩展，否则比较/运算会用
             // 到高位的残留值（曾导致 i64 的 int 视图比较结果错误）。
@@ -3375,10 +3379,10 @@ pub fn sem_forin_begin(it *support.Res, is_range int, end_res *support.Res) int 
     }
     // 数组/切片
     support.fc().c_fi_kind[d] = 0
-    let k int = support.ms().types[it.type_id].kind
-    if (k == support.TY_ARRAY) {
+    let k int = table.ms().types[it.type_id].kind
+    if (k == types.TY_ARRAY) {
         // 先取地址再装 len：深帧 lea 的 movz x9 不能落在 len 已入 x9 之后
-    } else if (k == support.TY_SLICE) {
+    } else if (k == types.TY_SLICE) {
     } else {
         return token.err_tok("for-in 需要数组、切片或区间")
     }
@@ -3389,9 +3393,9 @@ pub fn sem_forin_begin(it *support.Res, is_range int, end_res *support.Res) int 
 pub fn sem_forin_elem_type(it *support.Res, is_range int) int {
     if (is_range != 0) {
         // 区间迭代绑定是默认整数类型 int（与 stage0 一致，便于 int 变量累加）
-        return support.TY_I32
+        return types.TY_I32
     }
-    return support.ms().types[it.type_id].elem
+    return table.ms().types[it.type_id].elem
 }
 
 pub fn sem_forin_set_bind(elem_off int, idx_off int) int {
@@ -3429,19 +3433,19 @@ pub fn sem_forin_load(it *support.Res, is_range int) int {
         return 0
     }
     // 数组/切片：值 = data[count]
-    let elem int = support.ms().types[it.type_id].elem
+    let elem int = table.ms().types[it.type_id].elem
     if (support.fc().c_fi_idx_off[d] >= 0) {
     }
     // 缩放下标 → data + i*size
-    let esz int = support.ms().types[elem].size
+    let esz int = table.ms().types[elem].size
     if (esz == 2) {
     } else if (esz == 4) {
     } else if (esz == 8) {
     } else if (esz != 1) {
     }
     if (support.fc().c_fi_elem_off[d] >= 0) {
-        let ek int = support.ms().types[elem].kind
-        if (ek == support.TY_STRUCT || ek == support.TY_UNION || ek == support.TY_ARRAY || ek == support.TY_SLICE) {
+        let ek int = table.ms().types[elem].kind
+        if (ek == types.TY_STRUCT || ek == types.TY_UNION || ek == types.TY_ARRAY || ek == types.TY_SLICE) {
             // 聚合元素：块拷贝进绑定槽。x0 = 元素地址（add 的结果），
             // 先取绑定槽地址（x10）再拷贝——深帧 lea 的 movz x9 不碰
             // x0，此序天然安全；原「mov x9, x0 保地址」会被 lea 覆盖
@@ -3487,18 +3491,18 @@ pub fn sem_assign(op int, lres *support.Res, rres *support.Res) int {
     if (support.fc().c_fold != 0) {
         return token.err_tok("赋值不是编译期常量")
     }
-    if (support.ty_is_float(lres.type_id) != 0) {
+    if (table.ty_is_float(lres.type_id) != 0) {
         // 浮点赋值：值在 d0/s0
         if (op == token.TK_ASSIGN) {
             let fs *char = "d"
-            if (support.ms().types[lres.type_id].size == 4) { fs = "s" }
+            if (table.ms().types[lres.type_id].size == 4) { fs = "s" }
             return 0
         }
         // 复合赋值：右值（d0）存入专用临时槽；目标地址进出 x10 各两次
         //（每次 em_lea_local_to 都会覆盖 x10，目标地址先压栈保护、用后
         // 弹回；压/弹必须成对，此前弹空栈导致 d1 从垃圾地址装入）。
         let fs2 *char = "d"
-        if (support.ms().types[lres.type_id].size == 4) { fs2 = "s" }
+        if (table.ms().types[lres.type_id].size == 4) { fs2 = "s" }
         if (support.fc().c_fp_tmp_off == 0) {
             support.fc().c_fp_tmp_off = 0
         }
@@ -3514,8 +3518,8 @@ pub fn sem_assign(op int, lres *support.Res, rres *support.Res) int {
         // 聚合同型赋值 = 逐字节块拷贝（语义边界 §：数组同型赋值为值
         // 复制）。聚合的值语义即对象地址：x0 是源对象地址，x10 是目标
         // 地址；此前误走标量 store 只写前 8 字节。
-        let lk int = support.ms().types[lres.type_id].kind
-        if (lk == support.TY_STRUCT || lk == support.TY_UNION || lk == support.TY_ARRAY || lk == support.TY_SLICE) {
+        let lk int = table.ms().types[lres.type_id].kind
+        if (lk == types.TY_STRUCT || lk == types.TY_UNION || lk == types.TY_ARRAY || lk == types.TY_SLICE) {
             return 0
         }
         return 0
@@ -3537,16 +3541,16 @@ pub fn sem_assign(op int, lres *support.Res, rres *support.Res) int {
 }
 
 pub fn sem_declare_local(start int, n int, tid int) int {
-    if (support.ty_has_opaque_value(tid) != 0) {
+    if (table.ty_has_opaque_value(tid) != 0) {
         return token.err_tok("不透明 C 类型只能通过指针声明局部变量")
     }
-    let size int = support.ms().types[tid].size
-    let idx int = sym_push(start, n, support.SYM_VAR, tid, 0)
+    let size int = table.ms().types[tid].size
+    let idx int = sym_push(start, n, table.SYM_VAR, tid, 0)
     if (idx < 0) {
         return -1
     }
     let off int = 0
-    support.ms().syms[idx].offset = off
+    table.ms().syms[idx].offset = off
     // 零初始化（标量直接清零；聚合逐字节循环）
     if (size == 0) {
         return idx
@@ -3569,19 +3573,19 @@ pub fn sem_store_local_value(idx int, tid int) int {
     if (support.session().compile == 0) {
         return 0
     }
-    let k int = support.ms().types[tid].kind
-    if (k == support.TY_STRUCT || k == support.TY_UNION || k == support.TY_ARRAY || k == support.TY_SLICE) {
+    let k int = table.ms().types[tid].kind
+    if (k == types.TY_STRUCT || k == types.TY_UNION || k == types.TY_ARRAY || k == types.TY_SLICE) {
         // 聚合初始化：x0 = 源聚合地址 → 块拷贝进局部槽
-        let off int = support.ms().syms[idx].offset
+        let off int = table.ms().syms[idx].offset
         return 0
     }
-    if (support.ty_is_float(tid) != 0) {
+    if (table.ty_is_float(tid) != 0) {
         return 0
     }
-    let soff int = support.ms().syms[idx].offset
+    let soff int = table.ms().syms[idx].offset
     if (soff <= 255) {
         // 按大小选寄存器与助记符
-        let size int = support.ms().types[tid].size
+        let size int = table.ms().types[tid].size
         if (size == 8) {
         } else if (size == 4) {
         } else if (size == 2) {
@@ -3594,13 +3598,13 @@ pub fn sem_store_local_value(idx int, tid int) int {
 }
 
 pub fn sem_check_duplicate(start int, n int) int {
-    let i int = support.ms().sym_n - 1
-    for i >= support.ms().scope_start[support.ms().scope_n - 1] {
-        if (support.ms().syms[i].name_len == n) {
+    let i int = table.ms().sym_n - 1
+    for i >= table.ms().scope_start[table.ms().scope_n - 1] {
+        if (table.ms().syms[i].name_len == n) {
             let match int = 1
             let j int = 0
             for j < n {
-                if (support.pool_ctx().data[support.ms().syms[i].name_off + j] != support.src_ctx().data[start + j]) {
+                if (support.pool_ctx().data[table.ms().syms[i].name_off + j] != support.src_ctx().data[start + j]) {
                     match = 0
                     break
                 }
@@ -3691,28 +3695,6 @@ pub fn sem_deflabel(start int, n int) int {
     return 0
 }
 
-pub fn sem_loop_push(brk int, cnt int) int {
-    if (support.fc().c_loop_depth >= 64) {
-        return token.err_tok("循环嵌套过深")
-    }
-    support.fc().c_brk_stk[support.fc().c_loop_depth] = brk
-    support.fc().c_cnt_stk[support.fc().c_loop_depth] = cnt
-    support.fc().c_loop_break_seen[support.fc().c_loop_depth] = 0
-    support.fc().c_loop_depth += 1
-    support.fc().c_loop_brk = brk
-    support.fc().c_loop_cnt = cnt
-    return 0
-}
-
-pub fn sem_loop_pop() int {
-    support.fc().c_loop_depth -= 1
-    if (support.fc().c_loop_depth > 0) {
-        support.fc().c_loop_brk = support.fc().c_brk_stk[support.fc().c_loop_depth - 1]
-        support.fc().c_loop_cnt = support.fc().c_cnt_stk[support.fc().c_loop_depth - 1]
-    }
-    return 0
-}
-
 pub fn sem_break() int {
     if (support.session().compile == 0) {
         return 0
@@ -3747,7 +3729,7 @@ pub fn sem_res_copy(dst *support.Res, src *support.Res) int {
 }
 
 pub fn sem_number(start int, n int, r *support.Res) int {
-    sem_res_reset(r, support.TY_I32)
+    sem_res_reset(r, types.TY_I32)
     if (support.session().compile == 0) {
         return 0
     }
@@ -3755,7 +3737,7 @@ pub fn sem_number(start int, n int, r *support.Res) int {
     r.is_const = 1
     // 浮点字面量（含 '.' 或指数）按 f64 处理
     if (sem_num_is_float(start, n) != 0) {
-        r.type_id = support.TY_F64
+        r.type_id = types.TY_F64
         let bits i64 = sem_parse_float_bits(start, n)
         // 位模式同时写入 ival 与 fval_bits：const 初始化按 ival 保存常量值，
         // 浮点使用点读 fval_bits，两者必须一致。
@@ -3771,26 +3753,10 @@ pub fn sem_number(start int, n int, r *support.Res) int {
     return 0
 }
 
+// sem_num_is_float：数字字面量是否浮点形态；纯文本判定已上移
+// support.num_is_float（parse 也直接用它，不必依赖 check）。
 pub fn sem_num_is_float(start int, n int) int {
-    // 前缀进制字面量（0x/0X/0o/0O/0b/0B）恒为整数：其中的 e/E 是
-    // 十六进制数字而非浮点指数（对齐 docs/yh.g4 的 NUMBER 规则——
-    // 修复 0x1E、0xAA0103E0 等被误判为 f64 的缺陷）。
-    if (n >= 2 && support.src_ctx().data[start] == '0') {
-        let p2 u8 = support.src_ctx().data[start + 1]
-        if (p2 == 'x' || p2 == 'X' || p2 == 'o' || p2 == 'O' || p2 == 'b' || p2 == 'B') {
-            return 0
-        }
-    }
-    let i int = 0
-    for i < n {
-        let b u8 = support.src_ctx().data[start + i]
-        if (b == '.' || b == 'e' || b == 'E') {
-            // 前缀 0x/0o/0b 中的 x/o/b 不算
-            return 1
-        }
-        i += 1
-    }
-    return 0
+    return support.num_is_float(start, n)
 }
 
 // 宿主 C 运行库的十进制 → binary64：glibc 与 macOS libSystem 的 strtod 都
@@ -3802,14 +3768,14 @@ pub fn sem_num_is_float(start int, n int) int {
 @[extern] fn strtod(text *char, endptr *void) f64
 
 pub fn sem_string(start int, slen int, r *support.Res) int {
-    sem_res_reset(r, ty_ptr(support.TY_CHAR))
+    sem_res_reset(r, ty_ptr(types.TY_CHAR))
     if (support.session().compile == 0) {
         return 0
     }
     // LL12：标签只登记，字符串数据由后端快照按标签生成。
     let lbl int = support.data_label_advance()
     // 登记标签 → 原样字节，供编译期过程与后端快照按标签号反查。
-    if (support.data_str_add(lbl, start, slen) != 0) { return -1 }
+    if (table.data_str_add(lbl, start, slen) != 0) { return -1 }
     r.is_const = 1
     r.ival = lbl.to_type(i64)
     return 0
@@ -3818,19 +3784,19 @@ pub fn sem_string(start int, slen int, r *support.Res) int {
 // sem_raw_string：登记不含引号的字符串体（插值文本块/说明符）。
 // 与 sem_string 相同的数据标签路径，quoted=2 让解码器处理转义但不剥引号。
 pub fn sem_raw_string(start int, slen int, r *support.Res) int {
-    sem_res_reset(r, ty_ptr(support.TY_CHAR))
+    sem_res_reset(r, ty_ptr(types.TY_CHAR))
     if (support.session().compile == 0) {
         return 0
     }
     let lbl int = support.data_label_advance()
-    if (support.data_str_add_body(lbl, start, slen) != 0) { return -1 }
+    if (table.data_str_add_body(lbl, start, slen) != 0) { return -1 }
     r.is_const = 1
     r.ival = lbl.to_type(i64)
     return 0
 }
 
 pub fn sem_char(start int, clen int, r *support.Res) int {
-    sem_res_reset(r, support.TY_CHAR)
+    sem_res_reset(r, types.TY_CHAR)
     if (support.session().compile == 0) {
         return 0
     }
@@ -3863,7 +3829,7 @@ pub fn sem_char(start int, clen int, r *support.Res) int {
 }
 
 pub fn sem_bool(v int, r *support.Res) int {
-    support.sem_res_const(r, support.TY_BOOL, v.to_type(i64))
+    support.sem_res_const(r, types.TY_BOOL, v.to_type(i64))
     if (support.session().compile == 0) {
         return 0
     }
@@ -3875,7 +3841,7 @@ pub fn sem_ident(start int, n int, r *support.Res) int {
     if (support.session().compile == 0) {
         return 0
     }
-    let idx int = support.sym_lookup(start, n)
+    let idx int = table.sym_lookup(start, n)
     if (idx < 0) {
         return token.err_tok("引用了未声明的名字")
     }
@@ -3885,13 +3851,13 @@ pub fn sem_ident(start int, n int, r *support.Res) int {
 pub fn sem_ident_val(idx int, r *support.Res) int {
     r.ast_id = -1
     r.sym = idx
-    r.type_id = support.ms().syms[idx].type_id
-    let kind int = support.ms().syms[idx].kind
+    r.type_id = table.ms().syms[idx].type_id
+    let kind int = table.ms().syms[idx].kind
     // 聚合常量（结构体/数组/切片/联合体）没有标量值：数据已发射到数据段，
     // 与全局变量同路径按符号地址访问，不能走下面的立即数取值分支。
-    if (kind == support.SYM_CONST) {
-        let ck int = support.ms().types[support.ms().syms[idx].type_id].kind
-        if (ck == support.TY_STRUCT || ck == support.TY_ARRAY || ck == support.TY_SLICE || ck == support.TY_UNION) {
+    if (kind == table.SYM_CONST) {
+        let ck int = table.ms().types[table.ms().syms[idx].type_id].kind
+        if (ck == types.TY_STRUCT || ck == types.TY_ARRAY || ck == types.TY_SLICE || ck == types.TY_UNION) {
             // 聚合常量只读：**赋值目标**（c_lvalue == 1）直接拒绝。降级为变量语义只是
             // 为了按符号地址读取，不能连可写性一起放开；取地址（c_lvalue >= 2）是合法的
             // 只读引用，放行 —— 否则 `$f(&TABLE[0])` 这类编译期实参会被误拒。
@@ -3900,42 +3866,42 @@ pub fn sem_ident_val(idx int, r *support.Res) int {
             }
             // 导入的聚合常量：接口加载时物化了本单元副本（cval = 本地数据标签号），
             // 按标签装载地址（与字符串指针常量同一路径），提供方符号不参与消费者链接。
-            if ((support.ms().syms[idx].flags & support.F_EXTERN) != 0
-                && support.ms().syms[idx].cval != 0) {
+            if ((table.ms().syms[idx].flags & table.F_EXTERN) != 0
+                && table.ms().syms[idx].cval != 0) {
                 support.fc().c_res_is_addr = 1
                 return 0
             }
-            kind = support.SYM_VAR
+            kind = table.SYM_VAR
         }
     }
-    if (kind == support.SYM_CONST) {
-        if ((support.ms().syms[idx].flags & (support.F_ENUM_META | support.F_FIELD_META)) != 0) {
+    if (kind == table.SYM_CONST) {
+        if ((table.ms().syms[idx].flags & (table.F_ENUM_META | table.F_FIELD_META)) != 0) {
             // 元信息绑定（枚举 values / 结构体 fields）：本身不是值，
             // 只能投影 .name/.value（枚举）或 .name（字段）或作类型谓词实参。
-            if (support.ms().syms[idx].const_ready == 0) {
+            if (table.ms().syms[idx].const_ready == 0) {
                 return token.err_tok("编译期元信息绑定尚未就绪")
             }
             return 0
         }
-        if (support.ms().syms[idx].const_ready == 0) {
+        if (table.ms().syms[idx].const_ready == 0) {
             if (support.fc().c_ct_prepare_active != 0
-                && (support.fc().c_fn_flags & support.F_COMPTIME) != 0) {
+                && (support.fc().c_fn_flags & table.F_COMPTIME) != 0) {
                 return 0
             }
             return token.err_tok("编译期常量尚未就绪")
         }
         r.is_const = 1
-        r.ival = support.ms().syms[idx].cval
-        if ((support.ms().syms[idx].flags & support.F_ADDR) != 0) {
+        r.ival = table.ms().syms[idx].cval
+        if ((table.ms().syms[idx].flags & table.F_ADDR) != 0) {
             // 指针常量：值是数据标签
             return 0
         }
-        if (support.ty_is_float(r.type_id) != 0) {
-            r.fval_bits = support.ms().syms[idx].cval
+        if (table.ty_is_float(r.type_id) != 0) {
+            r.fval_bits = table.ms().syms[idx].cval
         }
         return 0
     }
-    if (kind == support.SYM_FN) {
+    if (kind == table.SYM_FN) {
         if (support.fc().c_fold != 0) {
             return token.err_tok("函数引用不是编译期常量")
         }
@@ -3946,10 +3912,10 @@ pub fn sem_ident_val(idx int, r *support.Res) int {
     if (support.fc().c_fold != 0) {
         return token.err_tok("变量不是编译期常量")
     }
-    let tid int = support.ms().syms[idx].type_id
-    let k int = support.ms().types[tid].kind
-    let global int = ((support.ms().syms[idx].flags & support.F_GLOBAL) != 0).to_type(int)
-    if (k == support.TY_ARRAY || k == support.TY_STRUCT || k == support.TY_UNION || k == support.TY_SLICE) {
+    let tid int = table.ms().syms[idx].type_id
+    let k int = table.ms().types[tid].kind
+    let global int = ((table.ms().syms[idx].flags & table.F_GLOBAL) != 0).to_type(int)
+    if (k == types.TY_ARRAY || k == types.TY_STRUCT || k == types.TY_UNION || k == types.TY_SLICE) {
         // 聚合：值语义即地址（数组退化 / 结构体以地址使用）
         support.fc().c_res_is_addr = 1
         return 0
@@ -3958,7 +3924,7 @@ pub fn sem_ident_val(idx int, r *support.Res) int {
         support.fc().c_res_is_addr = 1
         return 0
     }
-    if (support.ty_is_float(tid) != 0) {
+    if (table.ty_is_float(tid) != 0) {
         support.fc().c_res_is_addr = 0
         return 0
     }
@@ -3968,96 +3934,96 @@ pub fn sem_ident_val(idx int, r *support.Res) int {
 
 // sem_enum_meta_value：把枚举 values 迭代绑定的 value 投影为只读枚举常量。
 pub fn sem_enum_meta_value(meta *support.Res) int {
-    if (meta.sym < 0 || meta.sym >= support.ms().sym_n
-        || (support.ms().syms[meta.sym].flags & support.F_ENUM_META) == 0) {
+    if (meta.sym < 0 || meta.sym >= table.ms().sym_n
+        || (table.ms().syms[meta.sym].flags & table.F_ENUM_META) == 0) {
         return token.err_tok("枚举 values 元信息绑定无效")
     }
     if (support.fc().c_lvalue != 0) {
         return token.err_tok("枚举 values 成员只读")
     }
-    let member int = support.ms().syms[meta.sym].offset
-    if (member < 0 || member >= support.ms().sym_n
-        || (support.ms().syms[member].flags & support.F_ENUM_MEMBER) == 0
-        || support.ms().syms[member].const_ready == 0) {
+    let member int = table.ms().syms[meta.sym].offset
+    if (member < 0 || member >= table.ms().sym_n
+        || (table.ms().syms[member].flags & table.F_ENUM_MEMBER) == 0
+        || table.ms().syms[member].const_ready == 0) {
         return token.err_tok("枚举 values 成员索引无效")
     }
-    let tid int = support.ms().syms[member].type_id
-    let value i64 = support.ms().syms[member].cval
+    let tid int = table.ms().syms[member].type_id
+    let value i64 = table.ms().syms[member].cval
     support.sem_res_const(meta, tid, value)
     return 0
 }
 
 // sem_enum_meta_name：把枚举 values 迭代绑定的 name 投影为静态 C 字符串。
 pub fn sem_enum_meta_name(meta *support.Res) int {
-    if (meta.sym < 0 || meta.sym >= support.ms().sym_n
-        || (support.ms().syms[meta.sym].flags & support.F_ENUM_META) == 0) {
+    if (meta.sym < 0 || meta.sym >= table.ms().sym_n
+        || (table.ms().syms[meta.sym].flags & table.F_ENUM_META) == 0) {
         return token.err_tok("枚举 values 元信息绑定无效")
     }
     if (support.fc().c_lvalue != 0) {
         return token.err_tok("枚举 values 成员只读")
     }
-    let member int = support.ms().syms[meta.sym].offset
-    if (member < 0 || member >= support.ms().sym_n
-        || (support.ms().syms[member].flags & support.F_ENUM_MEMBER) == 0
-        || support.ms().syms[member].const_ready == 0) {
+    let member int = table.ms().syms[meta.sym].offset
+    if (member < 0 || member >= table.ms().sym_n
+        || (table.ms().syms[member].flags & table.F_ENUM_MEMBER) == 0
+        || table.ms().syms[member].const_ready == 0) {
         return token.err_tok("枚举 values 成员索引无效")
     }
     // LL12：标签只登记，名称数据由快照生成。
     let lbl int = support.data_label_advance()
-    if (support.data_str_add_pool(lbl, support.ms().syms[member].name_off,
-        support.ms().syms[member].name_len) != 0) { return -1 }
-    sem_res_reset(meta, ty_ptr(support.TY_CHAR))
+    if (table.data_str_add_pool(lbl, table.ms().syms[member].name_off,
+        table.ms().syms[member].name_len) != 0) { return -1 }
+    sem_res_reset(meta, ty_ptr(types.TY_CHAR))
     meta.is_const = 1
     meta.ival = lbl.to_type(i64)
     return 0
 }
 
 // sem_field_meta_name：把 `$for f in T.fields` 迭代绑定的 name 投影为只读
-// 字段名静态 C 字符串。绑定槽位约定见 model.yh 的 support.F_FIELD_META：
+// 字段名静态 C 字符串。绑定槽位约定见 model.yh 的 table.F_FIELD_META：
 // cval 存宿主结构体/联合体类型 id，offset 存字段下标。
 pub fn sem_field_meta_name(meta *support.Res) int {
-    if (meta.sym < 0 || meta.sym >= support.ms().sym_n
-        || (support.ms().syms[meta.sym].flags & support.F_FIELD_META) == 0) {
+    if (meta.sym < 0 || meta.sym >= table.ms().sym_n
+        || (table.ms().syms[meta.sym].flags & table.F_FIELD_META) == 0) {
         return token.err_tok("字段元信息绑定无效")
     }
     if (support.fc().c_lvalue != 0) {
         return token.err_tok("字段元信息只读")
     }
-    let owner int = support.ms().syms[meta.sym].cval.to_type(int)
-    let index int = support.ms().syms[meta.sym].offset
-    if (owner < 0 || owner >= support.ms().type_n
-        || (support.ms().types[owner].kind != support.TY_STRUCT
-            && support.ms().types[owner].kind != support.TY_UNION)
-        || index < 0 || index >= support.ms().types[owner].len) {
+    let owner int = table.ms().syms[meta.sym].cval.to_type(int)
+    let index int = table.ms().syms[meta.sym].offset
+    if (owner < 0 || owner >= table.ms().type_n
+        || (table.ms().types[owner].kind != types.TY_STRUCT
+            && table.ms().types[owner].kind != types.TY_UNION)
+        || index < 0 || index >= table.ms().types[owner].len) {
         return token.err_tok("字段元信息索引无效")
     }
-    let field support.SField = support.ms().fields[support.ms().types[owner].sub + index]
+    let field types.SField = table.ms().fields[table.ms().types[owner].sub + index]
     // LL12：标签只登记，名称数据由快照生成。
     let lbl int = support.data_label_advance()
-    if (support.data_str_add_pool(lbl, field.name_off, field.name_len) != 0) { return -1 }
-    sem_res_reset(meta, ty_ptr(support.TY_CHAR))
+    if (table.data_str_add_pool(lbl, field.name_off, field.name_len) != 0) { return -1 }
+    sem_res_reset(meta, ty_ptr(types.TY_CHAR))
     meta.is_const = 1
     meta.ival = lbl.to_type(i64)
     return 0
 }
 
 // ty_push：向类型表追加条目，返回新类型编号。
-// support.ms().home 平行数组同步增长（类型归属：-1 本地 / >=0 模块编号）。
+// table.ms().home 平行数组同步增长（类型归属：-1 本地 / >=0 模块编号）。
 // ty_register_builtins：登记 0..12 号内建类型（固定编号，勿改顺序）。
 pub fn ty_register_builtins() int {
-    support.ty_push(support.TY_VOID, 0, 0, -1, -1, -1)
-    support.ty_push(support.TY_BOOL, support.TG_CHAR_SIZE, support.TG_CHAR_SIZE, -1, -1, -1)
-    support.ty_push(support.TY_CHAR, support.TG_CHAR_SIZE, support.TG_CHAR_SIZE, -1, -1, -1)
-    support.ty_push(support.TY_I8, 1, 1, -1, -1, -1)
-    support.ty_push(support.TY_I16, support.TG_SHORT_SIZE, support.TG_SHORT_SIZE, -1, -1, -1)
-    support.ty_push(support.TY_I32, support.TG_INT_SIZE, support.TG_INT_SIZE, -1, -1, -1)
-    support.ty_push(support.TY_I64, support.TG_LONG_SIZE, support.TG_LONG_SIZE, -1, -1, -1)
-    support.ty_push(support.TY_U8, 1, 1, -1, -1, -1)
-    support.ty_push(support.TY_U16, support.TG_SHORT_SIZE, support.TG_SHORT_SIZE, -1, -1, -1)
-    support.ty_push(support.TY_U32, support.TG_INT_SIZE, support.TG_INT_SIZE, -1, -1, -1)
-    support.ty_push(support.TY_U64, support.TG_LONG_SIZE, support.TG_LONG_SIZE, -1, -1, -1)
-    support.ty_push(support.TY_F32, 4, 4, -1, -1, -1)
-    support.ty_push(support.TY_F64, 8, 8, -1, -1, -1)
+    table.ty_push(types.TY_VOID, 0, 0, -1, -1, -1)
+    table.ty_push(types.TY_BOOL, support.TG_CHAR_SIZE, support.TG_CHAR_SIZE, -1, -1, -1)
+    table.ty_push(types.TY_CHAR, support.TG_CHAR_SIZE, support.TG_CHAR_SIZE, -1, -1, -1)
+    table.ty_push(types.TY_I8, 1, 1, -1, -1, -1)
+    table.ty_push(types.TY_I16, support.TG_SHORT_SIZE, support.TG_SHORT_SIZE, -1, -1, -1)
+    table.ty_push(types.TY_I32, support.TG_INT_SIZE, support.TG_INT_SIZE, -1, -1, -1)
+    table.ty_push(types.TY_I64, support.TG_LONG_SIZE, support.TG_LONG_SIZE, -1, -1, -1)
+    table.ty_push(types.TY_U8, 1, 1, -1, -1, -1)
+    table.ty_push(types.TY_U16, support.TG_SHORT_SIZE, support.TG_SHORT_SIZE, -1, -1, -1)
+    table.ty_push(types.TY_U32, support.TG_INT_SIZE, support.TG_INT_SIZE, -1, -1, -1)
+    table.ty_push(types.TY_U64, support.TG_LONG_SIZE, support.TG_LONG_SIZE, -1, -1, -1)
+    table.ty_push(types.TY_F32, 4, 4, -1, -1, -1)
+    table.ty_push(types.TY_F64, 8, 8, -1, -1, -1)
     return 0
 }
 
@@ -4065,32 +4031,32 @@ pub fn ty_register_builtins() int {
 // 与方案 §4 一致：保留 512 的聚合类型登记上限，超限必须干净报错，
 // 不能越界（对应 tests/yh-run/fail/12-wraps-too-many.yh）。
 pub fn ty_push_agg(kind int, size int, align int, elem int, n int, sub int) int {
-    return support.model_type_push_agg(kind, size, align, elem, n, sub)
+    return table.model_type_push_agg(kind, size, align, elem, n, sub)
 }
 
 // ty_ptr：指向 elem 的指针类型（按内容去重）。
 pub fn ty_ptr(elem int) int {
     let i int = 0
-    for i < support.ms().type_n {
-        if (support.ms().types[i].kind == support.TY_PTR && support.ms().types[i].elem == elem) {
+    for i < table.ms().type_n {
+        if (table.ms().types[i].kind == types.TY_PTR && table.ms().types[i].elem == elem) {
             return i
         }
         i += 1
     }
-    return support.ty_push(support.TY_PTR, support.TG_PTR_SIZE, support.TG_PTR_SIZE, elem, -1, -1)
+    return table.ty_push(types.TY_PTR, support.TG_PTR_SIZE, support.TG_PTR_SIZE, elem, -1, -1)
 }
 
 // ty_array：[len] elem 定长数组类型（按内容去重）。
 pub fn ty_array(elem int, alen int) int {
     let i int = 0
-    for i < support.ms().type_n {
-        if (support.ms().types[i].kind == support.TY_ARRAY && support.ms().types[i].elem == elem && support.ms().types[i].len == alen) {
+    for i < table.ms().type_n {
+        if (table.ms().types[i].kind == types.TY_ARRAY && table.ms().types[i].elem == elem && table.ms().types[i].len == alen) {
             return i
         }
         i += 1
     }
-    let esz int = support.ms().types[elem].size
-    let eal int = support.ms().types[elem].align
+    let esz int = table.ms().types[elem].size
+    let eal int = table.ms().types[elem].align
     if (eal < 1) {
         eal = 1
     }
@@ -4100,61 +4066,36 @@ pub fn ty_array(elem int, alen int) int {
         rpad += eal
     }
     size += rpad
-    return ty_push_agg(support.TY_ARRAY, size, eal, elem, alen, -1)
+    return ty_push_agg(types.TY_ARRAY, size, eal, elem, alen, -1)
 }
 
 // ty_slice：切片类型 []T = {u64 长度, T *数据}（16 字节聚合视图）。
 // 去重按元素类型；元素类型参与同型判断（ADR-0001/0002）。
 pub fn ty_slice(elem int) int {
     let i int = 0
-    for i < support.ms().type_n {
-        if (support.ms().types[i].kind == support.TY_SLICE && support.ms().types[i].elem == elem) {
+    for i < table.ms().type_n {
+        if (table.ms().types[i].kind == types.TY_SLICE && table.ms().types[i].elem == elem) {
             return i
         }
         i += 1
     }
-    return support.ty_push(support.TY_SLICE, support.TG_LONG_SIZE * 2, support.TG_LONG_SIZE, elem, -1, -1)
+    return table.ty_push(types.TY_SLICE, support.TG_LONG_SIZE * 2, support.TG_LONG_SIZE, elem, -1, -1)
 }
 
 // ty_sig_param：向参数类型池追加一个参数类型。
 pub fn ty_sig_param(tid int) int {
-    if (intvec_grow(&support.ms().sig_params, support.ms().sigparam_n, &support.ms().sigparam_cap) != 0) {
+    if (intvec_grow(&table.ms().sig_params, table.ms().sigparam_n, &table.ms().sigparam_cap) != 0) {
         return -1
     }
-    support.ms().sig_params[support.ms().sigparam_n] = tid
-    support.ms().sigparam_n += 1
+    table.ms().sig_params[table.ms().sigparam_n] = tid
+    table.ms().sigparam_n += 1
     return 0
 }
 
 // ty_fn：函数类型（签名按内容去重：返回 + 参数个数 + 逐个参数类型）。
-// ty_fn_abi：按调用约定、返回与完整参数签名去重，禁止 C/yh 函数值混用。
+// ty_fn_abi：按 ABI 查找/登记函数类型；纯类型表操作已上移 table.fn_abi。
 pub fn ty_fn_abi(ret int, first int, np int, vararg int, abi int) int {
-    let i int = 0
-    for i < support.ms().type_n {
-        if (support.ms().types[i].kind == support.TY_FN) {
-            let s int = support.ms().types[i].sub
-            if (support.ms().sig_abi[s] == abi && support.ms().sig_ret[s] == ret && support.ms().sig_np[s] == np && support.ms().sig_vararg[s] == vararg) {
-                let match int = 1
-                let j int = 0
-                for j < np {
-                    if (support.ms().sig_params[support.ms().sig_first[s] + j] != support.ms().sig_params[first + j]) {
-                        match = 0
-                        break
-                    }
-                    j += 1
-                }
-                if (match != 0) {
-                    return i
-                }
-            }
-        }
-        i += 1
-    }
-    let ns int = ty_sig_add(ret, np, vararg)
-    if (ns < 0) { return -1 }
-    support.ms().sig_abi[ns] = abi
-    support.ms().sig_first[ns] = first
-    return support.ty_push(support.TY_FN, support.TG_PTR_SIZE, support.TG_PTR_SIZE, ret, np, ns)
+    return table.fn_abi(ret, first, np, vararg, abi)
 }
 
 // ty_fn：构造普通 yh 函数类型，保留原有内部调用接口。
@@ -4163,19 +4104,19 @@ pub fn ty_fn(ret int, first int, np int, vararg int) int {
 }
 
 // ty_declare_name：登记类型名字（重复定义报错，含首次声明位置）。
-// is_pub/form 取自调用方设置的全局（support.fc().c_decl_pub / support.ms().name_form）。
+// is_pub/form 取自调用方设置的全局（support.fc().c_decl_pub / table.ms().name_form）。
 pub fn ty_declare_name(off int, n int, tid int) int {
     let prev int = ty_lookup_name_off(off, n)
     if (prev >= 0) {
         // 找到先前登记项的位置一并报告
-        let pi int = support.ms().name_n - 1
+        let pi int = table.ms().name_n - 1
         for pi >= 0 {
-            if (support.ms().names[pi].name_len == n
-                && support.pool_ctx().data[support.ms().names[pi].name_off] == support.pool_ctx().data[off]) {
+            if (table.ms().names[pi].name_len == n
+                && support.pool_ctx().data[table.ms().names[pi].name_off] == support.pool_ctx().data[off]) {
                 let match int = 1
                 let j int = 1
                 for j < n {
-                    if (support.pool_ctx().data[support.ms().names[pi].name_off + j] != support.pool_ctx().data[off + j]) {
+                    if (support.pool_ctx().data[table.ms().names[pi].name_off + j] != support.pool_ctx().data[off + j]) {
                         match = 0
                         break
                     }
@@ -4191,9 +4132,9 @@ pub fn ty_declare_name(off int, n int, tid int) int {
             let buf [128]u8
             let bn int = 0
             bn = support.append_str(buf, bn, "类型重定义（首次声明于 ")
-            bn = support.append_int(buf, bn, support.ms().names[pi].def_line)
+            bn = support.append_int(buf, bn, table.ms().names[pi].def_line)
             bn = support.append_byte(buf, bn, ':')
-            bn = support.append_int(buf, bn, support.ms().names[pi].def_col)
+            bn = support.append_int(buf, bn, table.ms().names[pi].def_col)
             bn = support.append_str(buf, bn, "）")
             let mo int = support.tml_intern_str(buf, 0, bn)
             if (mo < 0) {
@@ -4203,31 +4144,31 @@ pub fn ty_declare_name(off int, n int, tid int) int {
         }
         return token.err_tok("类型重定义")
     }
-    if (support.ms().name_n == support.ms().name_cap) {
-        let ncap int = support.ms().name_cap * 2
+    if (table.ms().name_n == table.ms().name_cap) {
+        let ncap int = table.ms().name_cap * 2
         if (ncap == 0) {
             ncap = 64
         }
-        let nd *support.TName = malloc((ncap * sizeof(support.TName)).to_type(u64)).to_type(*support.TName)
+        let nd *types.TName = malloc((ncap * sizeof(types.TName)).to_type(u64)).to_type(*types.TName)
         if (nd == 0) {
             return errors.fail("内存分配失败")
         }
-        if (support.ms().name_n > 0) {
-            memcpy(nd, support.ms().names, (support.ms().name_n * sizeof(support.TName)).to_type(u64))
+        if (table.ms().name_n > 0) {
+            memcpy(nd, table.ms().names, (table.ms().name_n * sizeof(types.TName)).to_type(u64))
         }
-        free(support.ms().names)
-        support.ms().names = nd
-        support.ms().name_cap = ncap
+        free(table.ms().names)
+        table.ms().names = nd
+        table.ms().name_cap = ncap
     }
-    support.ms().names[support.ms().name_n].name_off = off
-    support.ms().names[support.ms().name_n].name_len = n
-    support.ms().names[support.ms().name_n].type_id = tid
-    support.ms().names[support.ms().name_n].is_pub = support.fc().c_decl_pub
-    support.ms().names[support.ms().name_n].form = support.ms().name_form
-    support.ms().names[support.ms().name_n].attrs = support.fc().c_decl_attrs
-    support.ms().names[support.ms().name_n].def_line = token.ctx().tokens[token.ctx().pos].line
-    support.ms().names[support.ms().name_n].def_col = token.ctx().tokens[token.ctx().pos].col
-    support.ms().name_n += 1
+    table.ms().names[table.ms().name_n].name_off = off
+    table.ms().names[table.ms().name_n].name_len = n
+    table.ms().names[table.ms().name_n].type_id = tid
+    table.ms().names[table.ms().name_n].is_pub = support.fc().c_decl_pub
+    table.ms().names[table.ms().name_n].form = table.ms().name_form
+    table.ms().names[table.ms().name_n].attrs = support.fc().c_decl_attrs
+    table.ms().names[table.ms().name_n].def_line = token.ctx().tokens[token.ctx().pos].line
+    table.ms().names[table.ms().name_n].def_col = token.ctx().tokens[token.ctx().pos].col
+    table.ms().name_n += 1
     return 0
 }
 
@@ -4235,9 +4176,9 @@ pub fn ty_declare_name(off int, n int, tid int) int {
 pub fn ty_add_name_attrs(tid int, attrs int) int {
     let found int = 0
     let i int = 0
-    for i < support.ms().name_n {
-        if (support.ms().names[i].type_id == tid) {
-            support.ms().names[i].attrs |= attrs
+    for i < table.ms().name_n {
+        if (table.ms().names[i].type_id == tid) {
+            table.ms().names[i].attrs |= attrs
             found = 1
         }
         i += 1
@@ -4246,39 +4187,15 @@ pub fn ty_add_name_attrs(tid int, attrs int) int {
     return 0
 }
 
-// ty_cabi_param：允许 C 标量、具备共享布局的聚合及完整 C 函数指针。
-// 顶层数组不按值传递；切片和不透明值始终拒绝，数组仅可作为聚合字段。
+// ty_cabi_param：C ABI 形参/返回值兼容性判定；纯类型表查询已上移
+// table.cabi_param，此处仅转发保留既有调用面。
 pub fn ty_cabi_param(tid int) int {
-    if (ty_cabi_scalar(tid) != 0) { return 1 }
-    let kind int = support.ms().types[tid].kind
-    if (kind == support.TY_STRUCT || kind == support.TY_UNION) { return ty_c_layout(tid) }
-    if (kind != support.TY_FN) { return 0 }
-    let sig int = support.ms().types[tid].sub
-    if (support.ms().sig_abi[sig] != support.ABI_C || support.ms().sig_vararg[sig] != 0) { return 0 }
-    let ret int = support.ms().sig_ret[sig]
-    if (ret != support.TY_VOID && ty_cabi_param(ret) == 0) { return 0 }
-    let i int = 0
-    for i < support.ms().sig_np[sig] {
-        if (ty_cabi_param(support.ms().sig_params[support.ms().sig_first[sig] + i]) == 0) { return 0 }
-        i += 1
-    }
-    return 1
+    return table.cabi_param(tid)
 }
 
-// ty_c_layout：判断值布局可否直接嵌入 extern struct/union 的 C 共享布局。
+// ty_c_layout：C 共享布局判定；纯类型表查询已上移 table.c_layout。
 pub fn ty_c_layout(tid int) int {
-    let kind int = support.ms().types[tid].kind
-    if (kind >= support.TY_BOOL && kind <= support.TY_F64) { return 1 }
-    if (kind == support.TY_PTR) { return 1 }
-    if (kind == support.TY_FN) { return ty_cabi_param(tid) }
-    if (kind == support.TY_ARRAY) { return ty_c_layout(support.ms().types[tid].elem) }
-    if (kind == support.TY_ENUM) {
-        return ((support.ty_name_attrs(tid) & support.ATTR_EXTERN) != 0).to_type(int)
-    }
-    if (kind == support.TY_STRUCT || kind == support.TY_UNION) {
-        return ((support.ty_name_attrs(tid) & (support.ATTR_EXTERN | support.ATTR_OPAQUE)) == support.ATTR_EXTERN).to_type(int)
-    }
-    return 0
+    return table.c_layout(tid)
 }
 
 // sym_push：登记符号（名字先 intern 进池）。返回符号下标。
@@ -4289,16 +4206,16 @@ pub fn sym_push(start int, n int, kind int, tid int, flags int) int {
     if (off < 0) {
         return -1
     }
-    if (support.cfg().module_mode != 0 && (flags & support.F_GLOBAL) != 0 && (flags & support.F_EXTERN) == 0) {
+    if (support.cfg().module_mode != 0 && (flags & table.F_GLOBAL) != 0 && (flags & table.F_EXTERN) == 0) {
         // 模块模式：全局（含 enum 成员）重名报错；首次位置一并报告
         let di int = 0
-        for di < support.ms().sym_n {
-            if ((support.ms().syms[di].flags & support.F_GLOBAL) != 0 && support.ms().syms[di].name_len == n
-                && support.pool_ctx().data[support.ms().syms[di].name_off] == support.pool_ctx().data[off]) {
+        for di < table.ms().sym_n {
+            if ((table.ms().syms[di].flags & table.F_GLOBAL) != 0 && table.ms().syms[di].name_len == n
+                && support.pool_ctx().data[table.ms().syms[di].name_off] == support.pool_ctx().data[off]) {
                 let match int = 1
                 let j int = 1
                 for j < n {
-                    if (support.pool_ctx().data[support.ms().syms[di].name_off + j] != support.pool_ctx().data[off + j]) {
+                    if (support.pool_ctx().data[table.ms().syms[di].name_off + j] != support.pool_ctx().data[off + j]) {
                         match = 0
                         break
                     }
@@ -4309,9 +4226,9 @@ pub fn sym_push(start int, n int, kind int, tid int, flags int) int {
                         let buf [128]u8
                         let bn int = 0
                         bn = support.append_str(buf, bn, "重复的顶层声明（首次声明于 ")
-                        bn = support.append_int(buf, bn, support.ms().syms[di].def_line)
+                        bn = support.append_int(buf, bn, table.ms().syms[di].def_line)
                         bn = support.append_byte(buf, bn, ':')
-                        bn = support.append_int(buf, bn, support.ms().syms[di].def_col)
+                        bn = support.append_int(buf, bn, table.ms().syms[di].def_col)
                         bn = support.append_str(buf, bn, "）")
                         let mo int = support.tml_intern_str(buf, 0, bn)
                         if (mo < 0) {
@@ -4325,39 +4242,39 @@ pub fn sym_push(start int, n int, kind int, tid int, flags int) int {
             di += 1
         }
     }
-    if (support.ms().sym_n == support.ms().sym_cap) {
-        let ncap int = support.ms().sym_cap * 2
+    if (table.ms().sym_n == table.ms().sym_cap) {
+        let ncap int = table.ms().sym_cap * 2
         if (ncap == 0) {
             ncap = 256
         }
-        let nd *support.CSym = malloc((ncap * sizeof(support.CSym)).to_type(u64)).to_type(*support.CSym)
+        let nd *table.CSym = malloc((ncap * sizeof(table.CSym)).to_type(u64)).to_type(*table.CSym)
         if (nd == 0) {
             errors.fail("内存分配失败")
             return -1
         }
-        if (support.ms().sym_n > 0) {
-            memcpy(nd, support.ms().syms, (support.ms().sym_n * sizeof(support.CSym)).to_type(u64))
+        if (table.ms().sym_n > 0) {
+            memcpy(nd, table.ms().syms, (table.ms().sym_n * sizeof(table.CSym)).to_type(u64))
         }
-        free(support.ms().syms)
-        support.ms().syms = nd
-        support.ms().sym_cap = ncap
+        free(table.ms().syms)
+        table.ms().syms = nd
+        table.ms().sym_cap = ncap
     }
-    support.ms().syms[support.ms().sym_n].name_off = off
-    support.ms().syms[support.ms().sym_n].name_len = n
-    support.ms().syms[support.ms().sym_n].kind = kind
-    support.ms().syms[support.ms().sym_n].type_id = tid
-    support.ms().syms[support.ms().sym_n].offset = 0
-    support.ms().syms[support.ms().sym_n].flags = flags
-    support.ms().syms[support.ms().sym_n].cval = 0
-    support.ms().syms[support.ms().sym_n].const_ready = 0
-    support.ms().syms[support.ms().sym_n].const_expr_off = -1
-    support.ms().syms[support.ms().sym_n].const_expr_len = 0
-    support.ms().syms[support.ms().sym_n].const_expr_kind = 0
-    support.ms().syms[support.ms().sym_n].def_line = token.ctx().tokens[token.ctx().pos].line
-    support.ms().syms[support.ms().sym_n].def_col = token.ctx().tokens[token.ctx().pos].col
-    support.ms().syms[support.ms().sym_n].ast_binding_row = -1
-    support.ms().sym_n += 1
-    return support.ms().sym_n - 1
+    table.ms().syms[table.ms().sym_n].name_off = off
+    table.ms().syms[table.ms().sym_n].name_len = n
+    table.ms().syms[table.ms().sym_n].kind = kind
+    table.ms().syms[table.ms().sym_n].type_id = tid
+    table.ms().syms[table.ms().sym_n].offset = 0
+    table.ms().syms[table.ms().sym_n].flags = flags
+    table.ms().syms[table.ms().sym_n].cval = 0
+    table.ms().syms[table.ms().sym_n].const_ready = 0
+    table.ms().syms[table.ms().sym_n].const_expr_off = -1
+    table.ms().syms[table.ms().sym_n].const_expr_len = 0
+    table.ms().syms[table.ms().sym_n].const_expr_kind = 0
+    table.ms().syms[table.ms().sym_n].def_line = token.ctx().tokens[token.ctx().pos].line
+    table.ms().syms[table.ms().sym_n].def_col = token.ctx().tokens[token.ctx().pos].col
+    table.ms().syms[table.ms().sym_n].ast_binding_row = -1
+    table.ms().sym_n += 1
+    return table.ms().sym_n - 1
 }
 
 // sym_push_pool：以名字池中已有的名字登记符号（函数 check 缓存导入用）。
@@ -4420,9 +4337,9 @@ pub fn sem_parse_number(start int, n int) int {
 // 用于保持「普通全局 const 按声明顺序求值」的既有规则：只有声明在前的常量
 // 才允许在布局子遍提前求值，前向引用仍报「编译期常量尚未就绪」。
 pub fn sym_declared_before(sym int, line int, col int) int {
-    if (sym < 0 || sym >= support.ms().sym_n) { return 0 }
-    let dl int = support.ms().syms[sym].def_line
-    let dc int = support.ms().syms[sym].def_col
+    if (sym < 0 || sym >= table.ms().sym_n) { return 0 }
+    let dl int = table.ms().syms[sym].def_line
+    let dc int = table.ms().syms[sym].def_col
     if (dl < line) { return 1 }
     if (dl == line && dc < col) { return 1 }
     return 0
@@ -4433,60 +4350,63 @@ pub fn sem_promote(a int, b int) int {
     if (a == b) {
         return a
     }
-    let ak int = support.ms().types[a].kind
-    let bk int = support.ms().types[b].kind
-    if (ak == support.TY_BOOL) { a = support.TY_I32 }
-    if (bk == support.TY_BOOL) { b = support.TY_I32 }
-    if (ak == support.TY_CHAR) { a = support.TY_I32 }
-    if (bk == support.TY_CHAR) { b = support.TY_I32 }
-    if (ak == support.TY_ENUM) { a = support.TY_I32 }
-    if (bk == support.TY_ENUM) { b = support.TY_I32 }
+    let ak int = table.ms().types[a].kind
+    let bk int = table.ms().types[b].kind
+    if (ak == types.TY_BOOL) { a = types.TY_I32 }
+    if (bk == types.TY_BOOL) { b = types.TY_I32 }
+    if (ak == types.TY_CHAR) { a = types.TY_I32 }
+    if (bk == types.TY_CHAR) { b = types.TY_I32 }
+    if (ak == types.TY_ENUM) { a = types.TY_I32 }
+    if (bk == types.TY_ENUM) { b = types.TY_I32 }
     if (a == b) {
         return a
     }
-    if (support.ty_is_float(a) != 0 && support.ty_is_float(b) != 0) {
-        if (support.ms().types[a].size >= support.ms().types[b].size) {
+    if (table.ty_is_float(a) != 0 && table.ty_is_float(b) != 0) {
+        if (table.ms().types[a].size >= table.ms().types[b].size) {
             return a
         }
         return b
     }
-    if (support.ty_is_float(a) != 0 || support.ty_is_float(b) != 0) {
+    if (table.ty_is_float(a) != 0 || table.ty_is_float(b) != 0) {
         // 调用方已先行拒绝；此处返回较大一方兜底
-        if (support.ms().types[a].size >= support.ms().types[b].size) {
+        if (table.ms().types[a].size >= table.ms().types[b].size) {
             return a
         }
         return b
     }
-    let asz int = support.ms().types[a].size
-    let bsz int = support.ms().types[b].size
-    let aus int = (support.ty_is_signed(a) == 0).to_type(int)
-    let bus int = (support.ty_is_signed(b) == 0).to_type(int)
+    let asz int = table.ms().types[a].size
+    let bsz int = table.ms().types[b].size
+    let aus int = (table.ty_is_signed(a) == 0).to_type(int)
+    let bus int = (table.ty_is_signed(b) == 0).to_type(int)
     let size int = asz
     if (bsz > size) {
         size = bsz
     }
     let uns int = aus | bus
     if (size == 1) {
-        if (uns != 0) { return support.TY_U8 }
-        return support.TY_I8
+        if (uns != 0) { return types.TY_U8 }
+        return types.TY_I8
     }
     if (size == 2) {
-        if (uns != 0) { return support.TY_U16 }
-        return support.TY_I16
+        if (uns != 0) { return types.TY_U16 }
+        return types.TY_I16
     }
     if (size == 4) {
-        if (uns != 0) { return support.TY_U32 }
-        return support.TY_I32
+        if (uns != 0) { return types.TY_U32 }
+        return types.TY_I32
     }
-    if (uns != 0) { return support.TY_U64 }
-    return support.TY_I64
+    if (uns != 0) { return types.TY_U64 }
+    return types.TY_I64
 }
 
 // sem_init_tables：为全部堆分配的全局表分配空间（编译模式启动时调用一次）。
 // stage0 每个编译单元只允许一个全局数组字面量，因此这些表统一走堆。
 pub fn sem_init_tables() int {
+    table.tables_reset()
+    // 静态数据目录随语义表一同复位（原 support.session_reset 的清零，ADR-0028）。
+    table.static_data_reset()
     let n4 u64 = (4 * 64).to_type(u64)
-    support.ms().scope_start = support.alloc(n4).to_type(*int)
+    table.ms().scope_start = support.alloc(n4).to_type(*int)
     support.fc().c_brk_stk = support.alloc(n4).to_type(*int)
     support.fc().c_cnt_stk = support.alloc(n4).to_type(*int)
     support.fc().c_loop_break_seen = support.alloc(n4).to_type(*int)
@@ -4518,7 +4438,7 @@ pub fn sem_init_tables() int {
     support.fc().sc_sc_end_stk = malloc((4 * 64).to_type(u64)).to_type(*int)
     support.fc().tn_else_stk = malloc((4 * 64).to_type(u64)).to_type(*int)
     support.fc().tn_end_stk = malloc((4 * 64).to_type(u64)).to_type(*int)
-    if (support.ms().scope_start == 0 || support.fc().c_brk_stk == 0 || support.fc().c_cnt_stk == 0
+    if (table.ms().scope_start == 0 || support.fc().c_brk_stk == 0 || support.fc().c_cnt_stk == 0
         || support.fc().c_loop_break_seen == 0
         || support.fc().c_glabels == 0 || support.fc().c_args == 0 || support.fc().c_argtys == 0
         || support.fc().c_spill_reg == 0 || support.fc().c_spill_off == 0 || support.fc().c_spill_size == 0
@@ -4549,24 +4469,24 @@ pub fn prelude_add(name *char, ret int, np int, vararg int) int {
     if (off < 0) {
         return -1
     }
-    let ftid int = ty_fn(ret, support.ms().sigparam_n - np, np, vararg)
-    return sym_push_lit(off, n, support.SYM_FN, ftid, support.F_EXTERN | support.F_PUB)
+    let ftid int = ty_fn(ret, table.ms().sigparam_n - np, np, vararg)
+    return sym_push_lit(off, n, table.SYM_FN, ftid, table.F_EXTERN | table.F_PUB)
 }
 
-// sem_can_assign：检查 src 能否赋给 dst（隐式转换规则见 support.vk_can_assign）。
+// sem_can_assign：检查 src 能否赋给 dst（隐式转换规则见 table.vk_can_assign）。
 // 通过返回 0；拒绝返回 -1 并已报错。
 pub fn sem_can_assign(dst int, src int, is_lit int, ival i64, big int) int {
-    return sem_report(support.vk_can_assign(dst, src, is_lit, ival, big))
+    return sem_report(table.vk_can_assign(dst, src, is_lit, ival, big))
 }
 
 // sem_fold_const_binop：常量二元折叠；成功写 result 并返回 0，失败返回 -1 并已报错。
 pub fn sem_fold_const_binop(op int, tid int, left i64, right i64, result *i64) int {
-    return sem_report(support.vk_fold_binop(op, tid, left, right, result))
+    return sem_report(table.vk_fold_binop(op, tid, left, right, result))
 }
 
 // sem_fold_const_unary：常量一元折叠；成功写 result 并返回 0，失败返回 -1 并已报错。
 pub fn sem_fold_const_unary(op int, tid int, value i64, is_lit int, result *i64) int {
-    return sem_report(support.vk_fold_unary(op, tid, value, is_lit, result))
+    return sem_report(table.vk_fold_unary(op, tid, value, is_lit, result))
 }
 
 // verify_module：按表达式、语句、声明、函数顺序校验一份已捕获 AST。

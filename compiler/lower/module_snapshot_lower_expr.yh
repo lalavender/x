@@ -1,7 +1,9 @@
 module lower
 import token
 import check
+import types
 import support
+import table
 import ast
 import ir
 import proj
@@ -15,20 +17,20 @@ import proj
 fn checked_lower_kind(store *check.CheckedStorage, source_type int) int {
     if (source_type < 0 || source_type >= store.type_n) { return -1 }
     let kind int = store.types[source_type].kind
-    if (kind == support.TY_FN) { return ir.IR_TY_FN_PTR }
-    if (kind == support.TY_VOID) { return ir.IR_TY_VOID }
-    if (kind == support.TY_BOOL) { return ir.IR_TY_BOOL }
-    if (kind == support.TY_CHAR || kind == support.TY_U8) { return ir.IR_TY_U8 }
-    if (kind == support.TY_I8) { return ir.IR_TY_I8 }
-    if (kind == support.TY_I16) { return ir.IR_TY_I16 }
-    if (kind == support.TY_I32 || kind == support.TY_ENUM) { return ir.IR_TY_I32 }
-    if (kind == support.TY_I64) { return ir.IR_TY_I64 }
-    if (kind == support.TY_U16) { return ir.IR_TY_U16 }
-    if (kind == support.TY_U32) { return ir.IR_TY_U32 }
-    if (kind == support.TY_U64) { return ir.IR_TY_U64 }
-    if (kind == support.TY_F32) { return ir.IR_TY_F32 }
-    if (kind == support.TY_F64) { return ir.IR_TY_F64 }
-    if (kind == support.TY_PTR) {
+    if (kind == types.TY_FN) { return ir.IR_TY_FN_PTR }
+    if (kind == types.TY_VOID) { return ir.IR_TY_VOID }
+    if (kind == types.TY_BOOL) { return ir.IR_TY_BOOL }
+    if (kind == types.TY_CHAR || kind == types.TY_U8) { return ir.IR_TY_U8 }
+    if (kind == types.TY_I8) { return ir.IR_TY_I8 }
+    if (kind == types.TY_I16) { return ir.IR_TY_I16 }
+    if (kind == types.TY_I32 || kind == types.TY_ENUM) { return ir.IR_TY_I32 }
+    if (kind == types.TY_I64) { return ir.IR_TY_I64 }
+    if (kind == types.TY_U16) { return ir.IR_TY_U16 }
+    if (kind == types.TY_U32) { return ir.IR_TY_U32 }
+    if (kind == types.TY_U64) { return ir.IR_TY_U64 }
+    if (kind == types.TY_F32) { return ir.IR_TY_F32 }
+    if (kind == types.TY_F64) { return ir.IR_TY_F64 }
+    if (kind == types.TY_PTR) {
         // canonical 指针编码：IR_TY_PTR + 所指元素 kind；*void 即 IR_TY_PTR。
         let pointee int = store.types[source_type].elem
         let mapped int = checked_lower_kind(store, pointee)
@@ -39,8 +41,8 @@ fn checked_lower_kind(store *check.CheckedStorage, source_type int) int {
         if (pointee < 0 || pointee >= store.type_n) { return -1 }
         let pk int = store.types[pointee].kind
         // 指向聚合/void 的指针在首片按不透明指针（kind 12）处理。
-        if (pk == support.TY_VOID || pk == support.TY_ARRAY || pk == support.TY_STRUCT
-            || pk == support.TY_UNION || pk == support.TY_SLICE) {
+        if (pk == types.TY_VOID || pk == types.TY_ARRAY || pk == types.TY_STRUCT
+            || pk == types.TY_UNION || pk == types.TY_SLICE) {
             return ir.IR_TY_PTR
         }
         return -1
@@ -79,8 +81,8 @@ fn checked_lower_promoted(l *CheckedLower, left int, right int) int {
     if (left == right) { return a }
     let ak int = l.store.types[left].kind
     let bk int = l.store.types[right].kind
-    if (ak == support.TY_BOOL || ak == support.TY_CHAR || ak == support.TY_ENUM) { a = ir.IR_TY_I32 }
-    if (bk == support.TY_BOOL || bk == support.TY_CHAR || bk == support.TY_ENUM) { b = ir.IR_TY_I32 }
+    if (ak == types.TY_BOOL || ak == types.TY_CHAR || ak == types.TY_ENUM) { a = ir.IR_TY_I32 }
+    if (bk == types.TY_BOOL || bk == types.TY_CHAR || bk == types.TY_ENUM) { b = ir.IR_TY_I32 }
     if (a == b) { return a }
     let bits int = l.builder.types[a].bits
     if (l.builder.types[b].bits > bits) { bits = l.builder.types[b].bits }
@@ -121,13 +123,13 @@ fn checked_lower_assign_widens(l *CheckedLower, destination int, source int) int
     if (ir.ir_integer_type(destination_kind) == 0 || ir.ir_integer_type(source_kind) == 0) {
         return 0
     }
-    let destination_type support.CType = l.store.types[destination]
-    let source_type support.CType = l.store.types[source]
+    let destination_type types.CType = l.store.types[destination]
+    let source_type types.CType = l.store.types[source]
     if (destination_type.size > source_type.size) { return 1 }
     if (destination_type.size == source_type.size
         && (destination_type.kind == source_type.kind
-            || destination_type.kind == support.TY_ENUM
-            || source_type.kind == support.TY_ENUM)) { return 1 }
+            || destination_type.kind == types.TY_ENUM
+            || source_type.kind == types.TY_ENUM)) { return 1 }
     return 0
 }
 
@@ -141,11 +143,11 @@ fn checked_lower_signed(kind int) int {
 // 不按 sym_id 回查符号表：作用域弹出会把参数/局部槽位截断，快照符号表
 // 天然不含这些行（ast_stmt.yh 已声明 sym_id 仅作诊断、不是持久身份）。
 fn checked_lower_binding(l *CheckedLower, expr *ast.AstExpr) int {
-    if (expr.sym_kind != support.SYM_VAR || expr.type_id < 0
+    if (expr.sym_kind != table.SYM_VAR || expr.type_id < 0
         || expr.binding_row < 0 || expr.binding_row >= l.store.binding_n) { return -1 }
     let binding ast.AstBinding = l.store.bindings[expr.binding_row]
     if (binding.id < 0 || binding.id >= l.function_binding_count
-        || binding.sym_kind != support.SYM_VAR || binding.sym_type_id < 0
+        || binding.sym_kind != table.SYM_VAR || binding.sym_type_id < 0
         || binding.sym_type_id >= l.store.type_n) { return -1 }
     if (checked_lower_type(l, binding.sym_type_id) != checked_lower_type(l, expr.type_id)) {
         return -1
@@ -327,16 +329,16 @@ fn checked_lower_ternary(l *CheckedLower, flow *CheckedFlow, node *ast.AstExpr) 
 
 // checked_lower_function_addr：登记函数的完整 ABI 类型和符号，再生成可序列化取址指令。
 fn checked_lower_function_addr(l *CheckedLower, node *ast.AstExpr) int {
-    let runtime int = node.sym_flags & (support.F_RUNTIME_MEMCPY | support.F_RUNTIME_STRLEN
-        | support.F_RUNTIME_MALLOC | support.F_RUNTIME_FREE | support.F_RUNTIME_PRINTF)
+    let runtime int = node.sym_flags & (table.F_RUNTIME_MEMCPY | table.F_RUNTIME_STRLEN
+        | table.F_RUNTIME_MALLOC | table.F_RUNTIME_FREE | table.F_RUNTIME_PRINTF)
     if (node.sym_id < 0 || node.sym_id >= l.store.symbol_n
         || node.sym_type_id < 0 || node.sym_type_id >= l.store.type_n
-        || l.store.types[node.sym_type_id].kind != support.TY_FN
-        || (node.sym_flags & (support.F_COMPTIME | support.F_NORETURN)) != 0
-        || (node.sym_flags & support.F_INTRINSIC) != 0 && runtime == 0
-            && (node.sym_flags & support.F_LINUX_SYSCALL) == 0) { return -2 }
-    let source support.CSym = l.store.symbols[node.sym_id]
-    if (source.kind != support.SYM_FN || source.type_id != node.sym_type_id
+        || l.store.types[node.sym_type_id].kind != types.TY_FN
+        || (node.sym_flags & (table.F_COMPTIME | table.F_NORETURN)) != 0
+        || (node.sym_flags & table.F_INTRINSIC) != 0 && runtime == 0
+            && (node.sym_flags & table.F_LINUX_SYSCALL) == 0) { return -2 }
+    let source table.CSym = l.store.symbols[node.sym_id]
+    if (source.kind != table.SYM_FN || source.type_id != node.sym_type_id
         || source.name_len != node.sym_name_len
         || support.cstr_eq((l.store.names + source.name_off).to_type(*char),
             (l.store.names + node.sym_name_off).to_type(*char)) == 0) { return -2 }
@@ -364,7 +366,7 @@ fn checked_lower_address_of(l *CheckedLower, flow *CheckedFlow, node *ast.AstExp
     let b *AstIRBuilder = &l.builder
     let child ast.AstExpr = l.store.expressions[node.child0]
     if (child.kind == ast.AST_EXPR_PRIMARY && child.child0 < 0
-        && child.sym_kind == support.SYM_FN && (child.sym_flags & support.F_GLOBAL) != 0
+        && child.sym_kind == table.SYM_FN && (child.sym_flags & table.F_GLOBAL) != 0
         && child.binding_row < 0) {
         // 函数名取址：函数值本身已是不透明指针，`&f` 要求一个真实内存对象。
         // 分配 8 字节槽、写入函数地址，返回槽地址——与「先 let 再 &」语义一致，
@@ -377,7 +379,7 @@ fn checked_lower_address_of(l *CheckedLower, flow *CheckedFlow, node *ast.AstExp
         return slot
     }
     if (child.kind == ast.AST_EXPR_PRIMARY && child.child0 < 0
-        && (child.sym_flags & support.F_GLOBAL) != 0 && child.binding_row < 0) {
+        && (child.sym_flags & table.F_GLOBAL) != 0 && child.binding_row < 0) {
         return checked_lower_global_ref(l, &child)
     }
     if (child.kind == ast.AST_EXPR_INDEX || child.kind == ast.AST_EXPR_MEMBER
@@ -390,7 +392,7 @@ fn checked_lower_address_of(l *CheckedLower, flow *CheckedFlow, node *ast.AstExp
         return pointer
     }
     if (child.kind != ast.AST_EXPR_PRIMARY || child.child0 >= 0
-        || child.sym_kind != support.SYM_VAR) { return -2 }
+        || child.sym_kind != table.SYM_VAR) { return -2 }
     let row int = checked_lower_binding(l, &child)
     if (row < 0) { return -2 }
     let binding ast.AstBinding = l.store.bindings[row]
@@ -424,7 +426,7 @@ fn checked_lower_expr_inner(l *CheckedLower, flow *CheckedFlow, expr_id int) int
     if (node.kind == ast.AST_EXPR_PRIMARY && node.child0 >= 0) {
         return checked_lower_expr_inner(l, flow, node.child0)
     }
-    if (node.kind == ast.AST_EXPR_PRIMARY && node.sym_kind == support.SYM_CONST) {
+    if (node.kind == ast.AST_EXPR_PRIMARY && node.sym_kind == table.SYM_CONST) {
         let template_value int = checked_lower_comptime_binding(l, &node)
         if (template_value != -3) { return template_value }
     }
@@ -439,7 +441,7 @@ fn checked_lower_expr_inner(l *CheckedLower, flow *CheckedFlow, expr_id int) int
         return ast_ir_b_add_inst(b, ir.IR_OP_GLOB_ADDR, ir.IR_TY_PTR,
             -1, -1, symbol.to_type(i64))
     }
-    if (node.kind == ast.AST_EXPR_PRIMARY && node.child0 < 0 && node.sym_kind == support.SYM_FN) {
+    if (node.kind == ast.AST_EXPR_PRIMARY && node.child0 < 0 && node.sym_kind == table.SYM_FN) {
         return checked_lower_function_addr(l, &node)
     }
     let call_is_comptime int = 0
@@ -453,7 +455,7 @@ fn checked_lower_expr_inner(l *CheckedLower, flow *CheckedFlow, expr_id int) int
         }
         if (callee_id >= 0 && callee_id < l.store.expression_n) {
             call_is_comptime = (l.store.expressions[callee_id].sym_flags
-                & support.F_COMPTIME) != 0 ? 1 : 0
+                & table.F_COMPTIME) != 0 ? 1 : 0
         }
     }
     if (node.kind == ast.AST_EXPR_CALL && call_is_comptime != 0
@@ -473,7 +475,7 @@ fn checked_lower_expr_inner(l *CheckedLower, flow *CheckedFlow, expr_id int) int
         && (node.kind == ast.AST_EXPR_PRIMARY
             || node.kind == ast.AST_EXPR_UNARY && (node.op == token.TK_LEN
                 || node.op == token.TK_SIZEOF || node.is_lit != 0)
-            || node.kind == ast.AST_EXPR_MEMBER && l.store.types[node.type_id].kind == support.TY_ENUM)) {
+            || node.kind == ast.AST_EXPR_MEMBER && l.store.types[node.type_id].kind == types.TY_ENUM)) {
         let kind int = checked_lower_type(l, node.type_id)
         if (kind >= ir.IR_TY_PTR) {
             if (node.const_bits != 0) { return checked_lower_string(l, &node) }
@@ -509,7 +511,7 @@ fn checked_lower_expr_inner(l *CheckedLower, flow *CheckedFlow, expr_id int) int
     }
     if (node.kind == ast.AST_EXPR_PRIMARY) {
         if (node.child0 >= 0) { return checked_lower_expr_inner(l, flow, node.child0) }
-        if ((node.sym_flags & support.F_GLOBAL) != 0 && node.binding_row < 0) {
+        if ((node.sym_flags & table.F_GLOBAL) != 0 && node.binding_row < 0) {
             let pointer int = checked_lower_global_ref(l, &node)
             if (pointer < 0) { return pointer }
             let want int = checked_lower_type(l, node.type_id)
@@ -685,7 +687,7 @@ fn checked_lower_expr_inner(l *CheckedLower, flow *CheckedFlow, expr_id int) int
     }
     if ((op == ir.IR_OP_ADD || op == ir.IR_OP_SUB)
         && left_node.type_id >= 0 && left_node.type_id < l.store.type_n
-        && l.store.types[left_node.type_id].kind == support.TY_PTR) {
+        && l.store.types[left_node.type_id].kind == types.TY_PTR) {
         return checked_lower_pointer_math(l, &node, left, right)
     }
     let operand int = left_kind
@@ -742,10 +744,10 @@ fn checked_lower_pointer_math(l *CheckedLower, node *ast.AstExpr, base int, inde
         || node.child1 < 0 || node.child1 >= l.store.expression_n
         || base < 0 || base >= b.inst_count || index < 0 || index >= b.inst_count) { return -2 }
     let pointer ast.AstExpr = l.store.expressions[node.child0]
-    let pointer_type support.CType = l.store.types[pointer.type_id]
+    let pointer_type types.CType = l.store.types[pointer.type_id]
     let index_kind int = b.types[b.insts[index].result_type].kind
     let result_type int = checked_lower_type(l, node.type_id)
-    if (pointer_type.kind != support.TY_PTR || pointer_type.elem < 0
+    if (pointer_type.kind != types.TY_PTR || pointer_type.elem < 0
         || pointer_type.elem >= l.store.type_n || pointer_type.size <= 0
         || ir.ir_integer_type(index_kind) == 0 || result_type != b.insts[base].result_type) {
         return -2
@@ -838,11 +840,11 @@ fn checked_lower_array_decay(l *CheckedLower, flow *CheckedFlow,
         || pointer_type < 0 || pointer_type >= l.store.type_n) { return -2 }
     let value ast.AstExpr = l.store.expressions[expr_id]
     if (value.type_id < 0 || value.type_id >= l.store.type_n
-        || l.store.types[value.type_id].kind != support.TY_ARRAY
-        || l.store.types[pointer_type].kind != support.TY_PTR) { return -2 }
+        || l.store.types[value.type_id].kind != types.TY_ARRAY
+        || l.store.types[pointer_type].kind != types.TY_PTR) { return -2 }
     let pointee int = l.store.types[pointer_type].elem
     if (pointee < 0 || pointee >= l.store.type_n
-        || l.store.types[pointee].kind != support.TY_VOID
+        || l.store.types[pointee].kind != types.TY_VOID
             && l.store.types[value.type_id].elem != pointee) { return -2 }
     let storage int = checked_lower_lvalue_ptr(l, flow, expr_id)
     if (storage == -2) { return -2 }
@@ -878,9 +880,9 @@ fn checked_lower_symbol(l *CheckedLower, name *char, source_type int, result int
     symbol.abi = l.store.sig_abi[sig] == support.ABI_YH ?
         ir.IR_ABI_YH_LLVM_V1 : l.store.sig_abi[sig]
     symbol.variadic = l.store.sig_vararg[sig]
-    symbol.no_return = ((flags & support.F_NORETURN) != 0).to_type(int)
+    symbol.no_return = ((flags & table.F_NORETURN) != 0).to_type(int)
     // extern/C ABI 调用点是模块外部实体；普通私有 yh 前向声明仍须与本模块定义合并。
-    symbol.linkage = (flags & (support.F_EXTERN | support.F_CABI | support.F_PUB)) != 0 ?
+    symbol.linkage = (flags & (table.F_EXTERN | table.F_CABI | table.F_PUB)) != 0 ?
         ir.IR_MODULE_LINK_EXTERNAL : ir.IR_MODULE_LINK_PRIVATE
     symbol.defined = 0
     symbol.source = l.source_map[file_id]

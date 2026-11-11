@@ -1,54 +1,56 @@
 module parse
 import token
 import errors
+import types
 import support
 
+import table
 // parse_global_static_root：登记当前全局数据对象；接口重放对象带本地标签，普通
 // 定义按源符号定位。CT 接口隐藏常量使用临时标签，会在 CT 执行器回滚前跳过。
 fn parse_global_static_root(sym_id int, type_id int) int {
     if (support.session().ct_iface_mode != 0) { return -2 }
-    if (sym_id < 0 || sym_id >= support.ms().sym_n || type_id < 0 || type_id >= support.ms().type_n) {
+    if (sym_id < 0 || sym_id >= table.ms().sym_n || type_id < 0 || type_id >= table.ms().type_n) {
         return errors.fail("内部错误：静态全局对象身份无效")
     }
     let label int = -1
-    if (support.session().iface_load != 0) { label = support.ms().syms[sym_id].cval.to_type(int) }
-    return support.static_data_add(sym_id, label, type_id, -1, 0,
-        support.ms().types[type_id].size, support.ms().types[type_id].align)
+    if (support.session().iface_load != 0) { label = table.ms().syms[sym_id].cval.to_type(int) }
+    return table.static_data_add(sym_id, label, type_id, -1, 0,
+        table.ms().types[type_id].size, table.ms().types[type_id].align)
 }
 
 // parse_global_static_backing：登记数组/字符串 backing，identity 只有数据标签。
 fn parse_global_static_backing(label int, elem_type int, count int) int {
     if (support.session().ct_iface_mode != 0) { return -2 }
-    if (label <= 0 || elem_type < 0 || elem_type >= support.ms().type_n || count < 0
-        || support.ms().types[elem_type].size < 0
-        || (support.ms().types[elem_type].size > 0
-            && count > 67108864 / support.ms().types[elem_type].size)) {
+    if (label <= 0 || elem_type < 0 || elem_type >= table.ms().type_n || count < 0
+        || table.ms().types[elem_type].size < 0
+        || (table.ms().types[elem_type].size > 0
+            && count > 67108864 / table.ms().types[elem_type].size)) {
         return token.err_tok("静态 backing 布局无效")
     }
-    return support.static_data_add(-1, label, -1, elem_type, count,
-        count * support.ms().types[elem_type].size, support.ms().types[elem_type].align)
+    return table.static_data_add(-1, label, -1, elem_type, count,
+        count * table.ms().types[elem_type].size, table.ms().types[elem_type].align)
 }
 
 // parse_global_static_scalar：在当前对象的受检偏移写入标量位型。
 // parse_global_static_scalar：写入一个静态标量字节区间。
-// 浮点常量在所有折叠路径都以双精度位模式保存（见 support.fp64_norm_bits），
+// 浮点常量在所有折叠路径都以双精度位模式保存（见 table.fp64_norm_bits），
 // 而 f32 对象的宽度只有 4 字节；这里按目标类型窄化一次再写字节，
 // 否则低 4 字节会丢掉指数位（f32 全局/数组元素读回 0）。
 fn parse_global_static_scalar(row int, offset int, type_id int, bits i64) int {
     if (row == -2) { return 0 }
     if (row < 0) { return -1 }
-    if (type_id < 0 || type_id >= support.ms().type_n) { return errors.fail("静态标量类型无效") }
-    let size int = support.ms().types[type_id].size
+    if (type_id < 0 || type_id >= table.ms().type_n) { return errors.fail("静态标量类型无效") }
+    let size int = table.ms().types[type_id].size
     if (size < 1 || size > 8) { return token.err_tok("静态标量宽度暂不支持") }
-    let value i64 = support.ms().types[type_id].kind == support.TY_F32 ? support.fp32_bits(bits) : bits
-    return support.static_data_scalar(row, offset, size, value)
+    let value i64 = table.ms().types[type_id].kind == types.TY_F32 ? support.fp32_bits(bits) : bits
+    return table.static_data_scalar(row, offset, size, value)
 }
 
 // parse_global_static_pointer：记录零占位指针槽及其目标标签和字节加数。
 fn parse_global_static_pointer(row int, offset int, label int, addend i64) int {
     if (row == -2) { return 0 }
     if (row < 0) { return -1 }
-    return support.static_data_reloc(row, offset, -1, label, addend)
+    return table.static_data_reloc(row, offset, -1, label, addend)
 }
 
 // parse_global_static_string_target：只接受字符串字面量或指向它的 const 别名。
@@ -58,17 +60,17 @@ fn parse_global_static_string_target(first int, after int, value i64) int {
         && token.ctx().tokens[first].kind == token.TOK_STRING) { return value.to_type(int) }
     if (after != first + 1 || first < 0 || first >= token.ctx().count
         || token.ctx().tokens[first].kind != token.TOK_IDENT) { return 0 }
-    let sym_id int = support.sym_lookup(token.ctx().tokens[first].start, token.ctx().tokens[first].len)
-    if (sym_id < 0 || support.ms().syms[sym_id].kind != support.SYM_CONST
-        || (support.ms().syms[sym_id].flags & support.F_ADDR) == 0) { return 0 }
+    let sym_id int = table.sym_lookup(token.ctx().tokens[first].start, token.ctx().tokens[first].len)
+    if (sym_id < 0 || table.ms().syms[sym_id].kind != table.SYM_CONST
+        || (table.ms().syms[sym_id].flags & table.F_ADDR) == 0) { return 0 }
     let off int = 0
     let length int = 0
-    if (support.sym_ct_lit_text(sym_id, &off, &length) != 0) { return 0 }
+    if (table.sym_ct_lit_text(sym_id, &off, &length) != 0) { return 0 }
     return value.to_type(int)
 }
 
 // parse_global_static_string：把手工发射的全局字符串一并登记为独立 UTF-8 字节对象。
-// 解码表与 support.em_data_string_body 保持一致，零转义和十六进制转义按原始字节处理。
+// 解码表与 table.em_data_string_body 保持一致，零转义和十六进制转义按原始字节处理。
 fn parse_global_static_string(start int, slen int, label int) int {
     if (support.session().ct_iface_mode != 0) { return 0 }
     if (start < 0 || slen < 2 || start + slen > support.src_ctx().length || label <= 0) {
@@ -85,13 +87,13 @@ fn parse_global_static_string(start int, slen int, label int) int {
         } else { i += 1 }
         count += 1
     }
-    let row int = support.static_data_add(-1, label, -1, 7, count, count, 1)
+    let row int = table.static_data_add(-1, label, -1, 7, count, count, 1)
     if (row < 0) { return -1 }
     let known_off int = 0
     let known_len int = 0
     let known_quoted int = 0
-    if (support.data_str_lookup(label, &known_off, &known_len, &known_quoted) == 0
-        && support.data_str_add(label, start, slen) != 0) { return -1 }
+    if (table.data_str_lookup(label, &known_off, &known_len, &known_quoted) == 0
+        && table.data_str_add(label, start, slen) != 0) { return -1 }
     i = start + 1
     let pos int = 0
     for i < end {
@@ -116,8 +118,8 @@ fn parse_global_static_string(start int, slen int, label int) int {
             }
             if (escape != 'x') { i += 2 }
         } else { i += 1 }
-        if (support.static_data_scalar(row, pos, 1, value.to_type(i64)) != 0) { return -1 }
+        if (table.static_data_scalar(row, pos, 1, value.to_type(i64)) != 0) { return -1 }
         pos += 1
     }
-    return support.static_data_scalar(row, pos, 1, 0)
+    return table.static_data_scalar(row, pos, 1, 0)
 }

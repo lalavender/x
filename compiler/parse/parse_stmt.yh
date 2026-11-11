@@ -1,6 +1,8 @@
 module parse
 import check
+import types
 import support
+import table
 import token
 import comptime
 import ast
@@ -50,10 +52,10 @@ fn sem_check_cond(r *support.Res) int {
     if (support.session().compile == 0) {
         return 0
     }
-    if (support.ty_is_scalar(r.type_id) == 0) {
+    if (table.ty_is_scalar(r.type_id) == 0) {
         return token.err_tok("条件必须是标量")
     }
-    if (support.ty_is_float(r.type_id) != 0) {
+    if (table.ty_is_float(r.type_id) != 0) {
         return token.err_tok("浮点不能作条件（用 != 0 比较）")
     }
     return 0
@@ -77,7 +79,7 @@ fn parse_block() int {
     if (p_expect(token.TK_LBRACE, "期望 '{'") != 0) {
         return -1
     }
-    support.scope_push()
+    table.scope_push()
     for p_cur() != token.TK_RBRACE && p_cur() != token.TOK_EOF {
         let stmt_result int = 0
         if (support.session().ast_capture != 0) {
@@ -93,7 +95,7 @@ fn parse_block() int {
         return -1
     }
     p_take_block_end()
-    support.scope_pop()
+    table.scope_pop()
     if (own_ast != 0 && ast.ast_stmt_end(block_ast, token.ctx().pos) != 0) {
         return -1
     }
@@ -282,7 +284,7 @@ fn parse_stmt_inner() int {
     }
     if (p_expect(token.TK_SEMI, "期望 ';'") != 0) { return -1 }
     if (support.session().compile != 0 && res.ct_diag != 0
-        && (support.fc().c_fn_flags & support.F_COMPTIME) == 0
+        && (support.fc().c_fn_flags & table.F_COMPTIME) == 0
         && !(ctx().test_body != 0
             && res.ct_diag == support.CT_DIAG_ASSERT)) {
         return comptime.ct_diag_emit(res.ct_diag, res.ival,
@@ -313,13 +315,13 @@ fn parse_stmt() int {
 fn parse_return() int {
     p_adv()
     if (support.session().compile != 0) {
-        if ((support.fc().c_fn_flags & support.F_NORETURN) != 0) {
+        if ((support.fc().c_fn_flags & table.F_NORETURN) != 0) {
             return token.err_tok("noreturn 函数定义不能包含 return")
         }
-        if (support.fc().c_fn_ret == support.TY_VOID && p_cur() != token.TK_SEMI) {
+        if (support.fc().c_fn_ret == types.TY_VOID && p_cur() != token.TK_SEMI) {
             return token.err_tok("void 函数不能返回值")
         }
-        if (support.fc().c_fn_ret != support.TY_VOID && p_cur() == token.TK_SEMI) {
+        if (support.fc().c_fn_ret != types.TY_VOID && p_cur() == token.TK_SEMI) {
             return token.err_tok("非 void 函数必须返回值")
         }
     }
@@ -407,8 +409,8 @@ fn parse_for() int {
         let ibrk int = 0
         let iend int = 0
         if (support.session().compile != 0) {
-            if (check.sem_loop_push(iend, ibrk) != 0) {
-                return -1
+            if (support.loop_push(iend, ibrk) != 0) {
+                return token.err_tok("循环嵌套过深")
             }
         }
         support.fc().c_fn_falls = 1
@@ -420,7 +422,7 @@ fn parse_for() int {
             support.fc().c_loop_break_seen[loop_depth - 1] : 0
         support.fc().c_fn_falls = parent_falls != 0 && has_break != 0 ? 1 : 0
         if (support.session().compile != 0) {
-            check.sem_loop_pop()
+            support.loop_pop()
         }
         return 0
     }
@@ -488,8 +490,10 @@ fn parse_for() int {
             }
             let lcond int = 0
             let lend int = 0
-            if (check.sem_loop_push(lend, lcond) != 0) { return -1 }
-            support.scope_push()
+            if (support.loop_push(lend, lcond) != 0) {
+            return token.err_tok("循环嵌套过深")
+        }
+            table.scope_push()
             if (is_range != 0) {
                 // 起点从槽读回 x0，然后启动区间迭代
                 if (check.sem_forin_begin(&it, 1, &end_res) != 0) { return -1 }
@@ -506,15 +510,15 @@ fn parse_for() int {
                 if (support.session().ast_capture != 0 && ast.ast_binding_add(esym, elem_token, 0) != 0) {
                     return -1
                 }
-                eoff = support.ms().syms[esym].offset
+                eoff = table.ms().syms[esym].offset
             }
             if (idx_start >= 0) {
-                let isym int = check.sem_declare_local(idx_start, idx_len, support.TY_I32)
+                let isym int = check.sem_declare_local(idx_start, idx_len, types.TY_I32)
                 if (isym < 0) { return -1 }
                 if (support.session().ast_capture != 0 && ast.ast_binding_add(isym, idx_token, 0) != 0) {
                     return -1
                 }
-                ioff = support.ms().syms[isym].offset
+                ioff = table.ms().syms[isym].offset
             }
             if (check.sem_forin_set_bind(eoff, ioff) != 0) { return -1 }
             if (check.sem_forin_check(lend) != 0) { return -1 }
@@ -523,9 +527,9 @@ fn parse_for() int {
             if (parse_block() != 0) { return -1 }
             support.fc().c_fn_falls = parent_falls
             if (check.sem_forin_step(lcond) != 0) { return -1 }
-            support.scope_pop()
+            table.scope_pop()
             check.sem_forin_end()
-            check.sem_loop_pop()
+            support.loop_pop()
             return 0
         }
     }
@@ -533,8 +537,8 @@ fn parse_for() int {
     let lbl_cond int = 0
     let lbl_end int = 0
     if (support.session().compile != 0) {
-        if (check.sem_loop_push(lbl_end, lbl_cond) != 0) {
-            return -1
+        if (support.loop_push(lbl_end, lbl_cond) != 0) {
+            return token.err_tok("循环嵌套过深")
         }
     }
     let cond support.Res
@@ -552,7 +556,7 @@ fn parse_for() int {
     }
     support.fc().c_fn_falls = parent_falls
     if (support.session().compile != 0) {
-        check.sem_loop_pop()
+        support.loop_pop()
     }
     return 0
 }
@@ -572,7 +576,7 @@ fn parse_switch() int {
     }
     let slot int = 0
     if (support.session().compile != 0) {
-        if (support.ty_is_integer(ctrl.type_id) == 0) {
+        if (table.ty_is_integer(ctrl.type_id) == 0) {
             return token.err_tok("switch 控制值必须是整数")
         }
     }

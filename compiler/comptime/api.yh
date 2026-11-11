@@ -2,6 +2,7 @@ module comptime
 
 import errors
 import support
+import table
 import token
 // ============================================================================
 // api.yh —— comptime 模块公开面（pub 函数/结构体与 @[extern] 声明）
@@ -340,7 +341,7 @@ pub const CT_DIAG_ERROR int = 2
 pub const CT_DIAG_WARN int = 3
 
 // CtImportRow：ImportEnt 的镜像（文件导入表一行，10 个 int 字段同序同宽）。
-// 字段顺序必须与 support.ImportEnt 完全一致；ct_type_layout_ok 校验尺寸。
+// 字段顺序必须与 proj.ImportEnt 完全一致；ct_type_layout_ok 校验尺寸。
 pub struct CtImportRow {
     name_off int // 查找名（模块名）名字池偏移
     name_len int
@@ -354,7 +355,7 @@ pub struct CtImportRow {
     col int // 1 基列号
 }
 
-// CtStaticRow：support.StaticDataObject 的镜像（不含 relocs 内容，只带指针与行数）。
+// CtStaticRow：table.StaticDataObject 的镜像（不含 relocs 内容，只带指针与行数）。
 pub struct CtStaticRow {
     sym_id int
     label int
@@ -375,19 +376,19 @@ pub fn ct_diag_emit(kind int, value i64, line int, col int,
         msg_start, msg_len, 0, 0)
 }
 
-// ct_can_assign：隐式转换判定（规则在 support.vk_can_assign）。
+// ct_can_assign：隐式转换判定（规则在 table.vk_can_assign）。
 pub fn ct_can_assign(dst int, src int, is_lit int, ival i64, big int) int {
-    return ct_report(support.vk_can_assign(dst, src, is_lit, ival, big))
+    return ct_report(table.vk_can_assign(dst, src, is_lit, ival, big))
 }
 
-// ct_fold_binop：常量二元折叠（规则在 support.vk_fold_binop）。
+// ct_fold_binop：常量二元折叠（规则在 table.vk_fold_binop）。
 pub fn ct_fold_binop(op int, tid int, left i64, right i64, result *i64) int {
-    return ct_report(support.vk_fold_binop(op, tid, left, right, result))
+    return ct_report(table.vk_fold_binop(op, tid, left, right, result))
 }
 
-// ct_fold_unary：常量一元折叠（规则在 support.vk_fold_unary）。
+// ct_fold_unary：常量一元折叠（规则在 table.vk_fold_unary）。
 pub fn ct_fold_unary(op int, tid int, value i64, is_lit int, result *i64) int {
-    return ct_report(support.vk_fold_unary(op, tid, value, is_lit, result))
+    return ct_report(table.vk_fold_unary(op, tid, value, is_lit, result))
 }
 
 // ct_enum_member_count：统计枚举类型已登记的成员，保持符号表中的声明顺序。
@@ -491,14 +492,14 @@ pub fn ct_ty_sub(tid int) int {
     return rows[tid].sub
 }
 
-// ct_ty_is_integer：整数类（bool..u64 与 enum），与 support.ty_is_integer 同定义。
+// ct_ty_is_integer：整数类（bool..u64 与 enum），与 table.ty_is_integer 同定义。
 pub fn ct_ty_is_integer(tid int) int {
     let k int = ct_ty_kind(tid)
     if (k >= CT_TY_BOOL && k <= CT_TY_U64) { return 1 }
     return (k == CT_TY_ENUM).to_type(int)
 }
 
-// ct_ty_is_signed：有符号整数类（char..i64 与 enum），与 support.ty_is_signed 同定义。
+// ct_ty_is_signed：有符号整数类（char..i64 与 enum），与 table.ty_is_signed 同定义。
 pub fn ct_ty_is_signed(tid int) int {
     let k int = ct_ty_kind(tid)
     return ((k >= CT_TY_CHAR && k <= CT_TY_I64) || k == CT_TY_ENUM).to_type(int)
@@ -1088,7 +1089,7 @@ pub fn ct_layout_array(elem int, length int, const_sym int,
     }
     let align int = ct_type_row(elem).align
     if (align < 1) { align = 1 }
-    let tid int = support.model_type_push_agg(CT_TY_ARRAY, -1, align, elem, -2, -1)
+    let tid int = table.model_type_push_agg(CT_TY_ARRAY, -1, align, elem, -2, -1)
     if (tid < 0) { return -1 }
     if (ct_layout_add(CT_LAYOUT_ARRAY, tid, const_sym, length,
             0, line, col, -1, -1, -1) < 0
@@ -1114,7 +1115,7 @@ pub fn ct_layout_array_expr(elem int, file_id int, file_n int, first int, after 
     }
     let align int = ct_type_row(elem).align
     if (align < 1) { align = 1 }
-    let tid int = support.model_type_push_agg(CT_TY_ARRAY, -1, align, elem, -2, -1)
+    let tid int = table.model_type_push_agg(CT_TY_ARRAY, -1, align, elem, -2, -1)
     if (tid < 0) { return -1 }
     if (ct_layout_add(CT_LAYOUT_ARRAY, tid, -1, -1, 0,
             line, col, file_id, first, after) < 0
@@ -1295,7 +1296,7 @@ pub fn ct_layout_advance() int {
                     if (kind != CT_TY_STRUCT && kind != CT_TY_UNION) {
                         return errors.fail("内部错误：pending 布局请求不是结构体")
                     }
-                    if (support.sem_struct_finish(type_id,
+                    if (table.sem_struct_finish(type_id,
                             ct_layout_requests[i].is_union) != 0) { return -1 }
                     ct_layout_requests[i].ready = 1
                     progress += 1
@@ -1415,14 +1416,14 @@ pub fn ct_layout_expr_runnable(first int, after int) int {
         if (kind == token.TOK_IDENT
             && (i == first || (token.ctx().tokens[i - 1].kind != token.TK_DOT
                 && token.ctx().tokens[i - 1].kind != token.TK_DOLLAR))) {
-            let sym int = support.sym_lookup(token.ctx().tokens[i].start, token.ctx().tokens[i].len)
-            if (sym >= 0 && sym < support.ms().sym_n
-                && support.ms().syms[sym].kind == support.SYM_CONST
-                && support.ms().syms[sym].const_ready == 0) { return 0 }
+            let sym int = table.sym_lookup(token.ctx().tokens[i].start, token.ctx().tokens[i].len)
+            if (sym >= 0 && sym < table.ms().sym_n
+                && table.ms().syms[sym].kind == table.SYM_CONST
+                && table.ms().syms[sym].const_ready == 0) { return 0 }
         }
         if (kind == token.TK_DOLLAR && i + 1 < after
             && token.ctx().tokens[i + 1].kind == token.TOK_IDENT) {
-            let sym int = support.sym_lookup(token.ctx().tokens[i + 1].start,
+            let sym int = table.sym_lookup(token.ctx().tokens[i + 1].start,
                 token.ctx().tokens[i + 1].len)
             if (sym >= 0 && ct_layout_function_sym_pending(sym) != 0) {
                 return 0
@@ -1431,7 +1432,7 @@ pub fn ct_layout_expr_runnable(first int, after int) int {
         if (kind == token.TK_SIZEOF && i + 3 < after
             && token.ctx().tokens[i + 1].kind == token.TK_LPAREN
             && token.ctx().tokens[i + 2].kind == token.TOK_IDENT) {
-            let tid int = support.ty_lookup_name(token.ctx().tokens[i + 2].start,
+            let tid int = table.ty_lookup_name(token.ctx().tokens[i + 2].start,
                 token.ctx().tokens[i + 2].len)
             if (tid >= 0 && ct_layout_type_pending(tid) != 0) { return 0 }
         }
@@ -1450,9 +1451,9 @@ pub fn ct_layout_expr_register(row int) int {
         if (kind == token.TOK_IDENT
             && (i == first || (token.ctx().tokens[i - 1].kind != token.TK_DOT
                 && token.ctx().tokens[i - 1].kind != token.TK_DOLLAR))) {
-            let sym int = support.sym_lookup(token.ctx().tokens[i].start, token.ctx().tokens[i].len)
-            if (sym >= 0 && sym < support.ms().sym_n
-                && support.ms().syms[sym].kind == support.SYM_CONST) {
+            let sym int = table.sym_lookup(token.ctx().tokens[i].start, token.ctx().tokens[i].len)
+            if (sym >= 0 && sym < table.ms().sym_n
+                && table.ms().syms[sym].kind == table.SYM_CONST) {
                 if (ct_layout_expr_value_dependency_add(row, sym) != 0) {
                     return -1
                 }
@@ -1460,11 +1461,11 @@ pub fn ct_layout_expr_register(row int) int {
                 // `const N int = 3;` 原本只在全局子遍就绪，而全局/字段/形参
                 // 位置的 `[N]int` 在布局子遍就要定长。仅限声明在前的常量，
                 // 前向引用保持既有「编译期常量尚未就绪」诊断。
-                if (support.ms().syms[sym].const_ready == 0
+                if (table.ms().syms[sym].const_ready == 0
                     && ct_sym_declared_before(sym, token.ctx().tokens[first].line,
                         token.ctx().tokens[first].col) != 0
-                    && ct_value_request_add(sym, support.ms().syms[sym].def_line,
-                        support.ms().syms[sym].def_col) != 0) {
+                    && ct_value_request_add(sym, table.ms().syms[sym].def_line,
+                        table.ms().syms[sym].def_col) != 0) {
                     return -1
                 }
             }
@@ -1472,7 +1473,7 @@ pub fn ct_layout_expr_register(row int) int {
         if (kind == token.TK_SIZEOF && i + 3 < after
             && token.ctx().tokens[i + 1].kind == token.TK_LPAREN
             && token.ctx().tokens[i + 2].kind == token.TOK_IDENT) {
-            let tid int = support.ty_lookup_name(token.ctx().tokens[i + 2].start,
+            let tid int = table.ty_lookup_name(token.ctx().tokens[i + 2].start,
                 token.ctx().tokens[i + 2].len)
             if (tid >= 0
                 && ct_layout_expr_type_dependency_add(row, tid) != 0) {
@@ -1481,7 +1482,7 @@ pub fn ct_layout_expr_register(row int) int {
         }
         if (kind == token.TK_DOLLAR && i + 1 < after
             && token.ctx().tokens[i + 1].kind == token.TOK_IDENT) {
-            let sym int = support.sym_lookup(token.ctx().tokens[i + 1].start,
+            let sym int = table.sym_lookup(token.ctx().tokens[i + 1].start,
                 token.ctx().tokens[i + 1].len)
             if (sym >= 0
                 && ct_layout_expr_function_dependency_add(row, sym) != 0) {
@@ -1496,7 +1497,7 @@ pub fn ct_layout_expr_register(row int) int {
 // ct_reset：释放当前编译单元登记的函数体快照，防止模块 worker 交叉污染。
 pub fn ct_reset() void {
     // 编译单元结束后不能把前一模块的静态对象带入下一次受检快照。
-    support.static_data_reset()
+    table.static_data_reset()
     ct_layout_reset()
     ct_ir_result_pool_clear()
     ct_pool_reset()

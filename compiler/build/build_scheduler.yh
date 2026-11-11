@@ -12,6 +12,21 @@ import cache
 // 调度器按接口原子发布推进依赖，不等待提供方完成私有函数与汇编。
 // ============================================================================
 
+// WorkerSlot：调度器为每个模块维护的运行期槽位。
+// state 取 SLOT_*；pid 为 0 表示串行宿主（Windows / YH_NO_FORK）同步完成；
+// action_id 只在 worker 路径写入，父进程成功后用它提交 manifest。
+struct WorkerSlot {
+    state int
+    pid int
+    action_id [cache.CACHE_ID_SIZE]u8
+}
+
+const SLOT_PENDING int = 0
+const SLOT_RUNNING int = 1
+const SLOT_IFACE_READY int = 2
+const SLOT_DONE int = 3
+const SLOT_FAILED int = 4
+
 // mb_sched_worker_limit：worker 上限，默认 4（合入 perf WIP 的 PF3 开关）。
 // `YH_WORKERS` 可在 1..32 内覆盖，供并发扩展性测量；非法/缺省值回落到 4，
 // 避免环境变量把构建打坏。父进程读一次后缓存在 BuildCtx 里。
@@ -40,10 +55,10 @@ fn mb_sched_worker_limit() int {
 
 // mb_spawn_module_child：无 fork 宿主（Windows）把模块编译放进一次性子进程。
 // 子进程重走 --emit-module 协议（重新索引项目，前端状态天然干净），父进程
-// 等到退出后按 pid=0 走「已完成」分支。argv 沿用父进程的目标/优化/会话参数。
-fn mb_spawn_module_child(module_idx int, root_off int, root_len int,
-    out_dir *char, ir_cache_salt u64) int {
-    let mod int = module_idx
+// 等到退出后按 pid=0 走「已完成」分支。argv 沿用父进程的目标/优化/会话参数；
+// job 只提供模块身份、汇编输出目录与缓存指纹。
+fn mb_spawn_module_child(job *ModuleJob, root_off int, root_len int) int {
+    let mod int = job.mod
     if (mod < 0 || mod >= proj.mod_count()) { return -1 }
     let name_buf [160]u8
     let nn int = proj.mod_at(mod).name_len
@@ -63,14 +78,14 @@ fn mb_spawn_module_child(module_idx int, root_off int, root_len int,
     args[ai] = proj.pool_str(proj.proj_at(prov).root_off); ai += 1
     args[ai] = proj.pool_str(root_off); ai += 1
     args[ai] = "-o"; ai += 1
-    args[ai] = out_dir; ai += 1
+    args[ai] = job.out_dir; ai += 1
     if (bc().iface_suffix != 0) {
         args[ai] = "--iface-suffix"; ai += 1
         args[ai] = bc().iface_suffix; ai += 1
     }
     let hex [17]u8
-    if (ir_cache_salt != 0) {
-        proj.hash_hex(ir_cache_salt, &hex[0])
+    if (job.ir_cache_salt != 0) {
+        proj.hash_hex(job.ir_cache_salt, &hex[0])
         hex[16] = 0
         args[ai] = "--ir-key"; ai += 1
         args[ai] = (&hex[0]).to_type(*char); ai += 1
@@ -126,15 +141,14 @@ fn mb_spawn_module_child(module_idx int, root_off int, root_len int,
 }
 
 // mb_spawn_indexed_module：fork 当前已索引项目快照，子进程独占语义状态并编译模块。
-// out_dir：本模块的按文件汇编目录 <build>/asm/<tag>（RS3b）。
-fn mb_spawn_indexed_module(module_idx int, root_off int, root_len int,
-    out_dir *char, ir_cache_salt u64, pid_out *int) int {
+// job：本模块任务（含按文件汇编目录 <build>/asm/<tag> 与缓存指纹）。
+fn mb_spawn_indexed_module(job *ModuleJob, root_off int, root_len int,
+    pid_out *int) int {
     if (link.mb_can_fork() == 0) {
         // 无 fork 宿主（Windows，W2-4b）：每个模块经 --emit-module 起一次性
         // 子进程，前端状态不跨模块复用（串行进程内复用会污染符号/文件快照）。
         $if (windows) {
-            if (mb_spawn_module_child(module_idx, root_off, root_len,
-                    out_dir, ir_cache_salt) != 0) {
+            if (mb_spawn_module_child(job, root_off, root_len) != 0) {
                 return -1
             }
             pid_out[0] = 0
@@ -143,8 +157,7 @@ fn mb_spawn_indexed_module(module_idx int, root_off int, root_len int,
         $else {
             // Linux/Darwin 的 YH_NO_FORK=1 测试钩子：维持原有的进程内串行
             // 路径（W2-4a 已知 stage 7 未修，仅用于探针）。
-            if (mb_emit_indexed_module(module_idx, root_off, root_len,
-                    out_dir, ir_cache_salt) != 0) {
+            if (mb_emit_job(job) != 0) {
                 return -1
             }
             pid_out[0] = 0
@@ -157,8 +170,7 @@ fn mb_spawn_indexed_module(module_idx int, root_off int, root_len int,
     }
     if (child == 0) {
         mb_worker_parent_set()
-        let result int = mb_emit_indexed_module(module_idx, root_off, root_len,
-            out_dir, ir_cache_salt)
+        let result int = mb_emit_job(job)
         if (result == 0) {
             exit(0)
         }
@@ -198,18 +210,18 @@ fn mb_sched_order_index(module_idx int, count int) int {
     return -1
 }
 
-// mb_sched_refresh_interfaces：将已原子发布接口的运行任务推进到状态 2。
-fn mb_sched_refresh_interfaces(states *int, count int,
+// mb_sched_refresh_interfaces：将已原子发布接口的运行任务推进到接口就绪。
+fn mb_sched_refresh_interfaces(slots *WorkerSlot, count int,
     build_off int, build_len int) int {
     let i int = 0
     for i < count {
-        if (states[i] == 1) {
+        if (slots[i].state == SLOT_RUNNING) {
             let path [700]u8
             if (mb_module_ready_path(proj.order_at(i), build_off, build_len, &path[0]) != 0) {
                 return -1
             }
             if (proj.file_exists(support.arr_cstr(&path[0])) != 0) {
-                states[i] = 2
+                slots[i].state = SLOT_IFACE_READY
             }
         }
         i += 1
@@ -219,7 +231,7 @@ fn mb_sched_refresh_interfaces(states *int, count int,
 
 // mb_sched_deps_ready：依赖均已完成或接口就绪时返回 1，否则返回 0。
 // early_out 表示至少有一个依赖仍在运行，但已发布可用接口。
-fn mb_sched_deps_ready(module_idx int, states *int, count int,
+fn mb_sched_deps_ready(module_idx int, slots *WorkerSlot, count int,
     build_off int, build_len int, early_out *int) int {
     early_out[0] = 0
     if (mb_module_iface_deps(module_idx, build_off, build_len) < 0) {
@@ -232,19 +244,19 @@ fn mb_sched_deps_ready(module_idx int, states *int, count int,
         if (oi < 0) {
             return errors.fail("内部错误：依赖模块不在当前构建序列")
         }
-        if (states[oi] == 1) {
+        if (slots[oi].state == SLOT_RUNNING) {
             let path [700]u8
             if (mb_module_ready_path(dep_mod, build_off, build_len, &path[0]) != 0) {
                 return -1
             }
             if (proj.file_exists(support.arr_cstr(&path[0])) != 0) {
-                states[oi] = 2
+                slots[oi].state = SLOT_IFACE_READY
             }
         }
-        if (states[oi] != 2 && states[oi] != 3) {
+        if (slots[oi].state != SLOT_IFACE_READY && slots[oi].state != SLOT_DONE) {
             return 0
         }
-        if (states[oi] == 2) {
+        if (slots[oi].state == SLOT_IFACE_READY) {
             // 早期启动只允许 CT 接口没有变化的依赖；CT 变了就等完整提交，
             // 避免消费者用旧 .s.ct 计算全局编译期常量。
             if (mb_iface_ct_same(dep_mod, build_off, build_len) == 0) {
@@ -264,21 +276,23 @@ fn mb_sched_deps_ready(module_idx int, states *int, count int,
 }
 
 // mb_sched_cancel_workers：失败时终止并回收尚未结束的子进程。
-fn mb_sched_cancel_workers(states *int, pids *int, count int) void {
+fn mb_sched_cancel_workers(slots *WorkerSlot, count int) void {
     let i int = 0
     for i < count {
         // 串行宿主的 pid 是 0：kill(0, sig) 会打到整个进程组，必须跳过。
-        if ((states[i] == 1 || states[i] == 2) && pids[i] != 0) {
-            kill(pids[i], 15)
+        if ((slots[i].state == SLOT_RUNNING || slots[i].state == SLOT_IFACE_READY)
+            && slots[i].pid != 0) {
+            kill(slots[i].pid, 15)
         }
         i += 1
     }
     i = 0
     for i < count {
-        if ((states[i] == 1 || states[i] == 2) && pids[i] != 0) {
+        if ((slots[i].state == SLOT_RUNNING || slots[i].state == SLOT_IFACE_READY)
+            && slots[i].pid != 0) {
             let status int = 0
-            waitpid(pids[i], &status, 0)
-            states[i] = 4
+            waitpid(slots[i].pid, &status, 0)
+            slots[i].state = SLOT_FAILED
         }
         i += 1
     }
@@ -362,19 +376,14 @@ fn mb_schedule_modules_locked(count int, root_off int, root_len int,
     lmn = support.append_str(&link_manifest[0], lmn, "/manifest/link.manifest")
     link_manifest[lmn] = 0
     support.ctl().firc_write_off = proj.file_exists(support.arr_cstr(&link_manifest[0])) == 0 ? 1 : 0
-    let states *int = malloc((count * sizeof(int)).to_type(u64)).to_type(*int)
-    let pids *int = malloc((count * sizeof(int)).to_type(u64)).to_type(*int)
-    let keys *u8 = malloc((count * cache.CACHE_ID_SIZE).to_type(u64)).to_type(*u8)
-    if (states == 0 || pids == 0 || keys == 0) {
-        free(states)
-        free(pids)
-        free(keys)
+    let slots *WorkerSlot = malloc((count * sizeof(WorkerSlot)).to_type(u64)).to_type(*WorkerSlot)
+    if (slots == 0) {
         return errors.fail("内存分配失败")
     }
     let i int = 0
     for i < count {
-        states[i] = 0
-        pids[i] = 0
+        slots[i].state = SLOT_PENDING
+        slots[i].pid = 0
         i += 1
     }
     let completed int = 0
@@ -382,26 +391,26 @@ fn mb_schedule_modules_locked(count int, root_off int, root_len int,
     let failed int = 0
     for completed < count && failed == 0 {
         let progress int = 0
-        if (mb_sched_refresh_interfaces(states, count, build_off, build_len) != 0) {
+        if (mb_sched_refresh_interfaces(slots, count, build_off, build_len) != 0) {
             failed = 1
             break
         }
         i = 0
         for i < count {
-            if (states[i] == 1 || states[i] == 2) {
+            if (slots[i].state == SLOT_RUNNING || slots[i].state == SLOT_IFACE_READY) {
                 let status int = 0
                 // 串行宿主（Windows）的模块在 mb_spawn_indexed_module 里同步完成，
                 // pid 为 0，不需要 waitpid —— 直接进入发布/提交分支。
-                let waited int = pids[i] == 0 ? 0 : waitpid(pids[i], &status, 1)
-                if (waited == pids[i]) {
+                let waited int = slots[i].pid == 0 ? 0 : waitpid(slots[i].pid, &status, 1)
+                if (waited == slots[i].pid) {
                     active -= 1
                     progress = 1
                     if (status != 0) {
-                        states[i] = 4
+                        slots[i].state = SLOT_FAILED
                         failed = 1
                         break
                     }
-                    states[i] = 3
+                    slots[i].state = SLOT_DONE
                     completed += 1
                     if (support.session().check_only != 0) {
                         pj_out_s("  [检查] ")
@@ -412,7 +421,7 @@ fn mb_schedule_modules_locked(count int, root_off int, root_len int,
                             break
                         }
                         if (mb_manifest_commit(proj.order_at(i), build_off, build_len,
-                                keys + (i * cache.CACHE_ID_SIZE)) != 0) {
+                                &slots[i].action_id[0]) != 0) {
                             failed = 1
                             break
                         }
@@ -422,10 +431,10 @@ fn mb_schedule_modules_locked(count int, root_off int, root_len int,
                         proj.mod_at(proj.order_at(i)).name_len)
                     pj_out_s("\n")
                 } else if (waited < 0) {
-                    kill(pids[i], 15)
-                    waitpid(pids[i], &status, 0)
+                    kill(slots[i].pid, 15)
+                    waitpid(slots[i].pid, &status, 0)
                     active -= 1
-                    states[i] = 4
+                    slots[i].state = SLOT_FAILED
                     failed = 1
                     break
                 }
@@ -435,15 +444,15 @@ fn mb_schedule_modules_locked(count int, root_off int, root_len int,
         if (failed != 0) {
             break
         }
-        if (mb_sched_refresh_interfaces(states, count, build_off, build_len) != 0) {
+        if (mb_sched_refresh_interfaces(slots, count, build_off, build_len) != 0) {
             failed = 1
             break
         }
         i = 0
         for i < count && active < mb_sched_worker_limit() {
-            if (states[i] == 0) {
+            if (slots[i].state == SLOT_PENDING) {
                 let early int = 0
-                let ready int = mb_sched_deps_ready(proj.order_at(i), states, count,
+                let ready int = mb_sched_deps_ready(proj.order_at(i), slots, count,
                     build_off, build_len, &early)
                 if (ready < 0) {
                     failed = 1
@@ -453,18 +462,18 @@ fn mb_schedule_modules_locked(count int, root_off int, root_len int,
                     let pid int = 0
                     let started int = mb_compile_start(proj.order_at(i), root_off,
                         root_len, build_off, build_len, &pid,
-                        keys + (i * cache.CACHE_ID_SIZE))
+                        &slots[i].action_id[0])
                     if (started < 0) {
                         failed = 1
                         break
                     }
                     progress = 1
                     if (started == 1) {
-                        states[i] = 3
+                        slots[i].state = SLOT_DONE
                         completed += 1
                     } else {
-                        states[i] = 1
-                        pids[i] = pid
+                        slots[i].state = SLOT_RUNNING
+                        slots[i].pid = pid
                         active += 1
                     }
                 }
@@ -484,7 +493,7 @@ fn mb_schedule_modules_locked(count int, root_off int, root_len int,
         }
     }
     if (failed != 0) {
-        mb_sched_cancel_workers(states, pids, count)
+        mb_sched_cancel_workers(slots, count)
         if (support.session().check_only != 0) {
             errors.fail("项目语义检查失败")
         } else {
@@ -492,9 +501,7 @@ fn mb_schedule_modules_locked(count int, root_off int, root_len int,
         }
     }
     mb_sched_clear_interfaces(count, build_off, build_len)
-    free(states)
-    free(pids)
-    free(keys)
+    free(slots)
     if (failed != 0) {
         return -1
     }

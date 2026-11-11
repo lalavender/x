@@ -1,7 +1,9 @@
 module parse
 import token
 import check
+import types
 import support
+import table
 import comptime
 import ast
 import proj
@@ -319,19 +321,19 @@ fn parse_test_decl() int {
         if (support.session().pass == 1) {
             let noff int = support.tml_intern_str(&name[0], 0, nn)
             if (noff < 0) { return -1 }
-            let ftid int = check.ty_fn_abi(support.TY_VOID, support.ms().sigparam_n,
+            let ftid int = table.fn_abi(types.TY_VOID, table.ms().sigparam_n,
                 0, 0, support.ABI_YH)
             if (ftid < 0) { return -1 }
-            let idx int = check.sym_push_pool(noff, nn, support.SYM_FN, ftid,
-                support.F_GLOBAL | support.F_PUB)
+            let idx int = check.sym_push_pool(noff, nn, table.SYM_FN, ftid,
+                table.F_GLOBAL | table.F_PUB)
             if (idx < 0) { return -1 }
             ast.store().file_decls[ast.store().file_decl_i].test_sym = idx
             token.ctx().pos = ast.store().file_decls[ast.store().file_decl_i].end
             return 0
         }
         let sym int = ast.store().file_decls[ast.store().file_decl_i].test_sym
-        if (sym < 0 || sym >= support.ms().sym_n
-            || support.ms().syms[sym].kind != support.SYM_FN) {
+        if (sym < 0 || sym >= table.ms().sym_n
+            || table.ms().syms[sym].kind != table.SYM_FN) {
             return token.err_tok("内部错误：测试函数符号丢失")
         }
         if (check.sem_fn_begin(sym) != 0) { return -1 }
@@ -359,7 +361,7 @@ fn parse_test_decl() int {
 }
 
 fn parse_local_init(idx int, tid int, kind int) int {
-    if (kind == support.SYM_CONST) {
+    if (kind == table.SYM_CONST) {
         support.fc().c_fold += 1
         let cr support.Res
         let crr int = parse_expr_iso(&cr)
@@ -373,11 +375,11 @@ fn parse_local_init(idx int, tid int, kind int) int {
         if (check.sem_can_assign(tid, cr.type_id, cr.is_lit, cr.ival, cr.lit_big) != 0) {
             return -1
         }
-        support.ms().syms[idx].cval = cr.ival
-        if (support.ms().types[tid].kind == support.TY_PTR) {
-            support.ms().syms[idx].flags |= support.F_ADDR
+        table.ms().syms[idx].cval = cr.ival
+        if (table.ms().types[tid].kind == types.TY_PTR) {
+            table.ms().syms[idx].flags |= table.F_ADDR
         }
-        support.ms().syms[idx].const_ready = 1
+        table.ms().syms[idx].const_ready = 1
         return 0
     }
     let r support.Res
@@ -398,7 +400,7 @@ fn parse_local_init(idx int, tid int, kind int) int {
 fn parse_let_decl(global int) int {
     p_adv()
     for 1 {
-        if (parse_binding(global, support.SYM_VAR) != 0) {
+        if (parse_binding(global, table.SYM_VAR) != 0) {
             return -1
         }
         if (p_cur() == token.TK_COMMA) {
@@ -413,7 +415,7 @@ fn parse_let_decl(global int) int {
 fn parse_const_decl(global int) int {
     p_adv()
     for 1 {
-        if (parse_binding(global, support.SYM_CONST) != 0) {
+        if (parse_binding(global, table.SYM_CONST) != 0) {
             return -1
         }
         if (p_cur() == token.TK_COMMA) {
@@ -511,7 +513,7 @@ fn parse_fn_decl() int {
     if (p_expect(token.TK_RPAREN, "期望 ')'") != 0) {
         return -1
     }
-    let ret int = support.TY_VOID
+    let ret int = types.TY_VOID
     if (is_type_start(p_cur()) != 0) {
         let rt int = parse_type_ref()
         if (rt < 0) {
@@ -533,16 +535,16 @@ fn parse_fn_decl() int {
         }
     }
     ctx().type_abi = saved_type_abi
-    if ((support.fc().c_decl_attrs & token.ATTR_NORETURN) != 0 && ret != support.TY_VOID) {
+    if ((support.fc().c_decl_attrs & token.ATTR_NORETURN) != 0 && ret != types.TY_VOID) {
         return token.err_tok("noreturn 函数必须返回 void")
     }
     if (support.session().compile != 0) {
-        if (support.ty_has_opaque_value(ret) != 0) {
+        if (table.ty_has_opaque_value(ret) != 0) {
             return token.err_tok("不透明 C 类型不能按值返回")
         }
         let pi_check int = 0
         for pi_check < np {
-            if (support.ty_has_opaque_value(ptypes[pi_check]) != 0) {
+            if (table.ty_has_opaque_value(ptypes[pi_check]) != 0) {
                 return token.err_tok("不透明 C 类型只能通过指针传递")
             }
             pi_check += 1
@@ -551,12 +553,12 @@ fn parse_fn_decl() int {
             if (vararg != 0 || is_variadic_seen != 0) {
                 return token.err_tok("C ABI v1 不支持 yh 变参")
             }
-            if (ret != support.TY_VOID && check.ty_cabi_param(ret) == 0) {
+            if (ret != types.TY_VOID && table.cabi_param(ret) == 0) {
                 return token.err_tok("C ABI 不支持该返回类型")
             }
             let ci int = 0
             for ci < np {
-                if (check.ty_cabi_param(ptypes[ci]) == 0) {
+                if (table.cabi_param(ptypes[ci]) == 0) {
                     return token.err_tok("C ABI 不支持该参数类型")
                 }
                 ci += 1
@@ -581,14 +583,14 @@ fn parse_fn_decl() int {
     // 编译模式
     if (support.session().pass == 1) {
         // 登记函数符号与签名（重复时报告首次声明位置）
-        let prev int = support.sym_lookup(start, n)
+        let prev int = table.sym_lookup(start, n)
         if (prev >= 0) {
             let buf [128]u8
             let bn int = 0
             bn = support.append_str(buf, bn, "顶层符号重定义（首次声明于 ")
-            bn = support.append_int(buf, bn, support.ms().syms[prev].def_line)
+            bn = support.append_int(buf, bn, table.ms().syms[prev].def_line)
             bn = support.append_byte(buf, bn, ':')
-            bn = support.append_int(buf, bn, support.ms().syms[prev].def_col)
+            bn = support.append_int(buf, bn, table.ms().syms[prev].def_col)
             bn = support.append_str(buf, bn, "）")
             let mo int = support.tml_intern_str(buf, 0, bn)
             if (mo < 0) {
@@ -596,7 +598,7 @@ fn parse_fn_decl() int {
             }
             return token.err_tok(support.np_cstr(mo))
         }
-        let first int = support.ms().sigparam_n
+        let first int = table.ms().sigparam_n
         let i int = 0
         for i < np {
             check.ty_sig_param(ptypes[i])
@@ -609,19 +611,19 @@ fn parse_fn_decl() int {
             sig_va = 2
         }
         let fn_abi int = (support.fc().c_decl_attrs & token.ATTR_EXTERN) != 0 ? support.ABI_C : support.ABI_YH
-        let ftid int = check.ty_fn_abi(ret, first, sig_np, sig_va, fn_abi)
-        let fl int = support.F_GLOBAL
+        let ftid int = table.fn_abi(ret, first, sig_np, sig_va, fn_abi)
+        let fl int = table.F_GLOBAL
         if (support.fc().c_decl_pub != 0) {
-            fl |= support.F_PUB
+            fl |= table.F_PUB
         }
         if ((support.fc().c_decl_attrs & token.ATTR_EXTERN) != 0) {
-            fl |= support.F_CABI
-            if (has_body == 0) { fl |= support.F_EXTERN }
+            fl |= table.F_CABI
+            if (has_body == 0) { fl |= table.F_EXTERN }
         }
-        if ((support.fc().c_decl_attrs & token.ATTR_NORETURN) != 0) { fl |= support.F_NORETURN }
-        if ((support.fc().c_decl_attrs & token.ATTR_INLINE) != 0) { fl |= support.F_INLINE }
-        if ((support.fc().c_decl_attrs & token.ATTR_COMPTIME) != 0) { fl |= support.F_COMPTIME }
-        let idx int = check.sym_push(start, n, support.SYM_FN, ftid, fl)
+        if ((support.fc().c_decl_attrs & token.ATTR_NORETURN) != 0) { fl |= table.F_NORETURN }
+        if ((support.fc().c_decl_attrs & token.ATTR_INLINE) != 0) { fl |= table.F_INLINE }
+        if ((support.fc().c_decl_attrs & token.ATTR_COMPTIME) != 0) { fl |= table.F_COMPTIME }
+        let idx int = check.sym_push(start, n, table.SYM_FN, ftid, fl)
         if (idx < 0) {
             return -1
         }
@@ -631,7 +633,7 @@ fn parse_fn_decl() int {
         if (n == 4 && support.src_ctx().data[start] == 'm' && support.src_ctx().data[start + 1] == 'a'
             && support.src_ctx().data[start + 2] == 'i' && support.src_ctx().data[start + 3] == 'n'
             && (support.module_mode() == 0 || proj.cfg().is_entry_mod != 0)) {
-            support.ms().syms[idx].flags |= support.F_PUB
+            table.ms().syms[idx].flags |= table.F_PUB
         }
         // 有体定义跳过函数体；编译期函数另外保存正文快照，供全局常量求值。
         if (has_body == 0) { return 0 }
@@ -654,11 +656,11 @@ fn parse_fn_decl() int {
     }
     // pass 2：编译函数体
     if (has_body == 0) { return 0 }
-    let fidx int = support.sym_lookup(start, n)
+    let fidx int = table.sym_lookup(start, n)
     if (fidx < 0) {
         return token.err_tok("内部错误：函数符号丢失")
     }
-    let compile_only int = ((support.ms().syms[fidx].flags & support.F_COMPTIME) != 0).to_type(int)
+    let compile_only int = ((table.ms().syms[fidx].flags & table.F_COMPTIME) != 0).to_type(int)
     if (compile_only != 0 && support.fc().c_ct_prepare_active == 0) {
         if (comptime.ct_is_prepared(fidx) != 0) {
             if (ast.store().file_indexed != 0 && ast.store().file_decl_i >= 0) {
@@ -687,18 +689,18 @@ fn parse_fn_decl() int {
             return -1
         }
         let apos int = ipos
-        if (support.ty_is_float(ptypes[fi]) != 0) {
+        if (table.ty_is_float(ptypes[fi]) != 0) {
             apos = fpos
             fpos += 1
         } else {
             ipos += 1
         }
-        if ((support.fc().c_fn_flags & support.F_CABI) != 0) { apos = fi }
+        if ((support.fc().c_fn_flags & table.F_CABI) != 0) { apos = fi }
         if (check.sem_declare_param(pnames[fi], pname_lens[fi], ptypes[fi], apos) != 0) {
             return -1
         }
         if (support.session().ast_capture != 0
-            && ast.ast_binding_add(support.ms().sym_n - 1, pname_tokens[fi], 1) != 0) {
+            && ast.ast_binding_add(table.ms().sym_n - 1, pname_tokens[fi], 1) != 0) {
             return -1
         }
         fi += 1
@@ -740,7 +742,7 @@ fn parse_type_decl() int {
         if (off < 0) {
             return -1
         }
-        support.ms().name_form = 0
+        table.ms().name_form = 0
         return check.ty_declare_name(off, n, tid)
     }
     return 0
@@ -762,22 +764,22 @@ fn parse_struct_decl() int {
     let struct_col int = token.ctx().tokens[token.ctx().pos - 1].col
     if (support.session().compile != 0 && support.session().pass == 1) {
         // 预登记名字（自引用指针字段需要）
-        let stid int = support.ty_push(support.TY_STRUCT, 0, 0, -1, 0, support.ms().field_n)
+        let stid int = table.ty_push(types.TY_STRUCT, 0, 0, -1, 0, table.ms().field_n)
         if (stid < 0) {
             return -1
         }
         if (is_union != 0) {
-            support.ms().types[stid].kind = support.TY_UNION
+            table.ms().types[stid].kind = types.TY_UNION
         }
         let off int = support.name_intern(start, n)
         if (off < 0) {
             return -1
         }
-        support.ms().name_form = is_union + 1
+        table.ms().name_form = is_union + 1
         if (check.ty_declare_name(off, n, stid) != 0) {
             return -1
         }
-        support.ms().cur_struct = stid
+        table.ms().cur_struct = stid
     }
     if (p_expect(token.TK_LBRACE, "期望 '{'") != 0) {
         return -1
@@ -807,7 +809,7 @@ fn parse_struct_decl() int {
             return -1
         }
         if (support.session().compile != 0 && support.session().pass == 1) {
-            if (check.sem_add_field(support.ms().cur_struct, fstart, fn2, ftid) != 0) {
+            if (check.sem_add_field(table.ms().cur_struct, fstart, fn2, ftid) != 0) {
                 return -1
             }
         }
@@ -817,16 +819,16 @@ fn parse_struct_decl() int {
     }
     ctx().type_abi = saved_type_abi
     if (support.session().compile != 0 && support.session().pass == 1) {
-        if (comptime.ct_layout_struct_pending(support.ms().cur_struct) != 0) {
-            if (comptime.ct_layout_defer_struct(support.ms().cur_struct, is_union,
+        if (comptime.ct_layout_struct_pending(table.ms().cur_struct) != 0) {
+            if (comptime.ct_layout_defer_struct(table.ms().cur_struct, is_union,
                     struct_line, struct_col) != 0) { return -1 }
         } else {
-            if (support.sem_struct_finish(support.ms().cur_struct, is_union) != 0) {
+            if (table.sem_struct_finish(table.ms().cur_struct, is_union) != 0) {
                 return -1
             }
         }
-        if ((support.fc().c_decl_attrs & token.ATTR_EXTERN) != 0 && support.ms().types[support.ms().cur_struct].len == 0) {
-            return check.ty_add_name_attrs(support.ms().cur_struct, token.ATTR_OPAQUE)
+        if ((support.fc().c_decl_attrs & token.ATTR_EXTERN) != 0 && table.ms().types[table.ms().cur_struct].len == 0) {
+            return check.ty_add_name_attrs(table.ms().cur_struct, token.ATTR_OPAQUE)
         }
         return 0
     }
@@ -842,16 +844,16 @@ fn parse_enum_decl() int {
     let n int = token.ctx().tokens[token.ctx().pos].len
     p_adv()
     if (support.session().compile != 0 && support.session().pass == 1) {
-        let etid int = support.ty_push(support.TY_ENUM, support.TG_ENUM_SIZE, 4, -1, -1, -1)
+        let etid int = table.ty_push(types.TY_ENUM, support.TG_ENUM_SIZE, 4, -1, -1, -1)
         if (etid < 0) {
             return -1
         }
-        support.ms().cur_enum = etid
+        table.ms().cur_enum = etid
         let off int = support.name_intern(start, n)
         if (off < 0) {
             return -1
         }
-        support.ms().name_form = 3
+        table.ms().name_form = 3
         if (check.ty_declare_name(off, n, etid) != 0) {
             return -1
         }
@@ -933,11 +935,11 @@ fn parse_enum_decl() int {
             }
             // pub enum 一等化：成员常量随枚举导出（F_PUB 进入接口名字表），
             // 跨模块以 `模块名.成员` 引用；接口加载侧按 pub enum 重新登记。
-            let mfl int = support.F_GLOBAL | support.F_ENUM_MEMBER
+            let mfl int = table.F_GLOBAL | table.F_ENUM_MEMBER
             if (support.fc().c_decl_pub != 0) {
-                mfl |= support.F_PUB
+                mfl |= table.F_PUB
             }
-            let idx int = check.sym_push(istart, in2, support.SYM_CONST, support.ms().cur_enum, mfl)
+            let idx int = check.sym_push(istart, in2, table.SYM_CONST, table.ms().cur_enum, mfl)
             if (idx < 0) {
                 return -1
             }
@@ -948,15 +950,15 @@ fn parse_enum_decl() int {
                     return token.err_tok("延迟求值的枚举判别值超过 64 个")
                 }
                 forced_pending = 1
-                support.ms().syms[idx].cval = 0
-                support.ms().syms[idx].const_ready = 0
+                table.ms().syms[idx].cval = 0
+                table.ms().syms[idx].const_ready = 0
             } else {
-                support.ms().syms[idx].cval = val
-                support.ms().syms[idx].const_ready = 1
+                table.ms().syms[idx].cval = val
+                table.ms().syms[idx].const_ready = 1
                 support.fc().c_enum_next = val.to_type(int) + 1
             }
             // 成员登记进枚举成员表（必须在本成员的值与就绪位写完之后：登记时快照）。
-            if (support.em_add(idx) != 0) {
+            if (table.em_add(idx) != 0) {
                 return token.err_tok("枚举成员总数超过 512，无法登记")
             }
             prev_member_sym = idx
