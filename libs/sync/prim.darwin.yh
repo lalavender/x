@@ -1,0 +1,148 @@
+module sync
+
+import memory
+
+// ============================================================================
+// prim.darwin.yh —— Darwin 平台原语（pthread，libSystem）。
+//
+// 线程入口 tramp 是 C ABI（@[extern]）：pthread 只认识 `void* (*)(void*)`，
+// 由它取出派发块、释放派发块，再调用用户入口。这样用户入口保持普通 yh ABI，
+// 不需要编译器为每个调用点生成跳板。
+//
+// 互斥/条件变量直接放在 Mutex/Cond 的不透明 words 块上：Darwin 的
+// pthread_mutex_t 是 64B、pthread_cond_t 是 48B，恰好被 8×u64 / 6×u64
+// 覆盖，且 u64 数组保证 8 字节对齐。尺寸由 sync.test.yh 断言，不靠假设。
+// ============================================================================
+
+@[extern]
+fn pthread_create(out *u64, attr *void, start @[extern] fn(*void) *void, arg *void) int
+
+@[extern]
+fn pthread_join(thread u64, out **void) int
+
+@[extern]
+fn pthread_detach(thread u64) int
+
+@[extern]
+fn pthread_self() u64
+
+@[extern]
+fn pthread_mutex_init(m *void, attr *void) int
+
+@[extern]
+fn pthread_mutex_lock(m *void) int
+
+@[extern]
+fn pthread_mutex_trylock(m *void) int
+
+@[extern]
+fn pthread_mutex_unlock(m *void) int
+
+@[extern]
+fn pthread_mutex_destroy(m *void) int
+
+@[extern]
+fn pthread_cond_init(c *void, attr *void) int
+
+@[extern]
+fn pthread_cond_wait(c *void, m *void) int
+
+@[extern]
+fn pthread_cond_signal(c *void) int
+
+@[extern]
+fn pthread_cond_broadcast(c *void) int
+
+@[extern]
+fn pthread_cond_destroy(c *void) int
+
+// platform_native_ready：pthread 来自 libSystem，Darwin 上始终可用。
+fn platform_native_ready() int {
+    return 1
+}
+
+// tramp：C ABI 线程入口。参数是 Dispatch 指针。
+// 先取出用户入口与参数、释放派发块，再调用用户入口；用户入口无返回值。
+// 返回空指针满足 pthread 的 void* 返回约定。
+@[extern]
+fn tramp(arg *void) *void {
+    let block *Dispatch = arg.to_type(*Dispatch)
+    let entry *fn(*void) void = block.entry
+    let user_arg *void = block.arg
+    memory.release(arg)
+    (*entry)(user_arg)
+    return 0.to_type(*void)
+}
+
+// thread_native_create：pthread_create + 通用跳板；0 成功。
+// out 指向调用方栈上的句柄槽，pthread 写入 pthread_t。
+fn thread_native_create(out *u64, block *Dispatch) int {
+    return pthread_create(out, 0, tramp, block.to_type(*void))
+}
+
+// thread_native_join：等待线程结束并回收；0 成功。
+fn thread_native_join(handle u64) int {
+    return pthread_join(handle, 0)
+}
+
+// thread_native_detach：分离线程，退出后由系统回收；0 成功。
+fn thread_native_detach(handle u64) int {
+    return pthread_detach(handle)
+}
+
+// thread_native_self：当前线程 id。Darwin 上是 pthread_t（指针），
+// 按 8 字节整数收；只用于调试与测试，不承诺数值语义。
+fn thread_native_self() u64 {
+    return pthread_self()
+}
+
+// mutex_native_init：在 words 块上初始化 pthread_mutex_t；0 成功。
+fn mutex_native_init(m *Mutex) int {
+    return pthread_mutex_init(m.to_type(*void), 0)
+}
+
+// mutex_native_lock：加锁并阻塞；平台错误属于契约违反，不返回错误码。
+fn mutex_native_lock(m *Mutex) void {
+    pthread_mutex_lock(m.to_type(*void))
+}
+
+// mutex_native_unlock：解锁；调用方必须持有锁。
+fn mutex_native_unlock(m *Mutex) void {
+    pthread_mutex_unlock(m.to_type(*void))
+}
+
+// mutex_native_try_lock：0 成功；1 未获得（被占用）。
+fn mutex_native_try_lock(m *Mutex) int {
+    if (pthread_mutex_trylock(m.to_type(*void)) == 0) { return STATUS_OK }
+    return STATUS_BUSY
+}
+
+// mutex_native_destroy：销毁互斥对象；调用方保证没有等待者。
+fn mutex_native_destroy(m *Mutex) void {
+    pthread_mutex_destroy(m.to_type(*void))
+}
+
+// cond_native_init：在 words 块上初始化 pthread_cond_t；0 成功。
+fn cond_native_init(c *Cond) int {
+    return pthread_cond_init(c.to_type(*void), 0)
+}
+
+// cond_native_wait：原子释放 m 并等待，返回前重新加锁。
+fn cond_native_wait(c *Cond, m *Mutex) void {
+    pthread_cond_wait(c.to_type(*void), m.to_type(*void))
+}
+
+// cond_native_signal：唤醒至少一个等待者。
+fn cond_native_signal(c *Cond) void {
+    pthread_cond_signal(c.to_type(*void))
+}
+
+// cond_native_broadcast：唤醒全部等待者。
+fn cond_native_broadcast(c *Cond) void {
+    pthread_cond_broadcast(c.to_type(*void))
+}
+
+// cond_native_destroy：销毁条件变量；调用方保证没有等待者。
+fn cond_native_destroy(c *Cond) void {
+    pthread_cond_destroy(c.to_type(*void))
+}

@@ -1,0 +1,188 @@
+name: stdlib
+# 标准库专项门（GitHub Actions，原生四端：Linux 双架构 + Darwin + Windows）。
+#
+# 与 ci.yml 的分工：
+#   * ci.yml      → `just ci-gate`：编译器三层回归 + 平台专项 + 自举固定点；
+#   * stdlib.yml  → `just test-stdlib-{unix,windows}`：只跑标准库，
+#     但把 `test-libs` 的外部 runner / 安装布局 / 并发压力都跑齐。
+# 两边共用同一份 justfile 定义，本文件只管 runner、系统依赖、种子与闭包缓存。
+#
+# 触发路径只覆盖标准库及其验收脚本；编译器改动仍由 ci.yml 的 `just test`
+# （其中包含 `yh test` 的 libs 步骤）兜底。需要时用 workflow_dispatch 手动全跑。
+#
+# 分支策略：标准库优化统一在 `libs` 分支开发（合入 `llvm` 前在 libs 上跑本
+# 工作流）；`llvm/main/arm64` 也保留触发，便于合入后继续覆盖。
+#
+# 平台差异收敛在 justfile：
+#   * Linux/Darwin：`test-libs-core`（test 块 O0/O2）+ `test-libs-extras`
+#     （cli/os/libc runner、TOML/string/num/fmt 专项与安装验收）+ `test-sync-stress`；
+#   * Windows：只有 core + sync 压力；`install`/DESTDIR 布局是 Unix 专属。
+#
+# 闭包、种子、runner pin、actions 版本与缓存 key 全部与 ci.yml 保持一致：
+# 缓存条目是同一个存储，key 相同才能两边互相命中（见 ci.yml 头部说明）。
+on:
+  push:
+    branches:
+      - llvm
+      - libs
+      - main
+      - arm64
+    paths:
+      - 'libs/**'
+      - 'tests/string/**'
+      - 'tests/toml/**'
+      - 'tests/fmt/**'
+      - 'tests/num/**'
+      - 'tests/modules/projects/**'
+      - 'justfile'
+      - '.github/workflows/stdlib.yml'
+  pull_request:
+    # libs 是标准库集成分支；main/arm64 是遗留分支，删除前保留触发。
+    branches:
+      - llvm
+      - libs
+      - main
+      - arm64
+    paths:
+      - 'libs/**'
+      - 'tests/string/**'
+      - 'tests/toml/**'
+      - 'tests/fmt/**'
+      - 'tests/num/**'
+      - 'tests/modules/projects/**'
+      - 'justfile'
+      - '.github/workflows/stdlib.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # 与 ci.yml 同策略：同分支 push/PR 共用一个组，连续 push 取消旧运行；
+  # 手动 dispatch 用独立组，避免排查被新 push 打断。
+  group: stdlib-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && format('manual-{0}', github.run_id) || format('{0}-{1}', github.event.pull_request.head.repo.full_name || github.repository, github.head_ref || github.ref_name) }}
+  cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+  LLVM_JOBS: "2"
+  # 参考语法层需要 Java + antlr venv；标准库门不跑它。
+  YH_ANTLR: "0"
+  # 并发用例每个平台重复次数（test-sync-stress）；比本地默认更保守，控制 CI 时长。
+  SYNC_REPEAT: "10"
+
+jobs:
+  linux-x64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      LLVM_JOBS: "4"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - name: 安装构建依赖
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential binutils libxml2-dev zlib1g-dev libzstd-dev
+      - name: 取种子
+        run: python3 tools/fetch-release-seed.py --platform linux-x86_64
+      - name: 准备闭包
+        run: just llvm-host
+      - name: 标准库门（核心 + 外部 runner/安装 + 并发压力）
+        run: just test-stdlib-unix
+
+  linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      LLVM_JOBS: "4"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - name: 安装构建依赖
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential binutils libxml2-dev zlib1g-dev libzstd-dev
+      - name: 取种子
+        run: python3 tools/fetch-release-seed.py --platform linux-arm64
+      - name: 准备闭包
+        run: just llvm-host
+      - name: 标准库门（核心 + 外部 runner/安装 + 并发压力）
+        run: just test-stdlib-unix
+
+  darwin-arm64:
+    runs-on: macos-15
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      LLVM_JOBS: "2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - name: 取种子
+        run: python3 tools/fetch-release-seed.py --platform darwin-arm64
+      - name: 恢复 Darwin 闭包缓存
+        id: closure-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: tmp/llvm-migration
+          key: llvm-darwin-${{ hashFiles('tools/llvm-darwin-sdk.py', 'tools/llvm-darwin-host.py', 'compiler/llvm/bridge.c', 'compiler/llvm/bridge.h', 'compiler/llvm/lld_bridge.cpp') }}
+          restore-keys: |
+            llvm-darwin-
+      - name: 准备 Darwin 闭包（缓存未命中时源码构建 LLVM）
+        run: just llvm-host
+      - name: 保存 Darwin 闭包缓存
+        if: success() && steps.closure-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: tmp/llvm-migration
+          key: ${{ steps.closure-cache.outputs.cache-primary-key }}
+      - name: 标准库门（核心 + 外部 runner/安装 + 并发压力）
+        run: just test-stdlib-unix
+
+  windows-x64:
+    # pin 2022：与 ci.yml/release.yml 一致，避免 VS 18 镜像与闭包生成器不匹配。
+    runs-on: windows-2022
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      LLVM_JOBS: "4"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - name: 取种子（最新带 Windows 资产的 Release）
+        run: python tools/fetch-release-seed.py --platform windows-x64
+      - name: 恢复 Windows 闭包缓存
+        id: closure-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            tmp/llvm-migration/windows-llvm-closure
+            tmp/llvm-migration/llvm-host-windows-x86_64
+            tmp/llvm-migration/windows-sdk
+          key: llvm-windows-${{ hashFiles('tools/llvm-windows-closure.py', 'tools/llvm-windows-host.py', 'compiler/llvm/bridge.c', 'compiler/llvm/bridge.h', 'compiler/llvm/lld_bridge.cpp', 'compiler/llvm/windows_shim.c', 'compiler/project.toml') }}
+          restore-keys: |
+            llvm-windows-
+      - name: 准备 Windows 闭包（缓存未命中时 MSVC 源码构建 LLVM/lld）
+        run: just llvm-host
+      - name: 保存 Windows 闭包缓存
+        if: success() && steps.closure-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            tmp/llvm-migration/windows-llvm-closure
+            tmp/llvm-migration/llvm-host-windows-x86_64
+            tmp/llvm-migration/windows-sdk
+          key: ${{ steps.closure-cache.outputs.cache-primary-key }}
+      - name: 标准库门（核心 + 并发压力；安装布局验收仅 Unix）
+        run: just test-stdlib-windows

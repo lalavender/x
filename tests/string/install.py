@@ -21,10 +21,12 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 FIXTURE = ROOT / "tests" / "modules" / "projects" / "stringmodel"
-REQUIRED = [
-    "base.yh", "view.yh", "owned.yh", "transform.yh",
-    "utf8.yh", "doc.yh", "string.yh",
-]
+# 安装树必须包含 string 模块的全部生产源码（.test.yh 不装也不检查）。
+# 从源目录推导而不是硬编码文件名：api.yh 迁移后旧清单（string.yh /
+# transform.yh）已不存在，硬编码会再次随文件拆分而过期。
+SOURCE_DIR = ROOT / "libs" / "string"
+REQUIRED = sorted(p.name for p in SOURCE_DIR.glob("*.yh")
+                  if not p.name.endswith(".test.yh"))
 
 
 def main() -> int:

@@ -18,8 +18,11 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 FIXTURE = ROOT / "tests" / "modules" / "projects" / "fmtbasic"
-REQUIRED = ["base.yh", "value.yh", "directive.yh", "render.yh",
-            "float.yh", "output.yh", "fmt.test.yh"]
+# 从源目录推导生产源码清单（排除 .test.yh）：硬编码清单会随 api.yh 迁移
+# 或文件拆分而过期（base.yh 已不存在）。
+SOURCE_DIR = ROOT / "libs" / "fmt"
+REQUIRED = sorted(p.name for p in SOURCE_DIR.glob("*.yh")
+                  if not p.name.endswith(".test.yh"))
 EXPECTED = "1212\n1212\nhi07\n"
 
 

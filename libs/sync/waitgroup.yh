@@ -1,0 +1,56 @@
+module sync
+
+// ============================================================================
+// waitgroup.yh —— WaitGroup：等待一组线程结束。
+//
+// 实现是 Mutex + Cond 的计数等待：add 在锁内增减计数，计数归零时广播；
+// wait 在锁内循环检查计数。没有使用原子操作或平台专有事件，因此三种平台
+// 共用这一份代码，只依赖 api.yh 的 Mutex/Cond 原语。
+// ============================================================================
+
+// waitgroup_init 初始化等待组：初始化互斥与条件变量，计数清零。
+// 返回 0 成功；-1 表示参数非法或平台初始化失败（失败时不保留资源）。
+pub fn waitgroup_init(wg *WaitGroup) int {
+    if (wg == 0) { return STATUS_INVALID }
+    if (mutex_init(&wg.mutex) != 0) { return STATUS_INVALID }
+    if (cond_init(&wg.cond) != 0) {
+        mutex_destroy(&wg.mutex)
+        return STATUS_INVALID
+    }
+    wg.count = 0
+    return STATUS_OK
+}
+
+// waitgroup_add 增减计数：0 成功；-1 表示参数非法或计数会变负（此时计数不变）。
+// 正增量必须在对应线程启动前调用；wait 返回后不再 add 是调用方契约。
+// 副作用：计数归零时唤醒全部 wait 等待者。
+pub fn waitgroup_add(wg *WaitGroup, delta int) int {
+    if (wg == 0) { return STATUS_INVALID }
+    mutex_lock(&wg.mutex)
+    let next i64 = wg.count + delta.to_type(i64)
+    if (next < 0) {
+        mutex_unlock(&wg.mutex)
+        return STATUS_INVALID
+    }
+    wg.count = next
+    if (next == 0) { cond_broadcast(&wg.cond) }
+    mutex_unlock(&wg.mutex)
+    return STATUS_OK
+}
+
+// waitgroup_done 等价于 add(-1)；返回码与 add 相同。
+pub fn waitgroup_done(wg *WaitGroup) int {
+    return waitgroup_add(wg, -1)
+}
+
+// waitgroup_wait 阻塞到计数归零；返回时建立 happens-before：
+// 所有 done 之前的写在 wait 返回后对调用方可见。
+// 空指针是未定义行为（与 add 不同，这里没有可返回的错误通道）。
+pub fn waitgroup_wait(wg *WaitGroup) void {
+    if (wg == 0) { return }
+    mutex_lock(&wg.mutex)
+    for wg.count > 0 {
+        cond_wait(&wg.cond, &wg.mutex)
+    }
+    mutex_unlock(&wg.mutex)
+}

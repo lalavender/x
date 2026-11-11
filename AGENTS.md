@@ -75,6 +75,9 @@ just llvm-host          # 只准备本机固定 LLVM 闭包（不编编译器）
 just fetch-seed         # 从最新 GitHub Release 取本机平台种子（x64 首次构建前）
 just code-stats         # 统计 compiler/ 下 yh 源码规模
 just test-libs          # 全部标准库测试（test 块 O0/O2 + 外部 runner + 专项/安装）
+just test-sync-stress   # 重复 SYNC_REPEAT（默认 10）次 sync 并发用例
+just test-stdlib-unix   # 标准库专项门：core + extras + sync 压力（CI 的 Linux/Darwin 端）
+just test-stdlib-windows # 标准库专项门：core + sync 压力（CI 的 Windows 端）
 just test-llvm-linux-arm64  # F1：Linux/AArch64 LLVM 运行时/C ABI/O0-O2（容器内）
 just seed               # 滚种子（仅在全绿后；拒绝带构建机路径的种子）
 ```
@@ -126,8 +129,14 @@ C4/C6 专项 `tests/selfhost/cache/llvm-global-cache.py` 使用显式临时目�
 **当前状态（2026-11-06）**：tag 发布由 GitHub Actions 的 `release.yml` 承担（四端
 并行 + cc4 打包 + `tools/publish-release.py`）；prepare 的三道校验为 tag 形态、
 版本号三处一致、正式 tag 在主线上；`workflow_dispatch` 可带 `tag` + `dry_run=true`
-演练（四端照常构建、跳过 publish）。仍未落地：GitHub 分支保护的 required status
-check 未确认（默认分支已是 `llvm`）。
+演练（四端照常构建、跳过 publish）。标准库专项由 `stdlib.yml` 承担：四端跑
+`test-stdlib-*`，触发路径限于 `libs/**` 等标准库相关文件，种子/闭包/缓存与
+`ci.yml` 同源。仍未落地：GitHub 分支保护的 required status check 未确认
+（默认分支已是 `llvm`）。
+
+**分支策略（2026-11-11）**：标准库优化在 `libs` 分支开发，`stdlib.yml` 随该分支
+运行；合入 `llvm` 前先在 `libs` 上跑绿 `test-stdlib-unix` / `test-stdlib-windows`。
+`libs/sync` 等标准库改动不要直接在 `llvm` 上提交。
 
 种子规则：分支与 tag 流水线一律取**最新带资产的 Release（含 rc，排除当前 tag）**，
 所以 rc.N 用 rc.N−1、正式版用该版最后一个 rc 编译出来。`release-<tag>.md` 缺失即

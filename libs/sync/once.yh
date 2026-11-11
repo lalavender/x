@@ -1,0 +1,48 @@
+module sync
+
+// ============================================================================
+// once.yh —— Once：并发调用中只执行一次。
+//
+// 状态机：0 未开始 → 1 执行中 → 2 已完成。拿到“执行权”的线程在锁外调用
+// 用户函数（避免回调里再加锁造成死锁），其余线程在条件变量上等待完成。
+// ============================================================================
+
+// once_init 初始化 Once（互斥 + 条件变量，状态清零）；0 成功、-1 失败。
+pub fn once_init(o *Once) int {
+    if (o == 0) { return STATUS_INVALID }
+    if (mutex_init(&o.mutex) != 0) { return STATUS_INVALID }
+    if (cond_init(&o.cond) != 0) {
+        mutex_destroy(&o.mutex)
+        return STATUS_INVALID
+    }
+    o.state = 0
+    return STATUS_OK
+}
+
+// once_call 保证 f(arg) 最多执行一次；并发的其他调用者阻塞到执行完成。
+// 返回时（除 f 为 0 的情况）f 已执行完毕，且其写对调用方可见。
+// f 为 0 时直接返回且不改变状态；o 为 0 是未定义行为（无错误通道）。
+// 副作用：f 在锁外执行，失败/提前返回不影响“已完成”状态。
+pub fn once_call(o *Once, f *fn(*void) void, arg *void) void {
+    if (f == 0) { return }
+    mutex_lock(&o.mutex)
+    if (o.state == 2) {
+        mutex_unlock(&o.mutex)
+        return
+    }
+    if (o.state == 1) {
+        for o.state == 1 {
+            cond_wait(&o.cond, &o.mutex)
+        }
+        mutex_unlock(&o.mutex)
+        return
+    }
+    o.state = 1
+    mutex_unlock(&o.mutex)
+    let entry *fn(*void) void = f
+    (*entry)(arg)
+    mutex_lock(&o.mutex)
+    o.state = 2
+    cond_broadcast(&o.cond)
+    mutex_unlock(&o.mutex)
+}

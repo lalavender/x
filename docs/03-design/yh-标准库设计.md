@@ -141,6 +141,22 @@ resize/free）、增强 Arena（几何增长、reset 模式、LIFO 回收、capa
 设计见 [list 标准库设计](yh-list标准库设计.md)，用法、V 方法映射与硬规则见
 [`libs/list/README.md`](../../libs/list/README.md)。
 
+### `sync`（2026-11-11，L1 Darwin 已交付）
+
+多线程是**纯标准库能力**：不引入 `go`/`spawn`/`shared`/`chan T` 语法，也不改
+AST、检查器、IR 或缓存。线程入口固定为 `fn(*void) void`，多参数由调用方装进
+结构体后以 `*void` 传入，结果写回同一结构体、join 后可见；`Thread` 支持
+join/detach，`Mutex`/`Cond`/`WaitGroup`/`Once` 基于不透明定长块 + 平台原语。
+
+平台：Darwin（libSystem）与 Linux（libc，ELF 链接模板含 crt1 + `-lc`）都用
+pthread，`platform_ready() == 1`；Windows 仍是显式失败的占位实现
+（`platform_ready() == 0`，创建/初始化返回 -1），待接 kernel32。尺寸契约由
+`libs/sync/sync.test.yh` 断言（`Mutex` 64B、`Cond` 48B），行为测试 8 例覆盖
+互斥计数、WaitGroup、Once、join 可见性、线程 id、分离线程与句柄状态机。
+
+设计见 [多线程标准库设计](yh-多线程标准库设计.md)，用法与平台矩阵见
+[`libs/sync/README.md`](../../libs/sync/README.md)。
+
 ### `string`（2026-10-23 首期完成）
 
 旧接口保持原签名、返回值与 NUL 截止语义：

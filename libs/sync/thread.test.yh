@@ -1,0 +1,220 @@
+module sync
+
+// ============================================================================
+// thread.test.yh —— 需要线程调度的行为测试（Darwin 实跑，其他平台跳过）。
+//
+// 每个测试在 `yh test` 里由独立进程执行，因此可以安全使用栈上参数结构体：
+// 线程在测试返回前一定被 join 或由 WaitGroup 等到。所有并发写都落在各自
+// 槽位或互斥锁内，避免测试自己制造数据竞争。
+// ============================================================================
+
+// counter_thread：在互斥保护下把 total 累加 rounds 次。
+// 参数是调用方栈上的 CounterJob；mutex 必须已初始化。
+fn counter_thread(arg *void) void {
+    let job *CounterJob = arg.to_type(*CounterJob)
+    let i int = 0
+    for i < job.rounds {
+        mutex_lock(job.mutex)
+        job.total[0] = job.total[0] + 1
+        mutex_unlock(job.mutex)
+        i += 1
+    }
+}
+
+// CounterJob 是互斥计数测试的参数包：total 由 mutex 保护。
+struct CounterJob {
+    mutex *Mutex
+    total *i64
+    rounds int
+}
+
+test "互斥计数无丢失更新" {
+    if (platform_ready() == 0) { return }
+    let mutex Mutex
+    $assert(mutex_init(&mutex) == 0, "mutex_init")
+    let total [1]i64
+    let job CounterJob
+    job.mutex = &mutex
+    job.total = &total[0]
+    job.rounds = 10000
+    let first Thread
+    let second Thread
+    $assert(thread_spawn(&first, &counter_thread, (&job).to_type(*void)) == 0, "spawn 1")
+    $assert(thread_spawn(&second, &counter_thread, (&job).to_type(*void)) == 0, "spawn 2")
+    $assert(thread_join(&first) == 0, "join 1")
+    $assert(thread_join(&second) == 0, "join 2")
+    $assert(total[0] == 20000, "两线程各 10000 次必须精确累加")
+    mutex_destroy(&mutex)
+}
+
+// group_thread：写自己的槽位后向等待组报告完成。
+struct GroupJob {
+    group *WaitGroup
+    hits *i64
+    slot int
+}
+
+fn group_thread(arg *void) void {
+    let job *GroupJob = arg.to_type(*GroupJob)
+    job.hits[job.slot] = 1
+    waitgroup_done(job.group)
+}
+
+test "等待组批量汇合" {
+    if (platform_ready() == 0) { return }
+    let group WaitGroup
+    $assert(waitgroup_init(&group) == 0, "waitgroup_init")
+    let hits [4]i64
+    let jobs [4]GroupJob
+    let threads [4]Thread
+    for i in 0..4 {
+        jobs[i].group = &group
+        jobs[i].hits = &hits[0]
+        jobs[i].slot = i
+        $assert(waitgroup_add(&group, 1) == 0, "add")
+        $assert(thread_spawn(&threads[i], &group_thread, (&jobs[i]).to_type(*void)) == 0,
+            "spawn")
+    }
+    waitgroup_wait(&group)
+    $assert(hits[0] == 1 && hits[1] == 1 && hits[2] == 1 && hits[3] == 1,
+        "wait 返回后四个槽位都可见")
+    for i in 0..4 {
+        $assert(thread_join(&threads[i]) == 0, "join")
+    }
+}
+
+// once_body：一次性执行体，把 runs 加一。
+fn once_body(arg *void) void {
+    let runs *i64 = arg.to_type(*i64)
+    runs[0] = runs[0] + 1
+}
+
+// once_thread：并发调用 once_call，只有一个线程会执行 once_body。
+struct OnceJob {
+    once *Once
+    runs *i64
+}
+
+fn once_thread(arg *void) void {
+    let job *OnceJob = arg.to_type(*OnceJob)
+    once_call(job.once, &once_body, job.runs.to_type(*void))
+}
+
+test "Once 只执行一次" {
+    if (platform_ready() == 0) { return }
+    let once Once
+    $assert(once_init(&once) == 0, "once_init")
+    let runs [1]i64
+    let job OnceJob
+    job.once = &once
+    job.runs = &runs[0]
+    let threads [8]Thread
+    for i in 0..8 {
+        $assert(thread_spawn(&threads[i], &once_thread, (&job).to_type(*void)) == 0, "spawn")
+    }
+    for i in 0..8 {
+        $assert(thread_join(&threads[i]) == 0, "join")
+    }
+    $assert(runs[0] == 1, "八个并发调用只执行一次")
+}
+
+// value_thread：把结果写进自己的槽位，用于验证 join 的可见性。
+struct ValueJob {
+    values *i64
+    slot int
+}
+
+fn value_thread(arg *void) void {
+    let job *ValueJob = arg.to_type(*ValueJob)
+    job.values[job.slot] = 73
+}
+
+test "join 建立可见性" {
+    if (platform_ready() == 0) { return }
+    let values [1]i64
+    let job ValueJob
+    job.values = &values[0]
+    let thread Thread
+    $assert(thread_spawn(&thread, &value_thread, (&job).to_type(*void)) == 0, "spawn")
+    $assert(thread_join(&thread) == 0, "join")
+    $assert(values[0] == 73, "线程入口的写在 join 后可见")
+}
+
+// id_thread：记录当前线程 id，用于断言两个存活线程 id 不同。
+struct IdJob {
+    ids *u64
+    slot int
+}
+
+fn id_thread(arg *void) void {
+    let job *IdJob = arg.to_type(*IdJob)
+    job.ids[job.slot] = thread_id()
+}
+
+test "线程 id 互不相同" {
+    if (platform_ready() == 0) { return }
+    let ids [2]u64
+    let jobs [2]IdJob
+    let threads [2]Thread
+    for i in 0..2 {
+        jobs[i].ids = &ids[0]
+        jobs[i].slot = i
+        $assert(thread_spawn(&threads[i], &id_thread, (&jobs[i]).to_type(*void)) == 0, "spawn")
+    }
+    for i in 0..2 {
+        $assert(thread_join(&threads[i]) == 0, "join")
+    }
+    $assert(ids[0] != 0 && ids[1] != 0, "id 非零")
+    $assert(ids[0] != ids[1], "两个存活线程的 id 不同")
+}
+
+// detach_thread：分离线程完成后向等待组报告，用于验证 detach 路径。
+struct DetachJob {
+    group *WaitGroup
+    done *int
+}
+
+fn detach_thread(arg *void) void {
+    let job *DetachJob = arg.to_type(*DetachJob)
+    job.done[0] = 1
+    waitgroup_done(job.group)
+}
+
+test "分离线程仍能完成工作" {
+    if (platform_ready() == 0) { return }
+    let group WaitGroup
+    $assert(waitgroup_init(&group) == 0, "waitgroup_init")
+    let done [1]int
+    let job DetachJob
+    job.group = &group
+    job.done = &done[0]
+    $assert(waitgroup_add(&group, 1) == 0, "add")
+    $assert(thread_spawn_detached(&detach_thread, (&job).to_type(*void)) == 0, "spawn_detached")
+    waitgroup_wait(&group)
+    $assert(done[0] == 1, "分离线程在 wait 返回前完成")
+}
+
+test "句柄状态机" {
+    if (platform_ready() == 0) { return }
+    let values [1]i64
+    let job ValueJob
+    job.values = &values[0]
+    let thread Thread
+    $assert(thread_spawn(&thread, &value_thread, (&job).to_type(*void)) == 0, "spawn")
+    $assert(thread_spawn(&thread, &value_thread, (&job).to_type(*void)) == STATUS_INVALID,
+        "已使用的句柄不能再次 spawn")
+    $assert(thread_join(&thread) == 0, "join")
+    $assert(thread_join(&thread) == STATUS_INVALID, "重复 join 失败")
+    $assert(thread_detach(&thread) == STATUS_INVALID, "已 join 的句柄不能 detach")
+}
+
+// try_lock 在同一线程上必须失败：默认互斥是不可重入的。
+test "互斥 try_lock" {
+    if (platform_ready() == 0) { return }
+    let mutex Mutex
+    $assert(mutex_init(&mutex) == 0, "mutex_init")
+    $assert(mutex_try_lock(&mutex) == STATUS_OK, "首次获得")
+    $assert(mutex_try_lock(&mutex) == STATUS_BUSY, "同线程再次获得失败")
+    mutex_unlock(&mutex)
+    mutex_destroy(&mutex)
+}

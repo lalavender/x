@@ -447,18 +447,22 @@ quick: stage-yh
     {{ py }} "{{ root }}/tests/yh/check.py" --compiler --compiler-path "{{ yh_run }}"
 
 # 缺 *.test.yh 的库只提示、不阻断（2026-10-25 决策 D9）。
-# test-libs：全部标准库测试（test 块 O0/O2 + 外部 runner + TOML/string/num/fmt 专项/安装）。
-test-libs: stage-yh
+# test-libs-core：跨平台标准库核心门（test 块 O0 + O2）。CI 的 Windows 端只跑这一半。
+test-libs-core: stage-yh
     @cd "{{ root }}/libs" && for d in */; do case "$d" in tmp/) continue;; esac; ls "$d"*.test.yh >/dev/null 2>&1 || echo "提示：libs/${d%/} 还没有测试文件（*.test.yh）"; done
     @cd "{{ root }}/libs" && YH_CACHE=off "{{ yh_run }}" test --timeout 60
-    YH_CACHE=off {{ py }} "{{ root }}/libs/cli/test/run.py" --compiler "{{ yh_run }}" --workdir "{{ root }}/tmp/libs-cli"
-    YH_CACHE=off {{ py }} "{{ root }}/libs/cli/test/diff.py" --compiler "{{ yh_run }}" --workdir "{{ root }}/tmp/libs-cli-diff"
-    YH_CACHE=off {{ py }} "{{ root }}/libs/os/test/run.py" --compiler "{{ yh_run }}" --workdir "{{ root }}/tmp/libs-os"
-    YH_CACHE=off {{ py }} "{{ root }}/libs/libc/test/run.py" --compiler "{{ yh_run }}" --workdir "{{ root }}/tmp/libs-libc"
     @rm -rf "{{ root }}/tmp/libs-o2"
     @cp -R "{{ root }}/libs" "{{ root }}/tmp/libs-o2"
     @rm -rf "{{ root }}/tmp/libs-o2/tmp" "{{ root }}/tmp/libs-o2/.build"
     @cd "{{ root }}/tmp/libs-o2" && YH_CACHE=off "{{ yh_run }}" -O2 test --timeout 60
+
+# test-libs-extras：Unix 专属标准库门（外部 runner、安装布局、TOML/string/num/fmt 专项）。
+# `install` 依赖 GNU install 与 DESTDIR/PREFIX 布局，Windows 上不执行。
+test-libs-extras: stage-yh
+    YH_CACHE=off {{ py }} "{{ root }}/libs/cli/test/run.py" --compiler "{{ yh_run }}" --workdir "{{ root }}/tmp/libs-cli"
+    YH_CACHE=off {{ py }} "{{ root }}/libs/cli/test/diff.py" --compiler "{{ yh_run }}" --workdir "{{ root }}/tmp/libs-cli-diff"
+    YH_CACHE=off {{ py }} "{{ root }}/libs/os/test/run.py" --compiler "{{ yh_run }}" --workdir "{{ root }}/tmp/libs-os"
+    YH_CACHE=off {{ py }} "{{ root }}/libs/libc/test/run.py" --compiler "{{ yh_run }}" --workdir "{{ root }}/tmp/libs-libc"
     YH_CACHE=off {{ py }} "{{ root }}/tests/toml/conformance.py" --prepare
     YH_CACHE=off {{ py }} "{{ root }}/tests/toml/conformance.py" --compiler "{{ yh_run }}" --stdlib "{{ root }}/libs" --workdir "{{ root }}/tmp/toml-conformance"
     YH_CACHE=off {{ py }} "{{ root }}/tests/toml/injection.py" --compiler "{{ yh_run }}" --stdlib "{{ root }}/libs" --workdir "{{ root }}/tmp/toml-inject"
@@ -471,6 +475,25 @@ test-libs: stage-yh
     YH_CACHE=off {{ py }} "{{ root }}/tests/num/reference.py" --compiler "{{ yh_run }}" --stdlib "{{ root }}/libs" --workdir "{{ root }}/tmp/num-reference"
     YH_CACHE=off {{ py }} "{{ root }}/tests/fmt/interp.py" --compiler "{{ yh_run }}" --stdlib "{{ root }}/libs" --workdir "{{ root }}/tmp/fmt-interp"
     YH_CACHE=off {{ py }} "{{ root }}/tests/fmt/install.py" --workdir "{{ root }}/tmp/fmt-install"
+
+# test-libs：全部标准库测试 = 跨平台核心 + Unix 专属外部验收。
+test-libs: test-libs-core test-libs-extras
+
+# 并发用例重复次数（stdlib CI 与本地压测共用；`SYNC_REPEAT=50 just test-sync-stress`）。
+sync_repeat := env("SYNC_REPEAT", "10")
+
+# test-sync-stress：重复执行 sync 模块的并发用例，抓偶发死锁/丢失唤醒。
+# 未实现线程后端的平台（Windows 占位）上用例自身跳过，不失败。
+test-sync-stress: stage-yh
+    @cd "{{ root }}/libs" && for i in $(seq 1 {{ sync_repeat }}); do YH_CACHE=off "{{ yh_run }}" test --filter sync --timeout 60; done
+
+# test-stdlib-unix：标准库专项门（.github/workflows/stdlib.yml 的 Linux/Darwin 端）。
+[unix]
+test-stdlib-unix: test-libs-core test-libs-extras test-sync-stress
+
+# test-stdlib-windows：Windows 标准库专项门（核心 + 并发压力；安装布局验收仅 Unix）。
+[windows]
+test-stdlib-windows: test-libs-core test-sync-stress
 
 # selfhost-native：本机全套门（无需容器、无 stage0）。
 # 旧种子迁移代 + 候选两代固定点 + 自解析/语法/运行语料 + 项目验收。

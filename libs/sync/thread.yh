@@ -1,0 +1,75 @@
+module sync
+
+import memory
+
+// ============================================================================
+// thread.yh —— Thread 的公共逻辑与派发块。
+//
+// 用户入口固定为 `fn(*void) void`：多参数由调用方装进结构体，把指针作为
+// arg 传入；结果同样写回该结构体，join 返回后可见。这样不需要泛型、闭包，
+// 也不需要编译器为每个调用点生成跳板。
+//
+// 派发块 Dispatch 由 thread_spawn 分配，由平台线程入口 tramp 在调用用户
+// 函数前释放；spawn 失败时由本文件释放，不会泄漏。
+// ============================================================================
+
+// thread_spawn 创建线程并写入 out。
+// entry 是用户入口（参数为调用方装箱的结构体指针），arg 原样传给入口。
+// 返回 0 成功；-1 表示参数非法、句柄已被使用或平台创建失败（失败时不启动
+// 线程，也不保留任何资源）。分配一个派发块，线程入口执行时释放；arg 指向
+// 的对象必须存活到 join 返回或线程结束。
+pub fn thread_spawn(out *Thread, entry *fn(*void) void, arg *void) int {
+    if (out == 0 || entry == 0 || out.state != 0) { return STATUS_INVALID }
+    let block *Dispatch = memory.alloc(sizeof(Dispatch).to_type(u64)).to_type(*Dispatch)
+    if (block == 0) { return STATUS_INVALID }
+    block.entry = entry
+    block.arg = arg
+    let handle u64 = 0
+    if (thread_native_create(&handle, block) != 0) {
+        memory.release(block.to_type(*void))
+        return STATUS_INVALID
+    }
+    out.handle = handle
+    out.state = 1
+    return STATUS_OK
+}
+
+// thread_spawn_detached 创建分离线程（不保留句柄，结束后由系统回收）。
+// 返回 0 成功；-1 表示创建失败或分离失败。分离失败时线程仍在运行且句柄
+// 已丢失，平台资源要到进程退出才释放（Darwin 上只可能是无效句柄）。
+// arg 的生命周期必须覆盖线程执行期——分离后没有 join 可作为可见性边界。
+pub fn thread_spawn_detached(entry *fn(*void) void, arg *void) int {
+    let thread Thread
+    if (thread_spawn(&thread, entry, arg) != 0) { return STATUS_INVALID }
+    return thread_detach(&thread)
+}
+
+// thread_join 等待线程结束并回收平台资源。
+// 返回 0 成功；-1 表示空句柄、已汇合/已分离或平台错误
+// （平台错误时句柄保持可重试状态；已汇合/已分离不可逆）。
+// 副作用：成功时把 state 置为 2。join 返回建立 happens-before：线程入口
+// 的所有写在 join 返回后对调用方可见。
+pub fn thread_join(t *Thread) int {
+    if (t == 0 || t.state == 0) { return STATUS_INVALID }
+    if (t.state != 1) { return STATUS_INVALID }
+    if (thread_native_join(t.handle) != 0) { return STATUS_INVALID }
+    t.state = 2
+    return STATUS_OK
+}
+
+// thread_detach 分离线程，结束后由系统回收。
+// 返回 0 成功；-1 表示空句柄、已汇合/已分离或平台错误。
+// 副作用：成功时把 state 置为 3；分离后不可再 join。
+pub fn thread_detach(t *Thread) int {
+    if (t == 0 || t.state == 0) { return STATUS_INVALID }
+    if (t.state != 1) { return STATUS_INVALID }
+    if (thread_native_detach(t.handle) != 0) { return STATUS_INVALID }
+    t.state = 3
+    return STATUS_OK
+}
+
+// thread_id 返回当前线程 id，仅用于调试与测试。
+// 同一进程内并发存活的线程 id 互不相同；数值本身不承诺跨平台语义。
+pub fn thread_id() u64 {
+    return thread_native_self()
+}

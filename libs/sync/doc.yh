@@ -1,0 +1,99 @@
+module sync
+
+// ============================================================================
+// yh sync 标准库 API 参考
+//
+// 本文件只包含文档注释，不导出任何符号；实现位于同模块的 api.yh（类型与
+// 互斥/条件变量公开面）、thread.yh（Thread 状态机与派发块）、waitgroup.yh、
+// once.yh 与平台文件 prim.{darwin,linux,windows}.yh。
+//
+// 平台范围：Darwin（libSystem）与 Linux（libc，链接模板含 crt1 + -lc）的
+// pthread 已实现，platform_ready() 返回 1；Windows 仍是显式失败的占位实现
+// （platform_ready() 返回 0，线程创建与锁初始化返回 -1）。
+//
+// 通用约定：
+//   * 所有返回 int 的操作：0 = 成功，-1 = 参数非法/状态不允许/平台失败；
+//     mutex_try_lock 的 1 = 未获得（STATUS_BUSY）；
+//   * 线程入口固定为 `fn(*void) void`，参数与结果都由调用方装箱；
+//   * 本模块的对象都含平台句柄或互斥块，禁止按值复制。
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// 1. 状态码
+// ----------------------------------------------------------------------------
+//   STATUS_OK        = 0    成功
+//   STATUS_BUSY      = 1    目标忙：mutex_try_lock 未获得
+//   STATUS_NOT_READY = 2    未就绪（预留，供后续非阻塞通道使用）
+//   STATUS_INVALID   = -1   参数非法、句柄状态不允许或平台失败
+
+// ----------------------------------------------------------------------------
+// 2. Thread（thread.yh）
+// ----------------------------------------------------------------------------
+//   struct Thread { handle u64; state int }
+//     生命周期：0 空句柄、1 已创建未汇合、2 已汇合、3 已分离。
+//     按值复制是未定义行为；汇合/分离后句柄不可复用。
+//
+//   fn platform_ready() int
+//     当前目标是否有可用线程后端；0 时线程创建与锁初始化返回 -1。
+//
+//   fn thread_spawn(out *Thread, entry *fn(*void) void, arg *void) int
+//     创建线程；arg 原样传给 entry。0 成功、-1 失败。
+//     arg 指向的对象必须存活到 join 返回或线程结束。
+//
+//   fn thread_spawn_detached(entry *fn(*void) void, arg *void) int
+//     创建分离线程；结束后由系统回收，不能 join。
+//     arg 的生命周期必须覆盖线程执行期。
+//
+//   fn thread_join(t *Thread) int
+//     等待线程结束并回收。0 成功；-1 表示空句柄、已汇合/已分离或平台错误。
+//     join 返回建立 happens-before：入口里的写在 join 后可见。
+//
+//   fn thread_detach(t *Thread) int
+//     分离线程。0 成功；-1 表示空句柄、已汇合/已分离或平台错误。
+//
+//   fn thread_id() u64
+//     当前线程 id，仅用于调试与测试；数值不承诺跨平台语义。
+
+// ----------------------------------------------------------------------------
+// 3. Mutex 与 Cond（api.yh + prim.<os>.yh）
+// ----------------------------------------------------------------------------
+//   struct Mutex { words [8]u64 }   // 64B 不透明存储，8 字节对齐
+//   struct Cond  { words [6]u64 }   // 48B 不透明存储
+//
+//   fn mutex_init(m *Mutex) int
+//   fn mutex_lock(m *Mutex) void
+//   fn mutex_unlock(m *Mutex) void
+//   fn mutex_try_lock(m *Mutex) int     // 0 成功、1 未获得、-1 参数非法
+//   fn mutex_destroy(m *Mutex) void
+//   fn cond_init(c *Cond) int
+//   fn cond_wait(c *Cond, m *Mutex) void
+//   fn cond_signal(c *Cond) void
+//   fn cond_broadcast(c *Cond) void
+//   fn cond_destroy(c *Cond) void
+//
+//   互斥不可重入：同线程重复 lock 是未定义行为。
+//   cond_wait 必须持有对应 Mutex；被唤醒后要重新检查条件。
+
+// ----------------------------------------------------------------------------
+// 4. WaitGroup（waitgroup.yh）
+// ----------------------------------------------------------------------------
+//   struct WaitGroup { mutex Mutex; cond Cond; count i64 }
+//
+//   fn waitgroup_init(wg *WaitGroup) int
+//   fn waitgroup_add(wg *WaitGroup, delta int) int   // -1 表示计数会变负
+//   fn waitgroup_done(wg *WaitGroup) int
+//   fn waitgroup_wait(wg *WaitGroup) void
+//
+//   add 必须在对应线程启动前调用；wait 返回后再 add 是调用方契约外的行为。
+//   wait 返回建立 happens-before：所有 done 之前的写在 wait 后可见。
+
+// ----------------------------------------------------------------------------
+// 5. Once（once.yh）
+// ----------------------------------------------------------------------------
+//   struct Once { mutex Mutex; cond Cond; state int }
+//
+//   fn once_init(o *Once) int
+//   fn once_call(o *Once, f *fn(*void) void, arg *void) void
+//
+//   f 在锁外执行；其余并发调用者阻塞到执行完成。f 为 0 时直接返回且不改变
+//   状态；f 提前返回不影响“已完成”状态。

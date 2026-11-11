@@ -1,0 +1,138 @@
+module sync
+
+// ============================================================================
+// api.yh —— sync 模块公开面：线程、互斥、条件变量、等待组与一次性执行。
+//
+// 多线程在这里是纯标准库能力：不引入语言语法，线程入口固定为
+// `fn(*void) void`，多参数由调用方装进结构体后以 `*void` 传入，结果写回
+// 同一结构体，join 返回后可见。平台差异只落在 `prim.<os>.yh` 的私有原语：
+// Darwin 用 pthread；Linux/Windows 在 L2 之前是占位实现（platform_ready
+// 返回 0），此时线程创建与互斥初始化显式失败，不做“看起来能跑”的空实现。
+//
+// 误用与未定义行为（README 有同样的说明）：
+//   * Mutex/Cond/WaitGroup/Once/Thread 不可按值复制；
+//   * 同线程重复加锁、未初始化就加锁、wait 之后 add 都是未定义行为；
+//   * 没有 join/锁/通道建立 happens-before 的并发读写是数据竞争（UB）；
+//   * main 返回时未 join 的线程被进程退出终止，不跑清理。
+// ============================================================================
+
+// 状态码：0 成功；1 目标忙（锁未获得）；2 未就绪（预留）；
+// -1 参数非法、句柄状态不允许或平台失败。
+pub const STATUS_OK int = 0
+
+pub const STATUS_BUSY int = 1
+
+pub const STATUS_NOT_READY int = 2
+
+pub const STATUS_INVALID int = -1
+
+// Thread 是可 join 的 OS 线程句柄。
+// handle 是平台句柄（pthread_t / HANDLE / Linux TCB）；state 是生命周期：
+// 0 = 空句柄（未创建），1 = 已创建未汇合，2 = 已汇合，3 = 已分离。
+// 按值复制 Thread 是未定义行为；汇合或分离后句柄不可复用。
+pub struct Thread {
+    handle u64
+    state int
+}
+
+// Mutex 是不可重入互斥锁；words 是不透明平台存储，调用方禁止读写。
+// words 是 u64 数组，保证 8 字节对齐并覆盖三种平台的互斥对象尺寸
+// （pthread_mutex_t 64B / SRWLOCK 8B / futex 4B）。
+// 使用前必须 mutex_init，结束时 mutex_destroy；同线程重复加锁是 UB。
+pub struct Mutex {
+    words [8]u64
+}
+
+// Cond 是条件变量，必须与同一个 Mutex 配对：cond_wait 原子释放并重获锁。
+// words 是不透明平台存储；使用前 cond_init，结束时 cond_destroy。
+pub struct Cond {
+    words [6]u64
+}
+
+// WaitGroup 等待一组线程结束。count 是剩余线程数（i64，避免 int 累加溢出）：
+// add 必须在对应线程启动前调用；count 归零时 wait 返回。
+// 按值复制会复制互斥块，是未定义行为。
+pub struct WaitGroup {
+    mutex Mutex
+    cond Cond
+    count i64
+}
+
+// Dispatch 是线程派发块：把用户入口与参数装在一起交给平台线程。
+// 模块内部类型（不导出）：由 thread_spawn 分配，由平台线程入口 tramp
+// 在调用用户函数前释放。字段只在线程启动窗口内被读取。
+struct Dispatch {
+    entry *fn(*void) void
+    arg *void
+}
+
+// Once 保证一个函数在并发调用中只执行一次。
+// state：0 = 未开始，1 = 执行中，2 = 已完成。按值复制是未定义行为。
+pub struct Once {
+    mutex Mutex
+    cond Cond
+    state int
+}
+
+// platform_ready 报告当前目标是否有可用的线程后端（L1 仅 Darwin 为 1）。
+// 返回 1 才能创建线程；返回 0 时线程创建与互斥初始化返回 STATUS_INVALID。
+pub fn platform_ready() int {
+    return platform_native_ready()
+}
+
+// mutex_init 在调用方提供的块上初始化互斥锁；0 成功、-1 参数或平台失败。
+// 不分配内存、不登记全局状态；同一块重复初始化是未定义行为。
+pub fn mutex_init(m *Mutex) int {
+    if (m == 0) { return STATUS_INVALID }
+    return mutex_native_init(m)
+}
+
+// mutex_lock 阻塞到获得锁。空指针、未初始化、同线程重复加锁都是未定义行为。
+pub fn mutex_lock(m *Mutex) void {
+    mutex_native_lock(m)
+}
+
+// mutex_unlock 释放锁；调用方必须先持有锁，否则行为未定义。
+pub fn mutex_unlock(m *Mutex) void {
+    mutex_native_unlock(m)
+}
+
+// mutex_try_lock 尝试加锁：0 成功；1 未获得（STATUS_BUSY）；
+// -1 参数非法。未获得时调用方不得解锁。
+pub fn mutex_try_lock(m *Mutex) int {
+    if (m == 0) { return STATUS_INVALID }
+    return mutex_native_try_lock(m)
+}
+
+// mutex_destroy 释放互斥锁占用的平台资源。
+// 调用方必须保证没有线程在等待或持有该锁；销毁后不可再用。
+pub fn mutex_destroy(m *Mutex) void {
+    mutex_native_destroy(m)
+}
+
+// cond_init 初始化条件变量；0 成功、-1 参数或平台失败。
+pub fn cond_init(c *Cond) int {
+    if (c == 0) { return STATUS_INVALID }
+    return cond_native_init(c)
+}
+
+// cond_wait 原子释放 m 并等待通知，返回前重新获得 m。
+// 必须持有 m；被唤醒不保证条件成立，调用方要在循环里重新检查条件。
+pub fn cond_wait(c *Cond, m *Mutex) void {
+    cond_native_wait(c, m)
+}
+
+// cond_signal 唤醒至少一个等待者；不释放调用方持有的锁。
+pub fn cond_signal(c *Cond) void {
+    cond_native_signal(c)
+}
+
+// cond_broadcast 唤醒全部等待者；不释放调用方持有的锁。
+pub fn cond_broadcast(c *Cond) void {
+    cond_native_broadcast(c)
+}
+
+// cond_destroy 释放条件变量占用的平台资源；调用方保证没有等待者。
+pub fn cond_destroy(c *Cond) void {
+    cond_native_destroy(c)
+}

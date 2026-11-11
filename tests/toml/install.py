@@ -51,7 +51,10 @@ def main() -> int:
     if not binary.exists():
         print(f"FAIL 安装树缺少 yh: {binary}")
         return 1
-    required = ["base.yh", "numbers.yh", "parse.yh", "surface.yh"]
+    # 从源目录推导生产源码清单（排除 .test.yh），避免硬编码随文件拆分过期。
+    source_dir = ROOT / "libs" / "toml"
+    required = sorted(p.name for p in source_dir.glob("*.yh")
+                      if not p.name.endswith(".test.yh"))
     missing_yh = [name for name in required if not (toml_dir / name).exists()]
     if missing_yh:
         print(f"FAIL 安装树缺少 toml 源码: {missing_yh}")
