@@ -440,6 +440,13 @@ test: stage-yh
     YH_CACHE=off {{ py }} "{{ root }}/tests/tools/front-syntax/check.py" --compiler "{{ yh_run }}"
     YH_CACHE=off {{ py }} "{{ root }}/tests/tools/front-full/check.py" --compiler "{{ yh_run }}"
 
+# front-shadow：S4-2 影子门全语料——`check.full` 从语法节点重算表达式语义，
+# 与 parse 注解逐字段比对；不一致即构建失败。迁移期专用（`just test` 里的
+# front-full 只覆盖夹具形状，这里跑全部语料与标准库）。
+front-shadow: stage-yh
+    YH_AST_FULL_CHECK=1 YH_AST_FULL_FILL=1 YH_CACHE=off {{ py }} "{{ root }}/tests/yh-run/check.py" --compiler "{{ yh_run }}" {{ run_work_flag }}
+    @cd "{{ root }}/libs" && YH_AST_FULL_CHECK=1 YH_AST_FULL_FILL=1 YH_CACHE=off "{{ yh_run }}" check
+
 # quick：日常迭代门。只跑不依赖后端的语法语料（ANTLR + 编译器 --syntax-check），
 # 秒级到十几秒；运行语义与自举门留给 test/full。
 quick: stage-yh

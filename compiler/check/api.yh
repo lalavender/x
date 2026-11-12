@@ -1859,64 +1859,6 @@ pub fn iface_header_suffix(path *char, off *int, olen *int) int {
     return 0
 }
 
-// sym_mangle：把符号名改写为「短名+后缀」。
-pub fn sym_mangle(si int, sfx_off int, sfx_len int) int {
-    let nlen int = table.ms().syms[si].name_len + sfx_len
-    let tmp [512]u8
-    if (nlen > 500) {
-        return errors.fail("符号名过长")
-    }
-    let n int = 0
-    let i int = 0
-    for i < table.ms().syms[si].name_len {
-        tmp[n] = support.pool_ctx().data[table.ms().syms[si].name_off + i]
-        n += 1
-        i += 1
-    }
-    i = 0
-    for i < sfx_len {
-        tmp[n] = support.pool_ctx().data[sfx_off + i]
-        n += 1
-        i += 1
-    }
-    let off int = support.tml_intern_str(tmp, 0, n)
-    if (off < 0) {
-        return -1
-    }
-    table.ms().syms[si].name_off = off
-    table.ms().syms[si].name_len = n
-    return 0
-}
-
-// tname_mangle：类型名同样改写（避免与使用者同名类型冲突）。
-pub fn tname_mangle(ti int, sfx_off int, sfx_len int) int {
-    let nlen int = table.ms().names[ti].name_len + sfx_len
-    let tmp [512]u8
-    if (nlen > 500) {
-        return errors.fail("类型名过长")
-    }
-    let n int = 0
-    let i int = 0
-    for i < table.ms().names[ti].name_len {
-        tmp[n] = support.pool_ctx().data[table.ms().names[ti].name_off + i]
-        n += 1
-        i += 1
-    }
-    i = 0
-    for i < sfx_len {
-        tmp[n] = support.pool_ctx().data[sfx_off + i]
-        n += 1
-        i += 1
-    }
-    let off int = support.tml_intern_str(tmp, 0, n)
-    if (off < 0) {
-        return -1
-    }
-    table.ms().names[ti].name_off = off
-    table.ms().names[ti].name_len = n
-    return 0
-}
-
 // iface_ct_name：生成仅供编译期调用的模块私有名字。
 // 同一模块内所有闭包函数共用稳定后缀，避免与运行期符号或其他模块碰撞。
 pub fn iface_ct_name(sym_id int, suffix_off int, suffix_len int,
@@ -2474,31 +2416,6 @@ pub fn sem_return_value(r *support.Res) int {
     return 0
 }
 
-pub fn sem_lit_field_lookup(tid int, start int, n int) int {
-    return sem_field_lookup(tid, start, n)
-}
-
-pub fn sem_struct_lit_begin(tid int) int {
-    if (support.session().compile == 0 || support.fc().c_fold != 0) {
-        return 0
-    }
-    if (table.ty_is_opaque(tid) != 0) {
-        return token.err_tok("不透明 C 类型不能构造实例")
-    }
-    // pub struct 一等化：字段一律公开，跨模块位置式构造不再检查字段 pub。
-    if (support.fc().c_lit_depth >= 32) {
-        return token.err_tok("结构体字面量嵌套过深")
-    }
-    let off int = 0
-    // 保存外层字面量的定位状态，供嵌套字面量结束后恢复
-    support.fc().c_lit_save_off[support.fc().c_lit_depth] = support.fc().c_lit_off
-    support.fc().c_lit_save_tid[support.fc().c_lit_depth] = support.fc().c_lit_tid
-    support.fc().c_lit_depth += 1
-    support.fc().c_lit_off = off
-    support.fc().c_lit_tid = tid
-    return off
-}
-
 pub fn sem_struct_lit_field(tid int, fidx int) int {
     if (support.session().compile == 0 || support.fc().c_fold != 0) {
         return 0
@@ -2512,17 +2429,6 @@ pub fn sem_struct_lit_field(tid int, fidx int) int {
     return 0
 }
 
-pub fn sem_struct_lit_end(tid int) int {
-    if (support.session().compile == 0 || support.fc().c_fold != 0) {
-        return 0
-    }
-    // 恢复外层字面量的定位状态；结果地址由 lowering 生成。
-    support.fc().c_lit_depth -= 1
-    support.fc().c_lit_off = support.fc().c_lit_save_off[support.fc().c_lit_depth]
-    support.fc().c_lit_tid = support.fc().c_lit_save_tid[support.fc().c_lit_depth]
-    return 0
-}
-
 pub fn sem_fn_begin(idx int) int {
     support.fc().c_fn_sym = idx
     support.fc().c_fn_flags = table.ms().syms[idx].flags
@@ -2531,7 +2437,6 @@ pub fn sem_fn_begin(idx int) int {
     support.fc().c_fn_ret = table.ms().types[table.ms().syms[idx].type_id].elem
     // LL12：标签、栈槽、序言与体缓冲等机器状态由 LLVM lowering 生成，
     // 语义层只保留类型事实与诊断状态。
-    support.fc().c_temp_off = 0
     support.fc().c_fp_tmp_off = 0
     support.fc().c_glabel_n = 0
     support.fc().c_spill_n = 0
@@ -2799,116 +2704,6 @@ pub fn sem_binop(op int, lhs *support.Res, rhs *support.Res) int {
     return 0
 }
 
-// sem_shortcircuit：检查逻辑左值；折叠时保存真值，运行时发射短路跳转。
-pub fn sem_shortcircuit(op int, lhs *support.Res) int {
-    if (support.session().compile == 0) {
-        lhs.type_id = 0
-        return 0
-    }
-    if (support.fc().c_fold != 0) {
-        if (table.ty_is_scalar(lhs.type_id) == 0 || table.ty_is_float(lhs.type_id) != 0) {
-            return token.err_tok("逻辑运算要求非浮点标量")
-        }
-        if (lhs.is_const == 0) {
-            return token.err_tok("逻辑运算要求编译期常量")
-        }
-        if (support.fc().sc_sc_depth >= 64) {
-            return token.err_tok("逻辑运算嵌套超过 64 层")
-        }
-        support.fc().sc_sc_false_stk[support.fc().sc_sc_depth] = (lhs.ival != 0).to_type(int)
-        support.fc().sc_sc_depth += 1
-        support.fc().c_res_is_addr = 0
-        return sem_res_reset(lhs, types.TY_BOOL)
-    }
-    // 保存外层短路标签（嵌套 a&&b||c&&d 时内层不破坏外层）
-    support.fc().sc_sc_false_stk[support.fc().sc_sc_depth] = support.fc().sc_lbl_false
-    support.fc().sc_sc_end_stk[support.fc().sc_sc_depth] = support.fc().sc_lbl_end
-    support.fc().sc_sc_depth += 1
-    support.fc().sc_lbl_false = 0
-    support.fc().sc_lbl_end = 0
-    if (op == token.TK_ANDAND) {
-    } else {
-    }
-    sem_res_reset(lhs, types.TY_BOOL)
-    support.fc().c_res_is_addr = 0
-    return 0
-}
-
-// sem_shortcircuit_end：合并折叠的左右真值，或补齐运行时短路分支并恢复外层标签。
-pub fn sem_shortcircuit_end(op int, lhs *support.Res) int {
-    if (support.session().compile == 0) {
-        return 0
-    }
-    if (support.fc().c_fold != 0) {
-        if (table.ty_is_scalar(lhs.type_id) == 0 || table.ty_is_float(lhs.type_id) != 0) {
-            return token.err_tok("逻辑运算要求非浮点标量")
-        }
-        if (lhs.is_const == 0) {
-            return token.err_tok("逻辑运算要求编译期常量")
-        }
-        support.fc().sc_sc_depth -= 1
-        let left int = support.fc().sc_sc_false_stk[support.fc().sc_sc_depth]
-        let right int = (lhs.ival != 0).to_type(int)
-        let value int = 0
-        if (op == token.TK_ANDAND) { value = (left != 0 && right != 0).to_type(int) }
-        else { value = (left != 0 || right != 0).to_type(int) }
-        support.fc().c_res_is_addr = 0
-        return support.sem_res_const(lhs, types.TY_BOOL, value.to_type(i64))
-    }
-    if (op == token.TK_ANDAND) {
-        // 左真且右真 → 结果 1
-    } else {
-        // || ：左或右为真 → 结果 1
-    }
-    lhs.is_const = 0
-    support.fc().c_res_is_addr = 0
-    // 恢复外层短路标签（嵌套 a&&b||c&&d：内层用完即还）
-    support.fc().sc_sc_depth -= 1
-    support.fc().sc_lbl_false = support.fc().sc_sc_false_stk[support.fc().sc_sc_depth]
-    support.fc().sc_lbl_end = support.fc().sc_sc_end_stk[support.fc().sc_sc_depth]
-    return 0
-}
-
-pub fn sem_ternary_cond(lhs *support.Res) int {
-    if (support.session().compile == 0) {
-        lhs.type_id = 0
-        return 0
-    }
-    if (support.fc().c_fold != 0) {
-        return token.err_tok("三元不支持编译期折叠")
-    }
-    // 保存外层三元标签（嵌套 `a ? b : (c ? d : e)` 时内层不破坏外层；
-    // 此前共用一对全局标签，内层覆盖外层后发射重复 .L 标签）
-    if (support.fc().tn_depth >= 64) {
-        return token.err_tok("三元表达式嵌套超过 64 层")
-    }
-    support.fc().tn_else_stk[support.fc().tn_depth] = support.fc().tn_lbl_else
-    support.fc().tn_end_stk[support.fc().tn_depth] = support.fc().tn_lbl_end
-    support.fc().tn_depth += 1
-    support.fc().tn_lbl_else = 0
-    support.fc().tn_lbl_end = 0
-    return 0
-}
-
-pub fn sem_ternary_mid(lhs *support.Res) int {
-    if (support.session().compile == 0) {
-        return 0
-    }
-    return 0
-}
-
-pub fn sem_ternary_end(lhs *support.Res) int {
-    if (support.session().compile == 0) {
-        return 0
-    }
-    support.fc().c_res_is_addr = 0
-    // 恢复外层三元标签（嵌套时内层用完即还）
-    support.fc().tn_depth -= 1
-    support.fc().tn_lbl_else = support.fc().tn_else_stk[support.fc().tn_depth]
-    support.fc().tn_lbl_end = support.fc().tn_end_stk[support.fc().tn_depth]
-    return 0
-}
-
 pub fn sem_unary(op int, operand *support.Res) int {
     if (support.session().compile == 0) {
         operand.type_id = 0
@@ -2937,7 +2732,7 @@ pub fn sem_unary(op int, operand *support.Res) int {
         if (support.fc().c_res_is_addr == 0) {
             return token.err_tok("取地址的操作数必须是左值")
         }
-        let pt int = ty_ptr(operand.type_id)
+        let pt int = table.ty_ptr(operand.type_id)
         sem_res_reset(operand, pt)
         support.fc().c_res_is_addr = 1
         return 0
@@ -3089,7 +2884,7 @@ pub fn sem_slice(base *support.Res, sres *support.Res, eres *support.Res) int {
     // x0 = 数据指针 = 基址 + start*esz
     // 构造 {len, data} 临时切片
     let soff int = 0
-    base.type_id = ty_slice(elem)
+    base.type_id = table.ty_slice(elem)
     base.is_lit = 0
     base.is_const = 0
     support.fc().c_res_is_addr = 1
@@ -3239,33 +3034,6 @@ pub fn sem_sizeof(tid int, r *support.Res) int {
     return 0
 }
 
-pub fn sem_len(r *support.Res) int {
-    if (support.session().compile == 0) {
-        r.type_id = 0
-        return 0
-    }
-    let k int = table.ms().types[r.type_id].kind
-    if (k == types.TY_ARRAY) {
-        // 编译期折叠为常量并直接装 x0（同 sem_sizeof：折叠出的常量由
-        // 这里物化，消费端不负责）。必须清 support.fc().c_res_is_addr——实参（数组
-        // 标识符）的聚合地址语义会残留，否则 x0 里的数组地址被当成
-        // 结果（曾致 return len(arr) 返回地址而非长度）。
-        support.fc().c_res_is_addr = 0
-        support.sem_res_const(r, types.TY_I32, table.ms().types[r.type_id].len.to_type(i64))
-        return 0
-    }
-    if (k == types.TY_SLICE) {
-        if (support.fc().c_fold != 0) {
-            return token.err_tok("切片长度不是编译期常量")
-        }
-        // 切片值在 x0（地址）；读 [x0] 的长度
-        sem_res_reset(r, types.TY_I32)
-        support.fc().c_res_is_addr = 0
-        return 0
-    }
-    return token.err_tok("len 需要一个数组或切片")
-}
-
 pub fn sem_cast(operand *support.Res, tid int) int {
     if (support.session().compile == 0) {
         operand.type_id = 0
@@ -3343,144 +3111,6 @@ pub fn sem_cast(operand *support.Res, tid int) int {
     operand.type_id = tid
     operand.is_lit = 0
     support.fc().c_res_is_addr = 0
-    return 0
-}
-
-pub fn sem_forin_begin(it *support.Res, is_range int, end_res *support.Res) int {
-    if (support.session().compile == 0 || support.fc().c_fold != 0) {
-        return 0
-    }
-    if (support.fc().c_fi_depth >= 64) {
-        return token.err_tok("for-in 嵌套过深")
-    }
-    let d int = support.fc().c_fi_depth
-    support.fc().c_fi_cnt_off[d] = 0
-    support.fc().c_fi_len_off[d] = 0
-    support.fc().c_fi_data_off[d] = 0
-    support.fc().c_fi_step_off[d] = 0
-    support.fc().c_fi_elem_off[d] = -1
-    support.fc().c_fi_idx_off[d] = -1
-    if (is_range != 0) {
-        support.fc().c_fi_kind[d] = 1
-        // x0 = 起点。先存 data 槽（起点），再与终点比较定步长与长度。
-        // x11 = 终点（从临时槽）。用 x11 而非 x9：深帧下
-        // em_lea_local_to 拼地址走 movz x9，会覆盖 x9 里的终点，
-        // 区间长度被算成「槽偏移 - 起点」（run/27：长度 287 而非 4，
-        // range_sum 累加成 37128——小帧时 lea 走 sub x10 不触雷，
-        // 故 mini 复现全过）
-        // x0 = 起点
-        // 长度 = max(0, 终点 - 起点)：x11 = 终点-起点；若 <0 置 0
-        let l_pos int = 0
-        // x11 == 0：空区间，长度 0（保持 x11=0 即可）
-        // 步长恒 +1（左闭右开区间）。先取地址再装常量：深帧 lea 的
-        // movz x9 不能落在步长已入 x9 之后（同数组 len 的教训）
-        support.fc().c_fi_depth += 1
-        return 0
-    }
-    // 数组/切片
-    support.fc().c_fi_kind[d] = 0
-    let k int = table.ms().types[it.type_id].kind
-    if (k == types.TY_ARRAY) {
-        // 先取地址再装 len：深帧 lea 的 movz x9 不能落在 len 已入 x9 之后
-    } else if (k == types.TY_SLICE) {
-    } else {
-        return token.err_tok("for-in 需要数组、切片或区间")
-    }
-    support.fc().c_fi_depth += 1
-    return 0
-}
-
-pub fn sem_forin_elem_type(it *support.Res, is_range int) int {
-    if (is_range != 0) {
-        // 区间迭代绑定是默认整数类型 int（与 stage0 一致，便于 int 变量累加）
-        return types.TY_I32
-    }
-    return table.ms().types[it.type_id].elem
-}
-
-pub fn sem_forin_set_bind(elem_off int, idx_off int) int {
-    if (support.session().compile == 0 || support.fc().c_fold != 0) {
-        return 0
-    }
-    if (support.fc().c_fi_depth == 0) {
-        return token.err_tok("内部错误：for-in 状态缺失")
-    }
-    support.fc().c_fi_elem_off[support.fc().c_fi_depth - 1] = elem_off
-    support.fc().c_fi_idx_off[support.fc().c_fi_depth - 1] = idx_off
-    return 0
-}
-
-pub fn sem_forin_check(lbl_end int) int {
-    if (support.session().compile == 0 || support.fc().c_fold != 0) {
-        return 0
-    }
-    let d int = support.fc().c_fi_depth - 1
-    return 0
-}
-
-pub fn sem_forin_load(it *support.Res, is_range int) int {
-    if (support.session().compile == 0 || support.fc().c_fold != 0) {
-        return 0
-    }
-    let d int = support.fc().c_fi_depth - 1
-    if (is_range != 0) {
-        // 下标 = count；值 = 起点 + count*step
-        if (support.fc().c_fi_idx_off[d] >= 0) {
-        }
-        if (support.fc().c_fi_elem_off[d] >= 0) {
-            // x0 = count（下标）；值 = 起点 + count
-        }
-        return 0
-    }
-    // 数组/切片：值 = data[count]
-    let elem int = table.ms().types[it.type_id].elem
-    if (support.fc().c_fi_idx_off[d] >= 0) {
-    }
-    // 缩放下标 → data + i*size
-    let esz int = table.ms().types[elem].size
-    if (esz == 2) {
-    } else if (esz == 4) {
-    } else if (esz == 8) {
-    } else if (esz != 1) {
-    }
-    if (support.fc().c_fi_elem_off[d] >= 0) {
-        let ek int = table.ms().types[elem].kind
-        if (ek == types.TY_STRUCT || ek == types.TY_UNION || ek == types.TY_ARRAY || ek == types.TY_SLICE) {
-            // 聚合元素：块拷贝进绑定槽。x0 = 元素地址（add 的结果），
-            // 先取绑定槽地址（x10）再拷贝——深帧 lea 的 movz x9 不碰
-            // x0，此序天然安全；原「mov x9, x0 保地址」会被 lea 覆盖
-            // （copy_block 源错）
-        } else {
-            // 标量元素：x10 = 元素地址，load 到 x0 后存绑定槽
-        }
-    }
-    return 0
-}
-
-pub fn sem_forin_step(lbl_cond int) int {
-    if (support.session().compile == 0 || support.fc().c_fold != 0) {
-        return 0
-    }
-    let d int = support.fc().c_fi_depth - 1
-    return 0
-}
-
-pub fn sem_forin_end() int {
-    if (support.session().compile == 0 || support.fc().c_fold != 0) {
-        return 0
-    }
-    support.fc().c_fi_depth -= 1
-    return 0
-}
-
-pub fn sem_stash_lvalue() int {
-    if (support.session().compile == 0 || support.fc().c_fold != 0) {
-        return 0
-    }
-    if (support.fc().c_temp_off == 0) {
-        support.fc().c_temp_off = 0
-    }
-    // 先保护 x0 中的左值地址，再取临时槽地址，最后写入
     return 0
 }
 
@@ -3699,6 +3329,10 @@ pub fn sem_break() int {
     if (support.session().compile == 0) {
         return 0
     }
+    // 展开边界校验必须先于循环深度检查：$for 体顶层 break 报边界错误而非「不在循环内」
+    if (comptime.ct_validate_loop_exit(support.fc().c_loop_depth, token.TK_BREAK) != 0) {
+        return -1
+    }
     if (support.fc().c_loop_depth == 0) {
         return token.err_tok("break 不在循环内")
     }
@@ -3710,10 +3344,31 @@ pub fn sem_continue() int {
     if (support.session().compile == 0) {
         return 0
     }
+    // 同 sem_break：展开边界错误优先于「不在循环内」
+    if (comptime.ct_validate_loop_exit(support.fc().c_loop_depth, token.TK_CONTINUE) != 0) {
+        return -1
+    }
     if (support.fc().c_loop_depth == 0) {
         return token.err_tok("continue 不在循环内")
     }
     return 0
+}
+
+// sem_stmt_diag：语句级编译期诊断收尾（$assert/$compile_error/$compile_warn，
+// 由 parse 语句末尾调用）；test 体里的 $assert 已降级为运行期断言调用，不在此触发。
+pub fn sem_stmt_diag(res *support.Res, test_body int) int {
+    if (support.session().compile == 0 || res.ct_diag == 0) {
+        return 0
+    }
+    if ((support.fc().c_fn_flags & table.F_COMPTIME) != 0) {
+        return 0
+    }
+    if (test_body != 0 && res.ct_diag == support.CT_DIAG_ASSERT) {
+        return 0
+    }
+    return comptime.ct_diag_emit(res.ct_diag, res.ival,
+        res.ct_diag_line, res.ct_diag_col,
+        res.ct_diag_msg_start, res.ct_diag_msg_len)
 }
 
 // sem_res_reset：语义结果清零；纯字段重置已上移 support.res_reset（与 Res 同层），
@@ -3768,7 +3423,7 @@ pub fn sem_num_is_float(start int, n int) int {
 @[extern] fn strtod(text *char, endptr *void) f64
 
 pub fn sem_string(start int, slen int, r *support.Res) int {
-    sem_res_reset(r, ty_ptr(types.TY_CHAR))
+    sem_res_reset(r, table.ty_ptr(types.TY_CHAR))
     if (support.session().compile == 0) {
         return 0
     }
@@ -3784,7 +3439,7 @@ pub fn sem_string(start int, slen int, r *support.Res) int {
 // sem_raw_string：登记不含引号的字符串体（插值文本块/说明符）。
 // 与 sem_string 相同的数据标签路径，quoted=2 让解码器处理转义但不剥引号。
 pub fn sem_raw_string(start int, slen int, r *support.Res) int {
-    sem_res_reset(r, ty_ptr(types.TY_CHAR))
+    sem_res_reset(r, table.ty_ptr(types.TY_CHAR))
     if (support.session().compile == 0) {
         return 0
     }
@@ -3972,7 +3627,7 @@ pub fn sem_enum_meta_name(meta *support.Res) int {
     let lbl int = support.data_label_advance()
     if (table.data_str_add_pool(lbl, table.ms().syms[member].name_off,
         table.ms().syms[member].name_len) != 0) { return -1 }
-    sem_res_reset(meta, ty_ptr(types.TY_CHAR))
+    sem_res_reset(meta, table.ty_ptr(types.TY_CHAR))
     meta.is_const = 1
     meta.ival = lbl.to_type(i64)
     return 0
@@ -4001,7 +3656,7 @@ pub fn sem_field_meta_name(meta *support.Res) int {
     // LL12：标签只登记，名称数据由快照生成。
     let lbl int = support.data_label_advance()
     if (table.data_str_add_pool(lbl, field.name_off, field.name_len) != 0) { return -1 }
-    sem_res_reset(meta, ty_ptr(types.TY_CHAR))
+    sem_res_reset(meta, table.ty_ptr(types.TY_CHAR))
     meta.is_const = 1
     meta.ival = lbl.to_type(i64)
     return 0
@@ -4034,18 +3689,6 @@ pub fn ty_push_agg(kind int, size int, align int, elem int, n int, sub int) int 
     return table.model_type_push_agg(kind, size, align, elem, n, sub)
 }
 
-// ty_ptr：指向 elem 的指针类型（按内容去重）。
-pub fn ty_ptr(elem int) int {
-    let i int = 0
-    for i < table.ms().type_n {
-        if (table.ms().types[i].kind == types.TY_PTR && table.ms().types[i].elem == elem) {
-            return i
-        }
-        i += 1
-    }
-    return table.ty_push(types.TY_PTR, support.TG_PTR_SIZE, support.TG_PTR_SIZE, elem, -1, -1)
-}
-
 // ty_array：[len] elem 定长数组类型（按内容去重）。
 pub fn ty_array(elem int, alen int) int {
     let i int = 0
@@ -4067,29 +3710,6 @@ pub fn ty_array(elem int, alen int) int {
     }
     size += rpad
     return ty_push_agg(types.TY_ARRAY, size, eal, elem, alen, -1)
-}
-
-// ty_slice：切片类型 []T = {u64 长度, T *数据}（16 字节聚合视图）。
-// 去重按元素类型；元素类型参与同型判断（ADR-0001/0002）。
-pub fn ty_slice(elem int) int {
-    let i int = 0
-    for i < table.ms().type_n {
-        if (table.ms().types[i].kind == types.TY_SLICE && table.ms().types[i].elem == elem) {
-            return i
-        }
-        i += 1
-    }
-    return table.ty_push(types.TY_SLICE, support.TG_LONG_SIZE * 2, support.TG_LONG_SIZE, elem, -1, -1)
-}
-
-// ty_sig_param：向参数类型池追加一个参数类型。
-pub fn ty_sig_param(tid int) int {
-    if (intvec_grow(&table.ms().sig_params, table.ms().sigparam_n, &table.ms().sigparam_cap) != 0) {
-        return -1
-    }
-    table.ms().sig_params[table.ms().sigparam_n] = tid
-    table.ms().sigparam_n += 1
-    return 0
 }
 
 // ty_fn：函数类型（签名按内容去重：返回 + 参数个数 + 逐个参数类型）。
@@ -4169,21 +3789,6 @@ pub fn ty_declare_name(off int, n int, tid int) int {
     table.ms().names[table.ms().name_n].def_line = token.ctx().tokens[token.ctx().pos].line
     table.ms().names[table.ms().name_n].def_col = token.ctx().tokens[token.ctx().pos].col
     table.ms().name_n += 1
-    return 0
-}
-
-// ty_add_name_attrs：为刚登记的具名类型补充解析结束后才能确定的属性。
-pub fn ty_add_name_attrs(tid int, attrs int) int {
-    let found int = 0
-    let i int = 0
-    for i < table.ms().name_n {
-        if (table.ms().names[i].type_id == tid) {
-            table.ms().names[i].attrs |= attrs
-            found = 1
-        }
-        i += 1
-    }
-    if (found == 0) { return errors.fail("内部错误：类型属性找不到具名类型") }
     return 0
 }
 
@@ -4424,20 +4029,7 @@ pub fn sem_init_tables() int {
     support.fc().c_aggparam_src = support.alloc((4 * 64).to_type(u64)).to_type(*int)
     support.fc().c_aggparam_dst = support.alloc((4 * 64).to_type(u64)).to_type(*int)
     support.fc().c_aggparam_size = support.alloc((4 * 64).to_type(u64)).to_type(*int)
-    support.fc().c_lit_save_off = support.alloc((4 * 32).to_type(u64)).to_type(*int)
-    support.fc().c_lit_save_tid = support.alloc((4 * 32).to_type(u64)).to_type(*int)
-    support.fc().c_fi_kind = support.alloc((4 * 64).to_type(u64)).to_type(*int)
-    support.fc().c_fi_cnt_off = support.alloc((4 * 64).to_type(u64)).to_type(*int)
-    support.fc().c_fi_len_off = support.alloc((4 * 64).to_type(u64)).to_type(*int)
-    support.fc().c_fi_data_off = support.alloc((4 * 64).to_type(u64)).to_type(*int)
-    support.fc().c_fi_step_off = support.alloc((4 * 64).to_type(u64)).to_type(*int)
-    support.fc().c_fi_elem_off = support.alloc((4 * 64).to_type(u64)).to_type(*int)
-    support.fc().c_fi_idx_off = support.alloc((4 * 64).to_type(u64)).to_type(*int)
     support.fc().c_bss_syms = support.alloc((4 * 4096).to_type(u64)).to_type(*int)
-    support.fc().sc_sc_false_stk = support.alloc((4 * 64).to_type(u64)).to_type(*int)
-    support.fc().sc_sc_end_stk = malloc((4 * 64).to_type(u64)).to_type(*int)
-    support.fc().tn_else_stk = malloc((4 * 64).to_type(u64)).to_type(*int)
-    support.fc().tn_end_stk = malloc((4 * 64).to_type(u64)).to_type(*int)
     if (table.ms().scope_start == 0 || support.fc().c_brk_stk == 0 || support.fc().c_cnt_stk == 0
         || support.fc().c_loop_break_seen == 0
         || support.fc().c_glabels == 0 || support.fc().c_args == 0 || support.fc().c_argtys == 0
@@ -4445,13 +4037,7 @@ pub fn sem_init_tables() int {
         || support.fc().c_call_base == 0
         || support.fc().c_call_abi == 0 || support.fc().c_call_direct == 0 || support.fc().c_arg_agg == 0
         || support.fc().c_aggparam_indirect == 0 || support.fc().c_aggparam_src == 0 || support.fc().c_aggparam_dst == 0 || support.fc().c_aggparam_size == 0
-        || support.fc().c_lit_save_off == 0 || support.fc().c_lit_save_tid == 0
-        || support.fc().c_fi_kind == 0 || support.fc().c_fi_cnt_off == 0 || support.fc().c_fi_len_off == 0
-        || support.fc().c_fi_data_off == 0 || support.fc().c_fi_step_off == 0
-        || support.fc().c_fi_elem_off == 0 || support.fc().c_fi_idx_off == 0
-        || support.fc().c_bss_syms == 0
-        || support.fc().sc_sc_false_stk == 0 || support.fc().sc_sc_end_stk == 0
-        || support.fc().tn_else_stk == 0 || support.fc().tn_end_stk == 0) {
+        || support.fc().c_bss_syms == 0) {
         return errors.fail("内存分配失败")
     }
     return 0

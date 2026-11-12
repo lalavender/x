@@ -13,21 +13,34 @@ import errors
 // 双跑：parse 仍按旧路径当场算出 `Res` 并写进节点注解，本模块再从节点重算
 // 一份，逐字段比对。不一致即视为迁移有偏差，构建直接失败。
 //
-// 本片（S4-2a）只覆盖常量折叠链：整数字面量、括号、一元 `+ - ! ~`、二元
-// `+ - * / % & ^ | << >> == != < <= > >=`。运算与诊断复用同一套内核
-// （sem_num_is_float / sem_parse_number / sem_fold_const_unary /
-// sem_fold_const_binop / sem_lit_fits / sem_promote / sem_res_const），
-// 因此重算的值必须与旧路径逐位相同。未覆盖的节点种类返回「不判定」，
-// 其父节点随之不判定——影子门只会越扩越宽，不会放宽比较。
+// 覆盖范围（S4-2a…d）：字面量（整数/浮点/char/bool/字符串）、括号、一元
+// `+ - ! ~`、二元全集、名字（const/变量快照/地址常量）、下标/切片/字段/调用。
+// 运算与诊断复用同一套内核（sem_number 族 / sem_binop / sem_unary /
+// sem_ident / 折叠内核），运行期二元直接调 `sem_binop` 本体，因此重算结果
+// 必须与旧路径逐字段相同。未覆盖的节点种类返回「不判定」，其父节点随之不判定
+// ——影子门只会越扩越宽，不会放宽比较。
 //
+// 驱动入口（`sem_eval_*`）已拆到 `check/eval.yh`（2026-11-11）；本文件只剩影子门与
+// 重算内核（`full_expr_at` 等），两者同模块共享 `full_local`。
 // 只在 YH_AST_FULL_CHECK=1 门禁下运行；生产构建不进入本文件。
 // ============================================================================
 
 // 影子门的首个不一致节点与其差异位（供驱动层打印定位）。
 let full_bad_id int = -1
 let full_bad_mask int = 0
+// 首个不一致节点的「重算类型 / 注解类型」（定位用）。
+let full_bad_new_type int = -1
+let full_bad_old_type int = -1
 // 本次模块被判定（重算并比对）的节点数：驱动层用它确认门禁非空转。
 let full_checked int = 0
+
+// —— S4-4 eval 覆盖统计（YH_AST_FULL_STATS=1 门禁调试） ——
+// full_judged / full_unjudged：本进程内「已判定 / 本片不判定」的节点数；
+// full_unjudged_kind 按 AST_EXPR_* 编号（1..15）分桶，用来定位 eval 还差哪些
+// 节点种类（S4-4 切换前的覆盖率度量，方案 §4e）。
+let full_judged int = 0
+let full_unjudged int = 0
+let full_unjudged_kind [16]int
 
 // full_verify_file：对指定文件内的表达式节点重算语义并与注解比对。
 // 返回不一致节点数；-1 表示重算自身报错（诊断已由内核给出）。
@@ -58,6 +71,33 @@ pub fn full_verify_file(file_id int) int {
     return bad
 }
 
+// full_fill_file：把本文件表达式的重算结果**写回**节点注解（S4-2f 回填通道）。
+// 未被覆盖的节点（字符串标签/编译期节点等）保持 parse 写入的值；返回 0 成功。
+// 与 full_verify_file 共用同一重算器，因此先 verify 再 fill 时写回值必与注解一致。
+pub fn full_fill_file(file_id int) int {
+    let i int = 0
+    let n int = ast.ast_expr_count_now()
+    for i < n {
+        let node_file int = -1
+        ast.ast_expr_span_of(i, &node_file)
+        if (node_file == file_id) {
+            let r support.Res
+            let st int = full_expr(i, &r)
+            if (st == -2) { /* 本片不判定：保持 parse 写入的值 */ }
+            else if (st < 0) {
+                full_fail_node("S4-2 回填：重算报错，节点=", i)
+                return -1
+            }
+            else if (ast.ast_expr_fill_semantics(i, &r) != 0) {
+                full_fail_node("S4-2 回填：节点注解写入失败，节点=", i)
+                return -1
+            }
+        }
+        i += 1
+    }
+    return 0
+}
+
 // full_bad_node：影子门首个不一致节点编号；无不一致时为 -1。
 pub fn full_bad_node() int {
     return full_bad_id
@@ -73,20 +113,42 @@ pub fn full_checked_count() int {
     return full_checked
 }
 
+// full_stats_report：打印本进程内的 eval 覆盖统计——总判定/未判定节点数 +
+// 按 AST_EXPR_* 种类（1..15）的未判定分布。S4-4 切换前用它量化「eval 还差
+// 哪些节点种类」，由驱动层在 YH_AST_FULL_STATS=1 时调用；返回 0 成功。
+pub fn full_stats_report() int {
+    let buf [384]u8
+    let n int = 0
+    n = support.append_str(buf, 0, "S4-4 eval 覆盖：判定=")
+    n = support.append_int(buf, n, full_judged)
+    n = support.append_str(buf, n, " 未判定=")
+    n = support.append_int(buf, n, full_unjudged)
+    n = support.append_str(buf, n, " 未判定分类(1..15)=")
+    let k int = 1
+    for k < 16 {
+        n = support.append_int(buf, n, full_unjudged_kind[k])
+        if (k < 15) { n = support.append_str(buf, n, ",") }
+        k += 1
+    }
+    let mo int = support.tml_intern_str(buf, 0, n)
+    if (mo < 0) { return -1 }
+    return errors.note(support.np_cstr(mo))
+}
+
 // full_verify_node：单个节点重算并比对。返回 0 一致或不判定、正数为差异位、
 // -1 重算报错。
 fn full_verify_node(id int) int {
-    // 本片只判定旧路径**已折叠**的常量链：旧路径仅在 c_fold 上下文（const
-    // 初始化式、数组长度等）折叠表达式，非折叠上下文的节点不记录常量，
-    // 重算无从对齐，跳过（覆盖扩展到非折叠上下文见后续分片）。
-    let seen support.Res
-    ast.ast_expr_semantics_to(id, &seen)
-    if (seen.is_const == 0) { return 0 }
     let r support.Res
     let st int = full_expr(id, &r)
-    if (st == -2) { return 0 }   // 本片不判定：跳过，不计不一致
+    if (st == -2) {   // 本片不判定：跳过，不计不一致（只记覆盖缺口）
+        full_unjudged += 1
+        let uk int = ast.ast_expr_kind(id)
+        if (uk >= 0 && uk < 16) { full_unjudged_kind[uk] += 1 }
+        return 0
+    }
     if (st != 0) { return -1 }   // 重算自身报错（诊断由内核给出）
     full_checked += 1
+    full_judged += 1
     let old support.Res
     ast.ast_expr_semantics_to(id, &old)
     return full_compare(&r, &old)
@@ -96,7 +158,14 @@ fn full_verify_node(id int) int {
 // 位：1=类型、2=常量性、4=常量值、8=字面量性、16=超宽字面量、32=浮点位型。
 fn full_compare(now_ *support.Res, old *support.Res) int {
     let mask int = 0
-    if (now_.type_id != old.type_id) { mask += 1 }
+    // 类型始终可比；常量相关字段只在旧路径**折叠过**（注解 is_const != 0）时
+    // 可比——非折叠上下文里旧路径本来就不折，值无从对齐（S4-2a 的口径）。
+    if (now_.type_id != old.type_id) {
+        mask += 1
+        full_bad_new_type = now_.type_id
+        full_bad_old_type = old.type_id
+    }
+    if (old.is_const == 0) { return mask }
     if (now_.is_const != old.is_const) { mask += 2 }
     if (now_.is_const != 0 && now_.ival != old.ival) { mask += 4 }
     if (now_.is_lit != old.is_lit) { mask += 8 }
@@ -105,34 +174,396 @@ fn full_compare(now_ *support.Res, old *support.Res) int {
     return mask
 }
 
-// full_expr：按节点种类重算语义。返回 0 已覆盖、-2 本片不判定、-1 报错。
+// full_expr：按节点种类重算语义（无上下文入口）。返回 0 已覆盖、-2 本片不
+// 判定、-1 报错。
 fn full_expr(id int, out *support.Res) int {
+    return full_expr_at(id, -1, out)
+}
+
+// full_expr_at：带**目标类型上下文**的重算入口（S4-2f：类型导向）。
+// expect >= 0 表示父级给出的目标类型（调用实参、聚合元素/字段、三元分支）；
+// 聚合字面量会比对「上下文推导」与「解析期记录的 expect_type_id」，不一致
+// 即视为漂移——这是后续「先纯语法、后 fill」能否独立重建上下文的前提。
+// full_local：增量 eval 模式开关（S4-4）。置 1 时 `full_expr_at` 取**子节点注解**
+// 而不是递归重算——parse 在链层/postfix 每步建完节点就调 `sem_eval_local`，
+// 于是每个节点只算一次（O(n)），父级直接读子级已回填的注解。
+let full_local int = 0
+
+// full_expr_at：eval 统一入口——增量模式下取节点注解（子级已求过），否则全树重算。
+fn full_expr_at(id int, expect int, out *support.Res) int {
+    if (full_local != 0) {
+        if (id < 0 || id >= ast.ast_expr_count_now()) { return -2 }
+        ast.ast_expr_semantics_to(id, out)
+        if (out.type_id < 0 || out.type_id >= table.ms().type_n) { return -2 }
+        return 0
+    }
+    return full_expr_at_top(id, expect, out)
+}
+
+// full_expr_at_top：全树重算本体（带目标类型上下文）。
+// expect >= 0 表示父级给出的目标类型（调用实参、聚合元素/字段、三元分支）；
+// 聚合字面量会比对「上下文推导」与「解析期记录的 expect_type_id」，不一致
+// 即视为漂移——这是「先纯语法、后 eval」能否独立重建上下文的前提。
+fn full_expr_at_top(id int, expect int, out *support.Res) int {
     if (id < 0 || id >= ast.ast_expr_count_now()) { return -2 }
     let kind int = ast.ast_expr_kind(id)
     let op int = ast.ast_expr_op(id)
     if (kind == ast.AST_EXPR_PRIMARY) {
         let child int = ast.ast_expr_child_of(id, 0)
         if (child >= 0) {
-            // 括号等包裹节点只透传内层结果（parse 用同一节点记录括号表达式）。
-            if (op != token.TK_LPAREN) { return -2 }
-            return full_expr(child, out)
+            // 包裹节点只透传内层结果：括号（TK_LPAREN）、结构体/联合体字面量
+            // （TOK_IDENT——parse_primary 在 ident 分支建完 STRUCT_INIT 后统一包
+            // 一层 PRIMARY，语义在内层节点上）。其余（`$`调用/插值等 CT 节点）
+            // 仍不判定。
+            if (op != token.TK_LPAREN && op != token.TOK_IDENT) { return -2 }
+            return full_expr_at(child, expect, out)
         }
         if (op == token.TOK_NUMBER) { return full_literal(id, out) }
         if (op == token.TK_TRUE) { return sem_bool(1, out) }
         if (op == token.TK_FALSE) { return sem_bool(0, out) }
         if (op == token.TK_CHAR || op == token.TOK_CHAR) { return full_char(id, out) }
         if (op == token.TOK_IDENT) { return full_name(id, out) }
-        // 字符串/`$`调用/sizeof/数组字面量等：常量值来自登记过的标签或聚合，
-        // 重算会有副作用或无从复现，本片不判定。
+        if (op == token.TK_SIZEOF) { return full_sizeof(id, out) }
+        if (op == token.TOK_STRING) { return full_string(id, out) }
+        // `$`调用/sizeof 类型路径/数组字面量等：结果来自登记过的标签或聚合上下文。
         return -2
     }
     if (kind == ast.AST_EXPR_UNARY) {
+        if (op == token.TK_LEN) { return full_len(id, out) }
+        if (op == token.TK_STAR || op == token.TK_AMP) { return full_ref_unary(id, op, out) }
         if (op != token.TK_MINUS && op != token.TK_PLUS
             && op != token.TK_BANG && op != token.TK_TILDE) { return -2 }
         return full_unary(id, op, out)
     }
     if (kind == ast.AST_EXPR_BINARY) { return full_binary(id, op, out) }
+    if (kind == ast.AST_EXPR_INDEX) { return full_index(id, out) }
+    if (kind == ast.AST_EXPR_SLICE) { return full_slice(id, out) }
+    if (kind == ast.AST_EXPR_MEMBER) { return full_member(id, out) }
+    if (kind == ast.AST_EXPR_CALL) { return full_call(id, op, out) }
+    if (kind == ast.AST_EXPR_CAST) { return full_cast(id, out) }
+    if (kind == ast.AST_EXPR_TERNARY) { return full_ternary(id, expect, out) }
+    if (kind == ast.AST_EXPR_ARRAY) { return full_array(id, expect, out) }
+    if (kind == ast.AST_EXPR_STRUCT_INIT) { return full_struct_init(id, expect, out) }
+    // STRUCT_FIELD 无独立语义注解（type_id = -1），ARG_LIST 是纯结构链。
     return -2
+}
+
+// full_array：数组/切片字面量——目标类型来自节点记录的解析期上下文，
+// 本片核对元素链个数（定长数组必须与类型长度一致）并回传该类型。
+fn full_array(id int, expect int, out *support.Res) int {
+    let rec int = ast.ast_expr_expect_of(id)
+    let tid int = expect
+    if (tid < 0) { tid = rec }
+    else if (rec >= 0 && rec != tid) { return -1 }   // 上下文与记录漂移
+    if (tid < 0 || tid >= table.ms().type_n) { return -2 }
+    let tk int = table.ms().types[tid].kind
+    if (tk != types.TY_ARRAY && tk != types.TY_SLICE) { return -2 }
+    let elem int = table.ms().types[tid].elem
+    let n int = 0
+    let list int = ast.ast_expr_child_of(id, 0)
+    for list >= 0 {
+        if (ast.ast_expr_kind(list) != ast.AST_EXPR_ARG_LIST) { return -2 }
+        let e int = ast.ast_expr_child_of(list, 1)
+        if (e >= 0) {
+            let er support.Res
+            let st int = full_expr_at(e, elem, &er)
+            if (st < 0) { return st }
+            // 元素兼容性镜像 parse 的实点检查（parse_expr 逐元素 can_assign）；
+            // 未判定元素（st==-2）保持 parse 的判定，不镜像。
+            if (st == 0 && table.vk_can_assign(elem, er.type_id, er.is_lit,
+                er.ival, er.lit_big) != 0) { return -1 }
+        }
+        n += 1
+        list = ast.ast_expr_child_of(list, 0)
+    }
+    if (tk == types.TY_ARRAY && n != table.ms().types[tid].len) { return -1 }
+    support.res_reset(out, tid)
+    return 0
+}
+
+// full_struct_init：结构体/联合体字面量——目标类型来自节点记录；本片核对
+// full_struct_init：结构体/联合体字面量——目标类型来自节点记录；本片核对
+fn full_struct_init(id int, expect int, out *support.Res) int {
+    let rec int = ast.ast_expr_expect_of(id)
+    let tid int = expect
+    if (tid < 0) { tid = rec }
+    else if (rec >= 0 && rec != tid) { return -1 }   // 上下文与记录漂移
+    if (tid < 0 || tid >= table.ms().type_n) { return -2 }
+    let tk int = table.ms().types[tid].kind
+    if (tk != types.TY_STRUCT && tk != types.TY_UNION) { return -2 }
+    let st0 int = table.ms().types[tid].sub
+    let nf int = table.ms().types[tid].len
+    let f int = ast.ast_expr_child_of(id, 0)
+    for f >= 0 {
+        if (ast.ast_expr_kind(f) != ast.AST_EXPR_STRUCT_FIELD) { return -2 }
+        let fidx int = ast.ast_expr_op(f)
+        if (fidx < 0) { return -2 }   // 纯语法模式的「字段名 token」编码
+        if (fidx < st0 || fidx >= st0 + nf) { return -1 }
+        let v int = ast.ast_expr_child_of(f, 1)
+        if (v < 0) { return -1 }
+        let vr support.Res
+        let st int = full_expr_at(v, table.ms().fields[fidx].type_id, &vr)
+        if (st < 0) { return st }
+        // 字段兼容性镜像 sem_struct_lit_field（big 位硬编码 0，与 parse 一致）；
+        // 未判定值（st==-2）保持 parse 的判定，不镜像。
+        if (st == 0 && table.vk_can_assign(table.ms().fields[fidx].type_id,
+            vr.type_id, vr.is_lit, vr.ival, 0) != 0) { return -1 }
+        f = ast.ast_expr_child_of(f, 0)
+    }
+    support.res_reset(out, tid)
+    return 0
+}
+
+// full_ternary：结果语义取中支（parse 在三支解析完后 `res_copy(res, &mid)`）；
+// 中支与 else 支都按父级上下文重算，校验分支里聚合字面量的目标类型。
+fn full_ternary(id int, expect int, out *support.Res) int {
+    let mid int = ast.ast_expr_child_of(id, 1)
+    let els int = ast.ast_expr_child_of(id, 2)
+    if (mid < 0) { return -2 }
+    let st int = full_expr_at(mid, expect, out)
+    if (st != 0) { return st }
+    if (els >= 0) {
+        let er support.Res
+        let st2 int = full_expr_at(els, expect, &er)
+        if (st2 < 0) { return st2 }
+    }
+    return 0
+}
+
+// full_type_root：在本节点区间内找止于 `)` 之前的根类型节点（`T(...)` 里的 T）。
+// 类型在表达式节点里只留语法形态，这是把它接回类型 arena 的唯一入口。
+fn full_type_root(file int, first int, after int) int {
+    if (after < first + 3) { return -1 }
+    let root int = -1
+    let best int = 0
+    let n int = ast.ast_type_count_now()
+    let i int = 0
+    for i < n {
+        let t ast.AstType = ast.ast_type_get(i)
+        if (t.file_id == file && t.after == after - 1
+            && t.first > first && t.first <= after - 2) {
+            let span int = t.after - t.first
+            if (root < 0 || span > best) {
+                root = i
+                best = span
+            }
+        }
+        i += 1
+    }
+    return root
+}
+
+// full_sizeof：`sizeof(T)`——目标类型从类型 arena 独立重解，结果 TY_I32 常量。
+// 布局未就绪（size < 0）时旧路径也不折叠，返回不判定。
+fn full_sizeof(id int, out *support.Res) int {
+    let file int = -1
+    let first int = ast.ast_expr_span_of(id, &file)
+    if (first < 0) { return -2 }
+    let after int = ast.ast_expr_after_of(id)
+    let root int = full_type_root(file, first, after)
+    if (root < 0) { return -2 }
+    let tid int = type_resolve(root)
+    if (tid < 0) { return -1 }
+    if (table.ty_is_opaque(tid) != 0) { return -1 }
+    let sz int = table.ms().types[tid].size
+    if (sz < 0) { return -2 }
+    support.res_reset(out, types.TY_I32)
+    out.is_const = 1
+    out.ival = sz.to_type(i64)
+    return 0
+}
+
+// —— 字面量 / 名字 / sizeof 层（S4-4：输入是 token 文本与绑定事实，没有子表达式）——
+// 这些层的语义输入不是「子表达式」而是**现场事实**：字面量的 token 文本、名字的绑定
+// 下标、sizeof 的类型引用。因此入口是仅算子模式的汇点：parse 只把事实交进来，解码、
+// 类型/常量判定与诊断全部在 check 内完成；节点注解由 `parse_primary` 外层用结果回填。
+
+// full_cast：`.to_type(T)`——操作数重算 + 目标类型从类型 arena 独立重解。
+// 常量转换与 sem_cast 同一套规则：折叠上下文（字面量操作数）按目标宽度归一、
+// 浮点写位模式并保留字面量性；非折叠上下文值不变、清字面量性。
+fn full_cast(id int, out *support.Res) int {
+    let child int = ast.ast_expr_child_of(id, 0)
+    if (child < 0) { return -2 }
+    let st int = full_expr(child, out)
+    if (st != 0) { return st }
+    let file int = -1
+    let first int = ast.ast_expr_span_of(id, &file)
+    if (first < 0) { return -2 }
+    let after int = ast.ast_expr_after_of(id)
+    let root int = full_type_root(file, first, after)
+    if (root < 0) { return -2 }
+    let tid int = type_resolve(root)
+    if (tid < 0) { return -1 }
+    let old support.Res
+    ast.ast_expr_semantics_to(id, &old)
+    if (out.is_const != 0 && old.is_lit != 0) {
+        if (table.ty_is_float(out.type_id) != 0 || table.ty_is_float(tid) != 0) {
+            let value i64 = table.sem_fold_float_convert(out.type_id, tid, out.ival)
+            out.ival = value
+            out.fval_bits = value
+        } else {
+            out.ival = table.sem_fold_norm(tid, out.ival)
+        }
+        out.type_id = tid
+        return 0
+    }
+    if (out.is_const != 0) {
+        out.type_id = tid
+        out.is_lit = 0
+        return 0
+    }
+    support.res_reset(out, tid)
+    return 0
+}
+
+// full_index：下标访问——结果类型是基址的元素类型（指针/数组/切片同规则）。
+fn full_index(id int, out *support.Res) int {
+    let base int = ast.ast_expr_child_of(id, 0)
+    if (base < 0) { return -2 }
+    let st int = full_expr(base, out)
+    if (st != 0) { return st }
+    let bk int = table.ms().types[out.type_id].kind
+    if (bk != types.TY_PTR && bk != types.TY_ARRAY && bk != types.TY_SLICE) { return -2 }
+    let elem int = table.ms().types[out.type_id].elem
+    support.res_reset(out, elem)
+    return 0
+}
+
+// full_slice：`base[start..end]`——基址须为数组或切片，结果是对应的切片类型。
+fn full_slice(id int, out *support.Res) int {
+    let base int = ast.ast_expr_child_of(id, 0)
+    if (base < 0) { return -2 }
+    let st int = full_expr(base, out)
+    if (st != 0) { return st }
+    let bk int = table.ms().types[out.type_id].kind
+    if (bk != types.TY_ARRAY && bk != types.TY_SLICE) { return -2 }
+    let elem int = table.ms().types[out.type_id].elem
+    support.res_reset(out, table.ty_slice(elem))
+    return 0
+}
+
+// full_member：字段访问——按基底（结构体或结构体指针）与成员名重查字段表。
+// 成员名取节点区间的最后一个 token（`ast_expr_finish` 以成员名之后为终点）。
+fn full_member(id int, out *support.Res) int {
+    let base int = ast.ast_expr_child_of(id, 0)
+    if (base < 0) { return -2 }
+    let st int = full_expr(base, out)
+    if (st != 0) { return st }
+    let bt int = out.type_id
+    let bk int = table.ms().types[bt].kind
+    let stid int = 0
+    if (bk == types.TY_PTR) {
+        stid = table.ms().types[bt].elem
+        let sk int = table.ms().types[stid].kind
+        if (sk != types.TY_STRUCT && sk != types.TY_UNION) { return -2 }
+    } else if (bk == types.TY_STRUCT || bk == types.TY_UNION) {
+        stid = bt
+    } else {
+        // 枚举成员、元信息投影等不是字段访问：本片不判定。
+        return -2
+    }
+    let after int = ast.ast_expr_after_of(id)
+    if (after <= 0 || after > token.ctx().count) { return -2 }
+    let t token.Tok = token.ctx().tokens[after - 1]
+    let st0 int = table.ms().types[stid].sub
+    let nf int = table.ms().types[stid].len
+    let i int = 0
+    for i < nf {
+        let f int = st0 + i
+        if (table.ms().fields[f].name_len == t.len) {
+            let match int = 1
+            let j int = 0
+            for j < t.len {
+                if (support.pool_ctx().data[table.ms().fields[f].name_off + j]
+                    != support.src_ctx().data[t.start + j]) {
+                    match = 0
+                    break
+                }
+                j += 1
+            }
+            if (match != 0) {
+                support.res_reset(out, table.ms().fields[f].type_id)
+                return 0
+            }
+        }
+        i += 1
+    }
+    return -2
+}
+
+// full_arg_at：取 ARG_LIST（逆序单链表：child0=前一项、child1=实参表达式）
+// 里深度 depth 处的实参节点；越界返回 -1。
+fn full_arg_at(list int, depth int) int {
+    let walk int = list
+    let d int = 0
+    for walk >= 0 && d < depth {
+        walk = ast.ast_expr_child_of(walk, 0)
+        d += 1
+    }
+    if (walk < 0) { return -1 }
+    return ast.ast_expr_child_of(walk, 1)
+}
+
+// full_call：调用——被调者重算后须是函数类型；实参按源码顺序逐个重算（按形参
+// 位置透传目标类型，校验实参里聚合字面量的上下文可独立重建），再以
+// `sem_call_begin → sem_push_arg → sem_call` 本体重放一遍调用 ABI 现场：
+// 实参兼容（数组→指针退化、C-ABI 聚合值拷贝、类型化变参元素相容）、实参
+// 个数约束与结果类型因此都由同一套内核给出，不依赖 parse 写下的 c_args 现场
+// ——这是 S4-4 eval 侧的职责（方案 §4e 实施序第 2 步）。
+// 重放前保存调用现场、结束后恢复（含错误路径），嵌套调用互不污染；折叠上下文
+// 按运行期调用置 0（编译期常量上下文里的函数调用在 parse 已拒绝，不会进入本片）。
+// `$函数(...)` 等非 TK_LPAREN 调用形态由 comptime 展开，本片不判定。
+fn full_call(id int, op int, out *support.Res) int {
+    if (op != token.TK_LPAREN) { return -2 }
+    let callee int = ast.ast_expr_child_of(id, 0)
+    if (callee < 0) { return -2 }
+    let st int = full_expr_at(callee, -1, out)
+    if (st != 0) { return st }
+    if (table.ms().types[out.type_id].kind != types.TY_FN) { return -2 }
+    let sig int = table.ms().types[out.type_id].sub
+    let np int = table.ms().sig_np[sig]
+    let sfirst int = table.ms().sig_first[sig]
+    // 先数实参个数：源码位置 = 总数-1-深度。
+    let n int = 0
+    let list int = ast.ast_expr_child_of(id, 1)
+    let walk int = list
+    for walk >= 0 {
+        n += 1
+        walk = ast.ast_expr_child_of(walk, 0)
+    }
+    let save_argn int = support.fc().c_arg_n
+    let save_depth int = support.fc().c_call_depth
+    let save_fold int = support.fc().c_fold
+    support.fc().c_fold = 0
+    let direct int = sem_call_begin(out)
+    if (direct < 0) {
+        support.fc().c_arg_n = save_argn
+        support.fc().c_call_depth = save_depth
+        support.fc().c_fold = save_fold
+        return -1
+    }
+    // 逐实参：按源码顺序求值（形参位给 expect）后立刻入实参数组，与 parse
+    // 的求值次序一致（后续实参不能改变已求值实参的副本）。
+    let k int = 0
+    let bad int = 0
+    for k < n && bad == 0 {
+        let arg int = full_arg_at(list, n - 1 - k)
+        if (arg < 0) { bad = -1 }
+        else {
+            let expect int = -1
+            if (k < np) { expect = table.ms().sig_params[sfirst + k] }
+            let ar support.Res
+            let ast2 int = full_expr_at(arg, expect, &ar)
+            if (ast2 != 0) { bad = ast2 }
+            else if (sem_push_arg(&ar, out) != 0) { bad = -1 }
+        }
+        k += 1
+    }
+    if (bad == 0 && sem_call(out, out) != 0) { bad = -1 }
+    support.fc().c_arg_n = save_argn
+    support.fc().c_call_depth = save_depth
+    support.fc().c_fold = save_fold
+    return bad
 }
 
 // full_literal：整数字面量节点——复用 sem_number 的解析内核。
@@ -169,24 +600,73 @@ fn full_char(id int, out *support.Res) int {
     return 0
 }
 
+// full_string：字符串字面量——结果恒为 `*char` 常量，**标签号取自节点注解**。
+// 标签是字面量的「节点身份」而不是可重算的值：parse 在创建节点时分配一次标签
+// 并按标签登记字节，跨模块 CT 闭包采纳后同一节点的注解标签指向提供方登记
+// （ct5b 实测；内容比对路线已证伪）。因此 eval 只判定类型与常量性、标签沿用
+// 注解——重放 `sem_string` 会再次 `data_label_advance` 并重复登记字节，ival
+// 与 parse 必然不同（重复数据字节也会破坏后端快照）。
+fn full_string(id int, out *support.Res) int {
+    let old support.Res
+    ast.ast_expr_semantics_to(id, &old)
+    support.res_reset(out, table.ty_ptr(types.TY_CHAR))
+    out.is_const = 1
+    out.ival = old.ival
+    out.fval_bits = old.fval_bits
+    return 0
+}
+
 // full_name：就绪的标量整型 const 引用（数组长度、常量初始化式里最常见）。
-// 语义与 sem_ident 的取值分支同源；只判定 `SYM_CONST` 且非地址常量——
-// 地址常量的常量值是本次登记的字面量标签号，重算会重新登记，编号不可比。
+// 语义与 sem_ident 的取值分支同源；地址常量（F_ADDR，字符串指针/导入聚合）
+// 重走 sem_ident 读符号表里已登记的数据标签，不重新登记，因此同样可比。
 fn full_name(id int, out *support.Res) int {
-    if (ast.ast_expr_sym_kind_of(id) != table.SYM_CONST) { return -2 }
-    if ((ast.ast_expr_sym_flags_of(id) & table.F_ADDR) != 0) { return -2 }
+    if (ast.ast_expr_sym_kind_of(id) != table.SYM_CONST) {
+        // 非 const 名字（变量/形参/函数名）：作用域已弹出，值不可重放，但
+        // 绑定快照 `sym_type_id` 仍在——足以判定**类型**（S4-2c 的判据）。
+        // 但快照的 sym_kind 并不覆盖所有绑定来源（实测 memory 模块里有既非
+        // SYM_CONST 快照、注解却已折叠常量的名字节点）；这类交给注解判定，
+        // 避免把「旧路径折过」的名字当成变量、把 is_const/is_lit 判成不一致。
+        let seen support.Res
+        ast.ast_expr_semantics_to(id, &seen)
+        if (seen.is_const == 0) {
+            let snap int = ast.ast_expr_sym_type_of(id)
+            if (snap < 0) { return -2 }
+            support.res_reset(out, snap)
+            return 0
+        }
+    }
+    // 绑定身份按**节点记录**重放：parse 写下的 `sym` 就是这一次绑定的身份，
+    // 与当前作用域无关（语句级 eval 在作用域内重放、影子门在作用域弹出后重放
+    // 取同一符号）。枚举成员 `E.x`、模块限定名 `m.f` 的节点区间从基名开始，
+    // 按文本重查会命中模块绑定或直接失败，只能走记录路径。
+    let rec int = ast.ast_expr_sym_of(id)
+    if (rec >= 0 && rec < table.ms().sym_n
+        && table.ms().syms[rec].kind == table.SYM_CONST
+        && table.ms().syms[rec].const_ready != 0) {
+        if (sem_ident_val(rec, out) != 0) { return -1 }
+        return 0
+    }
     let file int = -1
     let first int = ast.ast_expr_span_of(id, &file)
     if (first < 0 || first >= token.ctx().count) { return -2 }
     let t token.Tok = token.ctx().tokens[first]
     if (t.kind != token.TOK_IDENT) { return -2 }
-    // 名字要能重新解析到**同一个**符号才判定：局部 const/形参在影子门运行时
-    // 作用域已弹出，重新查名可能落到外层同名符号（实测 libs/string 即此类），
-    // 那已不是同一次绑定，比对无意义。ponytail: 绑定重放留到 S4-2c/d（绑定
-    // arena 就位后按 binding_row 精确重放），本片只判定全局 const 名字。
+    // 节点区间必须就是被引用符号的名字本身：模块限定名 `m.f` 的节点区间
+    // 从模块名开始（parse_primary 的通用包裹），拿它重查裸名会命中模块绑定
+    // 甚至报「未声明」，这类节点不判定。
+    let noff int = ast.ast_expr_sym_name_off_of(id)
+    let nlen int = ast.ast_expr_sym_name_len_of(id)
+    if (noff < 0 || nlen != t.len) { return -2 }
+    let nj int = 0
+    for nj < nlen {
+        if (support.pool_ctx().data[noff + nj] != support.src_ctx().data[t.start + nj]) { return -2 }
+        nj += 1
+    }
+    // 兜底：常量记录不可重放（未就绪/非 const）时按文本重查，且必须命中同一
+    // 绑定；否则不判定（避免把另一次绑定当成这次绑定）。
     let sym int = table.sym_lookup(t.start, t.len)
-    if (sym < 0 || sym != ast.ast_expr_sym_of(id)) { return -2 }
-    if (sem_ident(t.start, t.len, out) != 0) { return -1 }
+    if (sym < 0 || sym != rec) { return -2 }
+    if (sem_ident_val(sym, out) != 0) { return -1 }
     return 0
 }
 
@@ -198,6 +678,14 @@ fn full_unary(id int, op int, out *support.Res) int {
     let st int = full_expr(child, out)
     if (st != 0) { return st }
     if (table.ty_is_integer(out.type_id) == 0) { return -2 }
+    if (out.is_const == 0) {
+        // 非折叠路径：与 sem_unary 一致——BOOL 操作数提升为 int，其余保持
+        // 操作数类型（`!boolvar` 的结果类型同样是 int，不是 bool）。
+        if (table.ms().types[out.type_id].kind == types.TY_BOOL) {
+            support.res_reset(out, types.TY_I32)
+        }
+        return 0
+    }
     let unary_type int = out.type_id
     if (table.ms().types[unary_type].kind == types.TY_BOOL) { unary_type = types.TY_I32 }
     if (op == token.TK_MINUS && out.is_lit != 0 && out.ival >= 0) {
@@ -217,6 +705,44 @@ fn full_unary(id int, op int, out *support.Res) int {
     return 0
 }
 
+// full_len：`len(x)`——数组折叠为长度常量，切片是运行期 TY_I32。
+fn full_len(id int, out *support.Res) int {
+    let child int = ast.ast_expr_child_of(id, 0)
+    if (child < 0) { return -2 }
+    let st int = full_expr(child, out)
+    if (st != 0) { return st }
+    let k int = table.ms().types[out.type_id].kind
+    if (k == types.TY_ARRAY) {
+        support.sem_res_const(out, types.TY_I32, table.ms().types[out.type_id].len.to_type(i64))
+        return 0
+    }
+    if (k == types.TY_SLICE) {
+        support.res_reset(out, types.TY_I32)
+        return 0
+    }
+    return -2
+}
+
+// full_ref_unary：`&x` / `*p`——结果类型分别是操作数指针/指针元素类型。
+// 常量形态（地址常量）依赖登记身份，本片不判定。
+fn full_ref_unary(id int, op int, out *support.Res) int {
+    let child int = ast.ast_expr_child_of(id, 0)
+    if (child < 0) { return -2 }
+    let st int = full_expr(child, out)
+    if (st != 0) { return st }
+    let old support.Res
+    ast.ast_expr_semantics_to(id, &old)
+    if (old.is_const != 0) { return -2 }
+    if (op == token.TK_AMP) {
+        support.res_reset(out, table.ty_ptr(out.type_id))
+        return 0
+    }
+    if (table.ms().types[out.type_id].kind != types.TY_PTR) { return -2 }
+    let elem int = table.ms().types[out.type_id].elem
+    support.res_reset(out, elem)
+    return 0
+}
+
 // full_binary：二元常量折叠，复用 const_eval 的折叠内核（字面量适配 +
 // 提升类型 + 比较结果 BOOL 与 sem_binop 折叠分支同一套语义）。
 fn full_binary(id int, op int, out *support.Res) int {
@@ -226,7 +752,7 @@ fn full_binary(id int, op int, out *support.Res) int {
         || op == token.TK_PIPE || op == token.TK_CARET || op == token.TK_LSHIFT
         || op == token.TK_RSHIFT || op == token.TK_EQEQ || op == token.TK_NEQ
         || op == token.TK_LT || op == token.TK_LEQ || op == token.TK_GT
-        || op == token.TK_GEQ) { set = 1 }
+        || op == token.TK_GEQ || op == token.TK_ANDAND || op == token.TK_OROR) { set = 1 }
     if (set == 0) { return -2 }
     let left int = ast.ast_expr_child_of(id, 0)
     let right int = ast.ast_expr_child_of(id, 1)
@@ -236,7 +762,69 @@ fn full_binary(id int, op int, out *support.Res) int {
     if (st != 0) { return st }
     let st2 int = full_expr(right, &rhs)
     if (st2 != 0) { return st2 }
-    if (out.is_const == 0 || rhs.is_const == 0) { return -2 }
+    // 逻辑与/或：运行期结果恒为 BOOL（非折叠）；折叠时按两侧真值短路求值。
+    if (op == token.TK_ANDAND || op == token.TK_OROR) {
+        let oldl support.Res
+        ast.ast_expr_semantics_to(id, &oldl)
+        if (oldl.is_const == 0) {
+            // 运行期：parse 复用 res 解析右支，sem_shortcircuit_end 只清 is_const，
+            // 结果整体沿用右操作数（`!boolvar` 是 int，故结果也可能是 int）。
+            support.res_copy(out, &rhs)
+            out.is_const = 0
+            return 0
+        }
+        if (out.is_const == 0 || rhs.is_const == 0) { return -2 }
+        let lv int = (out.ival != 0).to_type(int)
+        let rv int = (rhs.ival != 0).to_type(int)
+        let v int = 0
+        if (op == token.TK_ANDAND) { v = (lv != 0 && rv != 0).to_type(int) }
+        else { v = (lv != 0 || rv != 0).to_type(int) }
+        support.sem_res_const(out, types.TY_BOOL, v.to_type(i64))
+        return 0
+    }
+    // 旧路径是否折叠过由注解 `is_const` 决定（重算时无法再看到 parse 的
+    // `c_fold` 上下文）：
+    // - 算术在运行期走 `sem_res_reset`，is_const 必为 0；为 1 只可能折过。
+    // - 比较在运行期也会写 `sem_res_const(BOOL, 0)`（注解 is_const=1），
+    //   所以先算折叠候选值，注解的 ival 与之一致才算折过，否则走运行期。
+    // 不按「操作数是否常量」决定：函数体里的 `1 << 63` 操作数都是字面量，
+    // 但旧路径在运行期求值（折叠会误报编译期溢出）。
+    let old support.Res
+    ast.ast_expr_semantics_to(id, &old)
+    let is_cmp int = (op == token.TK_EQEQ || op == token.TK_NEQ || op == token.TK_LT
+        || op == token.TK_LEQ || op == token.TK_GT || op == token.TK_GEQ).to_type(int)
+    let runtime int = 0
+    if (out.is_const == 0 || rhs.is_const == 0) {
+        runtime = 1
+    } else if (old.is_const == 0) {
+        runtime = 1
+    } else if (is_cmp != 0) {
+        let cand support.Res
+        support.res_copy(&cand, out)
+        let rcopy support.Res
+        support.res_copy(&rcopy, &rhs)
+        let savedp int = token.ctx().pos
+        let filep int = -1
+        let afterp int = ast.ast_expr_after_of(id)
+        ast.ast_expr_span_of(id, &filep)
+        if (afterp > 0 && afterp <= token.ctx().count) { token.ctx().pos = afterp - 1 }
+        let fst int = len_fold_binop(op, &cand, &rcopy, token.ctx().pos)
+        token.ctx().pos = savedp
+        if (fst != 0) { return -1 }
+        if (cand.ival == old.ival) {
+            support.res_copy(out, &cand)
+            return 0
+        }
+        runtime = 1
+    }
+    if (runtime != 0) {
+        // 运行期二元：直接复用 `sem_binop` 本体。字面量适配、整数/无符号提升、
+        // 指针分支与比较结果 BOOL（含 `sem_res_const(BOOL, 0)` 这一注解事实）
+        // 全部由它决定。旧路径在同一节点上也是 `c_fold = 0` 的这一次调用。
+        if (support.fc().c_fold != 0) { return -2 }
+        if (sem_binop(op, out, &rhs) != 0) { return -1 }
+        return 0
+    }
     // 折叠点诊断位置沿用节点右端：内核报错时指向该二元表达式的结束 token。
     let saved int = token.ctx().pos
     let file int = -1
@@ -252,7 +840,7 @@ fn full_binary(id int, op int, out *support.Res) int {
 // full_fail_report：影子门不一致报告——输出首个不一致节点的编号、差异位、
 // 种类与运算符，并让构建失败。返回 -1（供驱动层直接 return）。
 pub fn full_fail_report() int {
-    let buf [192]u8
+    let buf [384]u8
     let n int = 0
     n = support.append_str(buf, 0, "S4-2 影子门：表达式语义重算与 parse 注解不一致 节点=")
     n = support.append_int(buf, n, full_bad_id)
@@ -262,6 +850,29 @@ pub fn full_fail_report() int {
     n = support.append_int(buf, n, ast.ast_expr_kind(full_bad_id))
     n = support.append_str(buf, n, " op=")
     n = support.append_int(buf, n, ast.ast_expr_op(full_bad_id))
+    n = support.append_str(buf, n, " newt=")
+    n = support.append_int(buf, n, full_bad_new_type)
+    n = support.append_str(buf, n, " oldt=")
+    n = support.append_int(buf, n, full_bad_old_type)
+    let ffile int = -1
+    let tfirst int = ast.ast_expr_span_of(full_bad_id, &ffile)
+    let tafter int = ast.ast_expr_after_of(full_bad_id)
+    let tx [48]u8
+    let tj int = 0
+    if (tfirst >= 0 && tfirst < token.ctx().count && tafter > tfirst
+        && tafter <= token.ctx().count) {
+        let tstart int = token.ctx().tokens[tfirst].start
+        let tend int = token.ctx().tokens[tafter - 1].start + token.ctx().tokens[tafter - 1].len
+        let ti int = tstart
+        for ti < tend && tj < 40 {
+            tx[tj] = support.src_ctx().data[ti]
+            tj += 1
+            ti += 1
+        }
+    }
+    tx[tj] = 0
+    n = support.append_str(buf, n, " text=")
+    n = support.append_str(buf, n, (&tx[0]).to_type(*char))
     let mo int = support.tml_intern_str(buf, 0, n)
     if (mo < 0) { return -1 }
     return errors.fail(support.np_cstr(mo))

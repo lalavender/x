@@ -3,6 +3,7 @@ import errors
 import support
 import backend
 import proj
+import libs.os
 
 // DarwinLinkConfig：保存一次编译进程使用的 Darwin SDK 与部署身份；字符串由本模块持有。
 struct DarwinLinkConfig {
@@ -283,6 +284,215 @@ fn cmd_darwin_bundled_sdk(root *u8, length *int) int {
     return -1
 }
 
+// cmd_darwin_tbd_has_tag：TAPI 文本里是否出现指定目标标签。
+// 分块读取（64 KiB）做字节级子串匹配，不整体载入大 tbd；文件缺失按「不含」处理。
+// 跨块命中靠保留末尾 tag_len-1 字节实现。
+fn cmd_darwin_tbd_has_tag(path *char, tag *char) int {
+    if (path == 0 || tag == 0) { return 0 }
+    let tag_len int = strlen(tag).to_type(int)
+    if (tag_len <= 0 || tag_len >= 256) { return 0 }
+    let fd int = open(path, 0)
+    if (fd < 0) { return 0 }
+    let buf [65536]u8
+    let keep int = tag_len - 1
+    let carried int = 0
+    let found int = 0
+    for 1 {
+        let got i64 = read(fd, (&buf[carried]).to_type(*u8),
+            (65536 - carried).to_type(u64))
+        if (got <= 0) { break }
+        let total int = carried + got.to_type(int)
+        let i int = 0
+        for i + tag_len <= total {
+            let j int = 0
+            for j < tag_len && buf[i + j] == tag[j].to_type(u8) { j += 1 }
+            if (j == tag_len) { found = 1; break }
+            i += 1
+        }
+        if (found != 0) { break }
+        let start int = total > keep ? total - keep : 0
+        let k int = 0
+        for start + k < total {
+            buf[k] = buf[start + k]
+            k += 1
+        }
+        carried = total - start
+    }
+    close(fd)
+    return found
+}
+
+// cmd_darwin_sdk_incompatible：SDK 的 libSystem/libc++ TAPI 是否带 `arm64e.x1`。
+// 固定 LLVM 21.1.8 的 TextAPI 解析器不认识该目标（上游在 LLVM 23.1.3 起支持），
+// 链接会先报 malformed file，再把 libSystem 符号当成未定义。这里在选 SDK 时
+// 提前识别，避免只看到无关的 `undefined symbol`。
+fn cmd_darwin_sdk_incompatible(root *char) int {
+    if (root == 0) { return 0 }
+    let names [2]*char
+    names[0] = "usr/lib/libSystem.tbd"
+    names[1] = "usr/lib/libc++.tbd"
+    let i int = 0
+    for i < 2 {
+        let path [4200]u8
+        let n int = support.append_str(&path[0], 0, root)
+        if (n <= 0 || n >= 4100) { return 0 }
+        n = support.append_byte(&path[0], n, '/')
+        n = support.append_str(&path[0], n, names[i])
+        path[n] = 0
+        if (cmd_darwin_tbd_has_tag(support.arr_cstr(&path[0]), "arm64e.x1") != 0) {
+            return 1
+        }
+        i += 1
+    }
+    return 0
+}
+
+// cmd_darwin_sdk_name_parts：解析 `MacOSX<major>[.<minor>].sdk` 目录名里的版本。
+// 命中返回 0 并写 parts（缺省 minor/patch 记 0）；其它名字（含无版本的
+// `MacOSX.sdk` 软链）返回 -1。
+fn cmd_darwin_sdk_name_parts(name *u8, name_len int, parts *int) int {
+    if (name == 0 || parts == 0 || name_len <= 0) { return -1 }
+    let prefix *char = "MacOSX"
+    let i int = 0
+    for prefix[i] != 0 {
+        if (i >= name_len || name[i] != prefix[i].to_type(u8)) { return -1 }
+        i += 1
+    }
+    let major int = 0
+    let minor int = 0
+    let digits int = 0
+    for i < name_len && name[i] >= '0' && name[i] <= '9' {
+        major = major * 10 + (name[i] - '0').to_type(int)
+        i += 1
+        digits += 1
+    }
+    if (digits == 0 || major <= 0) { return -1 }
+    // 只有点号后面紧跟数字才当 minor；否则这个点是 `.sdk` 后缀的分隔。
+    if (i < name_len && name[i] == '.' && i + 1 < name_len
+        && name[i + 1] >= '0' && name[i + 1] <= '9') {
+        i += 1
+        let minor_digits int = 0
+        for i < name_len && name[i] >= '0' && name[i] <= '9' {
+            minor = minor * 10 + (name[i] - '0').to_type(int)
+            i += 1
+            minor_digits += 1
+        }
+        if (minor_digits == 0) { return -1 }
+    }
+    let suffix *char = ".sdk"
+    let j int = 0
+    for 1 {
+        if (suffix[j] == 0) { break }
+        if (i >= name_len || name[i] != suffix[j].to_type(u8)) { return -1 }
+        i += 1
+        j += 1
+    }
+    if (i != name_len) { return -1 }
+    parts[0] = major
+    parts[1] = minor
+    parts[2] = 0
+    return 0
+}
+
+// cmd_darwin_sdk_scan_dir：在 dir 下找版本最高且可用的兼容 SDK，结果写 best。
+// 兼容判定：有 SDKSettings.json 与 libSystem.tbd、版本不低于 min_os、
+// TAPI 不含 `arm64e.x1`。best_len 作为「已有最优」的标记，跨多次调用保留。
+fn cmd_darwin_sdk_scan_dir(dir *char, best *u8, best_len *int, best_parts *int) void {
+    if (dir == 0 || best == 0 || best_len == 0 || best_parts == 0) { return }
+    let buffer [16384]u8
+    let opened os.DirReaderResult = os.open_dir(dir, buffer[0..16384])
+    if (opened.reader.active == 0) { return }
+    for 1 {
+        let result os.DirEntryResult = os.next_entry(&opened.reader)
+        if (result.status != os.dir_entry_ok) { break }
+        let name_len int = result.entry.name_len.to_type(int)
+        let parts [3]int
+        if (cmd_darwin_sdk_name_parts(result.entry.name, name_len, &parts[0]) != 0) {
+            continue
+        }
+        if (cmd_darwin_version_compare(&cmd_darwin_link_config.min_parts[0],
+                &parts[0]) > 0) {
+            continue
+        }
+        if (best_len[0] > 0
+            && cmd_darwin_version_compare(&best_parts[0], &parts[0]) >= 0) {
+            continue
+        }
+        let candidate [4096]u8
+        let n int = support.append_str(&candidate[0], 0, dir)
+        if (n <= 0 || n + name_len >= 4000) { continue }
+        if (candidate[n - 1] != '/') {
+            n = support.append_byte(&candidate[0], n, '/')
+        }
+        let i int = 0
+        for i < name_len {
+            candidate[n] = result.entry.name[i]
+            n += 1
+            i += 1
+        }
+        candidate[n] = 0
+        if (cmd_darwin_bundle_ok(&candidate[0]) == 0) { continue }
+        if (cmd_darwin_sdk_incompatible(support.arr_cstr(&candidate[0])) != 0) {
+            continue
+        }
+        let version [32]u8
+        let identity [32]u8
+        let parsed [3]int
+        if (cmd_darwin_sdk_settings(support.arr_cstr(&candidate[0]), &version[0],
+                &identity[0], &parsed[0]) != 0) {
+            continue
+        }
+        i = 0
+        for i <= n { best[i] = candidate[i]; i += 1 }
+        best_len[0] = n
+        best_parts[0] = parsed[0]
+        best_parts[1] = parsed[1]
+        best_parts[2] = parsed[2]
+    }
+}
+
+// cmd_darwin_sdk_find_compatible：在 xcode-select 指向的 Xcode 与 CLT 两处
+// 目录里挑兼容 SDK；返回 0 命中、-1 没有可用候选。
+fn cmd_darwin_sdk_find_compatible(best *u8, best_len *int, best_parts *int) int {
+    if (best == 0 || best_len == 0 || best_parts == 0) { return -1 }
+    best_len[0] = 0
+    if (cmd_mkdirs("tmp/llvm-migration/darwin-sdk") != 0) { return -1 }
+    let capture [4096]u8
+    let path [256]u8
+    let n int = support.append_str(&path[0], 0, "tmp/llvm-migration/darwin-sdk/xcode-select-")
+    n = support.append_int(&path[0], n, getpid())
+    n = support.append_str(&path[0], n, ".txt")
+    path[n] = 0
+    let args [3]*char
+    args[0] = "xcode-select"
+    args[1] = "-p"
+    args[2] = 0.to_type(*char)
+    let length int = cmd_process_capture(&args[0], support.arr_cstr(path),
+        &capture[0], 4096)
+    if (length > 0 && length < 3900) {
+        let developer [4096]u8
+        let dn int = 0
+        for dn < length {
+            if (capture[dn] == '\n' || capture[dn] == '\r') { break }
+            developer[dn] = capture[dn]
+            dn += 1
+        }
+        developer[dn] = 0
+        if (dn > 0) {
+            let sdk_dir [4200]u8
+            let sn int = support.append_str(&sdk_dir[0], 0, support.arr_cstr(&developer[0]))
+            sn = support.append_str(&sdk_dir[0], sn,
+                "/Platforms/MacOSX.platform/Developer/SDKs")
+            sdk_dir[sn] = 0
+            cmd_darwin_sdk_scan_dir(support.arr_cstr(&sdk_dir[0]), best, best_len,
+                best_parts)
+        }
+    }
+    cmd_darwin_sdk_scan_dir("/Library/Developer/CommandLineTools/SDKs", best,
+        best_len, best_parts)
+    return best_len[0] > 0 ? 0 : -1
+}
+
 // cmd_darwin_sdk_validate_explicit：校验显式 SDKROOT，但不查找/要求 SDK。
 // 显式值代表用户意图，拼错时即使只 emit asm/object 也应立即失败；未设置时
 // emit-only 路径不因缺少 SDK 而失败。
@@ -369,6 +579,22 @@ fn cmd_darwin_link_configure() int {
         } else {
             return errors.fail("交叉编译需要显式 SDKROOT 或编译器自带 darwin-sdk")
         }
+    }
+
+    // C3：SDK 27 的 libSystem/libc++ TAPI 带 `arm64e.x1`，固定 lld 21.1.8
+    // 解析不了（上游 LLVM 23.1.3 起支持）。选 SDK 时提前识别并换用兼容 SDK：
+    // 显式 SDKROOT 也回退，但要给出警告，避免用户以为用的是自己指定的 SDK。
+    if (cmd_darwin_sdk_incompatible((&root[0]).to_type(*char)) != 0) {
+        let best [4096]u8
+        let best_length int = 0
+        let best_parts [3]int
+        if (cmd_darwin_sdk_find_compatible(&best[0], &best_length, &best_parts[0]) != 0) {
+            return errors.fail("所选 macOS SDK 含 arm64e.x1（SDK 27），固定 lld 21 无法解析；请把 SDKROOT 指向 26.x SDK，或使用编译器自带的 darwin-sdk")
+        }
+        errors.warn_lc(0, 0, "所选 macOS SDK 含 arm64e.x1，固定 lld 21 无法解析；已改用兼容的 26.x SDK")
+        let i int = 0
+        for i <= best_length { root[i] = best[i]; i += 1 }
+        root_length = best_length
     }
 
     let sdk_parts [3]int

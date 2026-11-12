@@ -1,6 +1,6 @@
 # yh 当前编译流程（`yh build` 参考）
 
-修改时间：2026-11-08
+修改时间：2026-11-11（刷新 §5.6 与 §11：S4-4 收官后的表达式语义路径）
 
 状态：**当前实现参考**，不是目标架构。
 基线：`llvm` 分支 0.0.12 + C0–C6 + GEN1–GEN4 + F4，19 个 yh 模块（`gen` 已于 2026-11-07 删除；`types` 于 2026-11-10 从 support 拆出），LLVM 唯一后端。
@@ -351,7 +351,10 @@ mb_iface_write_ready()  → .ready
 2. `ast.checked_check_cache_begin()`。
 3. 对每个文件：
    - `mb_pass2_file(..., 0)` → `parse.parse_source_fns()`；
-   - 解析函数体，同时调用 `check.sem_*`（原 `gen.sem_*`）做类型检查/符号绑定/常量折叠；
+   - 解析函数体：表达式节点由 `check` 的分层 eval 入口（`sem_eval_*`）求值并回填注解；
+     表达式与语句语义由 `check` 的分层 eval 入口计算（`full.yh`/`stmt_eval.yh`）；
+     声明/类型级仍直接调用 `check.sem_*`（原 `gen.sem_*`）做类型检查/符号绑定/
+     常量折叠；
    - 写 AST arena；
    - 命中 check 切片的函数跳过重解析。
 4. 未使用导入检查。
@@ -564,8 +567,8 @@ C4 起 `YH_CACHE` 指向全局 content store（默认平台缓存目录，`off` 
 
 | 边界 | 当前事实 | 调整时看这里 |
 | --- | --- | --- |
-| 前端阶段 | `parse` 边解析边做语义动作并写 AST | `parse_*`、`check.sem_*`（原 `gen.sem_*`）、`ast.ast_expr_set_semantics` |
-| `check` | 只读结构 verifier | `check/verify.yh`、`mb_emit_indexed_module` 的 verify 段 |
+| 前端阶段 | `parse` 边解析边做语义动作并写 AST；**表达式语义（S4-4）与语句语义（S4-2 语句侧）自 2026-11-11 由 `check` 的分层 eval 入口计算**（守卫 `表达式内联=0`、`parse_stmt` 直调内核=0） | `parse_*`、`check.sem_eval_*`（表达式 `full.yh` / 语句 `stmt_eval.yh`）、`check.sem_*`（声明/类型级）、`ast.ast_expr_finish_pending`/`set_semantics` |
+| `check` | 语义内核 + 表达式/语句驱动入口 + 影子门 + 结构复核（2026-11-11 S4-4/S4-2） | `check/api.yh`（`sem_*` 内核）、`check/eval.yh` 与 `check/stmt_eval.yh`（`sem_eval_*` 驱动入口）、`check/full.yh`（影子门重算）、`check/verify.yh`、`mb_emit_indexed_module` 的 verify 段 |
 | CT 展开 | 在 parse 文件子遍中完成 | `parse_comptime`、`parse_ct_layout`、`mb_pass2_file` mode 2–4 |
 | `gen` 耦合 | 已消除（2026-11-07 `gen` 删除）：token/类型/状态/基础设施/target 分散到 `support`/`check`；越界靠评审（`arch-check` 2026-11-09 已删除） | `support/*`、`check/symbols`、`check/ct_bind` |
 | 状态 | `TaskCtx` 字段 0；会话状态集中在 `support.session()`（`SessionCtx`），模块级可变 `let` 203 | `support/base.yh`、`state_init`、worker 初始化 |

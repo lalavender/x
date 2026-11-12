@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Darwin LLVM SDK 配置契约门；不下载、不解包，也不伪称 SDK 已构建。"""
 
+import importlib.util
 import json
 import runpy
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -149,6 +151,55 @@ def main():
         require(not verify_artifacts(record, prefix),
                 "缺失的静态归档没有让身份校验失败")
 
+    # 锁文件是共用清单：Windows 闭包段或纯格式变化不得让 Darwin 配方失效，
+    # 否则完好的 SDK 会被判过期、每次构建重编整棵 LLVM（实测约 30 分钟）。
+    # 这里用 importlib 拿模块对象而不是 runpy：runpy 返回 globals 副本，
+    # 改 MANIFEST 不影响函数看到的锁文件。
+    with tempfile.TemporaryDirectory(dir=WORK) as temporary:
+        spec = importlib.util.spec_from_file_location("llvm_darwin_sdk_recipe", SDK_TOOL)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        raw = (ROOT / "vendor/llvm/sdk.lock.json").read_bytes()
+        scratch_lock = Path(temporary) / "sdk.lock.json"
+        toolchain = {"clang": "clang", "clangxx": "clang++"}
+        sdk_root = Path(temporary) / "MacOSX.sdk"
+        sdk_root.mkdir()
+        (sdk_root / "SDKSettings.json").write_text(
+            json.dumps({"Version": "26.5", "CanonicalName": "macosx26.5"}), encoding="utf-8")
+        saved = module.MANIFEST
+        try:
+            module.MANIFEST = scratch_lock
+            record = {"build_configuration": json.loads(raw)["darwin_build"],
+                      "sdk_settings_sha256": digest(sdk_root / "SDKSettings.json"),
+                      "toolchain": toolchain}
+            scratch_lock.write_bytes(raw)
+            require(module.recipe_matches(record, sdk_root, toolchain), "基线配方未命中")
+
+            changed = json.loads(raw)
+            changed["windows_build"]["architecture"] = "ARM64"
+            scratch_lock.write_text(json.dumps(changed, indent=4), encoding="utf-8")
+            require(digest(scratch_lock) != digest(ROOT / "vendor/llvm/sdk.lock.json"),
+                    "Windows 段变体没有改变锁文件整文件摘要")
+            require(module.recipe_matches(record, sdk_root, toolchain),
+                    "锁文件 Windows 段/格式变化把 Darwin 配方判成过期")
+
+            require(not module.recipe_matches(dict(record, toolchain={"clang": "other"}),
+                                              sdk_root, toolchain),
+                    "工具链变化没有让配方失效")
+
+            changed = json.loads(raw)
+            changed["darwin_build"]["build_type"] = "Debug"
+            scratch_lock.write_text(json.dumps(changed), encoding="utf-8")
+            try:
+                module.recipe_matches(record, sdk_root, toolchain)
+            except RuntimeError:
+                pass
+            else:
+                raise RuntimeError("darwin_build 变成非 Release 时没有拒绝")
+        finally:
+            module.MANIFEST = saved
+
     lock = source_spec()
     require(lock["sha256"] ==
             "4633a23617fa31a3ea51242586ea7fb1da7140e426bd62fc164261fe036aa142",
@@ -163,7 +214,7 @@ def main():
     if actual_package.is_file():
         verify_archive(actual_package, lock)
     print("PASS Darwin LLVM SDK 配置门：宿主 1/1、部署版本 2/8、SDK/SDKROOT 通过、坏包拒绝、"
-          "产物改写校验 3/3")
+          "产物改写校验 3/3、配方身份 4/4")
 
 
 if __name__ == "__main__":

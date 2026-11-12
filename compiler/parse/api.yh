@@ -6,7 +6,6 @@ import table
 import token
 import check
 import lex
-import comptime
 import ast
 import ir
 import proj
@@ -146,7 +145,7 @@ pub fn iface_load(path *char, bind_off int, bind_len int) int {
             return -1
         }
         if ((table.ms().syms[si].flags & table.F_CABI) == 0
-            && check.sym_mangle(si, sfx_off, sfx_len) != 0) {
+            && table.sym_mangle(si, sfx_off, sfx_len) != 0) {
             return -1
         }
         table.ms().syms[si].flags |= table.F_EXTERN
@@ -163,7 +162,7 @@ pub fn iface_load(path *char, bind_off int, bind_len int) int {
         if (mod_ns_add(mi, table.ms().names[ti].name_off, table.ms().names[ti].name_len, -1, table.ms().names[ti].type_id) != 0) {
             return -1
         }
-        if (check.tname_mangle(ti, sfx_off, sfx_len) != 0) {
+        if (table.tname_mangle(ti, sfx_off, sfx_len) != 0) {
             return -1
         }
         ti += 1
@@ -245,9 +244,8 @@ pub fn iface_ct_load(path *char, mi int) int {
                 return -1
             }
             let body_sym int = table.sym_lookup_off(hidden_off, hidden_len)
-            if (body_sym < 0 || comptime.ct_find(body_sym) < 0
-                || table.ms().syms[body_sym].type_id
-                    != table.ms().syms[public_sym].type_id) {
+            if (check.sem_ct_body_ready(body_sym,
+                    table.ms().syms[public_sym].type_id) != 0) {
                 support.session().ct_iface_mode = old_ct_iface
                 return errors.fail_path("公开 CT 函数与 .s.ct 正文签名不匹配: ",
                     stable_path)
@@ -274,14 +272,8 @@ pub fn iface_ct_load(path *char, mi int) int {
 
 // parse_source_ct_layout_register：先登记当前文件全部请求，使跨文件依赖边有稳定目标。
 pub fn parse_source_ct_layout_register() int {
-    if (comptime.ct_layout_request_count() == 0) { return 0 }
-    let row int = 0
-    for row < comptime.ct_layout_request_count() {
-        if (comptime.ct_layout_expr_pending(row) != 0
-            && comptime.ct_layout_expr_file(row) == support.session().active_file
-            && comptime.ct_layout_expr_register(row) != 0) { return -1 }
-        row += 1
-    }
+    if (check.ct_layout_request_count() == 0) { return 0 }
+    if (check.ct_layout_register_rows(support.session().active_file) != 0) { return -1 }
     if (ast.store().file_indexed != 0) {
         let i int = 0
         for i < ast.store().file_decl_n {
@@ -310,7 +302,7 @@ pub fn parse_source_ct_layout_register() int {
 
 // parse_source_ct_layout_consts：只执行依赖已 READY 的布局常量请求。
 pub fn parse_source_ct_layout_consts() int {
-    if (comptime.ct_layout_request_count() == 0) { return 0 }
+    if (check.ct_layout_request_count() == 0) { return 0 }
     let saved_pos int = token.ctx().pos
     let saved_capture int = support.session().ast_capture
     support.session().ast_capture = 0
@@ -344,25 +336,25 @@ pub fn parse_source_ct_layout_consts() int {
 
 // parse_source_ct_layout_exprs：在所属文件上下文中执行已满足依赖的数组长度表达式。
 pub fn parse_source_ct_layout_exprs() int {
-    if (comptime.ct_layout_expr_pending_count() == 0) { return 0 }
+    if (check.ct_layout_expr_pending_count() == 0) { return 0 }
     let saved_pos int = token.ctx().pos
     let saved_capture int = support.session().ast_capture
     support.session().ast_capture = 0
     let row int = 0
-    for row < comptime.ct_layout_request_count() {
-        if (comptime.ct_layout_expr_pending(row) == 0
-            || comptime.ct_layout_expr_file(row) != support.session().active_file) {
+    for row < check.ct_layout_request_count() {
+        let first int = 0
+        let after int = 0
+        if (check.ct_layout_row_span(row, support.session().active_file,
+                &first, &after) == 0) {
             row += 1
             continue
         }
-        let first int = comptime.ct_layout_expr_first(row)
-        let after int = comptime.ct_layout_expr_after(row)
         if (first < 0 || after <= first || after > token.ctx().count) {
             support.session().ast_capture = saved_capture
             token.ctx().pos = saved_pos
             return errors.fail("内部错误：数组长度表达式 token 范围无效")
         }
-        if (comptime.ct_layout_expr_runnable(first, after) != 0) {
+        if (check.ct_layout_expr_runnable(first, after) != 0) {
             let result support.Res
             let status int = eval_token_range(first, after, &result)
             if (status != 0) {
@@ -376,7 +368,7 @@ pub fn parse_source_ct_layout_exprs() int {
                 return errors.err_lc(token.ctx().tokens[first].line,
                     token.ctx().tokens[first].col, "数组长度必须是编译期常量")
             }
-            if (comptime.ct_layout_expr_set_length(row, result.ival) != 0) {
+            if (check.ct_layout_set_length(row, result.ival) != 0) {
                 support.session().ast_capture = saved_capture
                 token.ctx().pos = saved_pos
                 return -1

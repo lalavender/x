@@ -1,7 +1,7 @@
 # yh 编译器模块职责（当前实现）
 
 基线：`llvm` 分支（0.0.12 + C0–C6 + GEN1–GEN4 + F4 + 模块归组），
-**20 个模块 / 179 个文件 / 63,445 行**（2026-11-11 实测，含 `types`/`table` 拆分）。
+**20 个模块 / 179 个文件 / 64,371 行**（2026-11-11 实测 `just code-stats`，含 `types`/`table` 拆分）。
 实测：2026-11-10（`just code-stats`；`arch-check` 已于 2026-11-09 删除，
 `cmdline` 已并入 `main`，`cache` 已下沉 `build/cache/`）；依赖边以
 [架构设计 §3.1](yh-架构设计.md) 为准。
@@ -47,13 +47,13 @@ L0  types  support  table  token  ir  cache  lex
 | **proj**（`model`/`table`/`path`/`art` 四文件） | 5 / 2,078 | support, token | 项目模型：`project.toml` 解析、模块/文件表、三层名字解析（本项目 → 标准库 → 依赖）、产物与 `[link]` 配置；**文件作用域** `FileScope`(`fs()`)：模块归属、导入表、已加载接口缓存与绑定名查找（2026-11-10 自 support 迁入，ADR-0024）。前端与构建层共用的数据层 |
 | **ast** | 6 / 1,339 | comptime, proj, support, token | 语法树 arena + 只读视图：声明索引、语句/表达式节点、函数上下文、绑定、捕获开关。**纯语法，不 import check**（check 依赖它） |
 | **comptime** | 15 / 6,076 | support, token | 编译期执行器：CT IR 模型与求值、布局图、静态数据、函数注册表、枚举/浮点、CT 诊断。语义事实经**零拷贝镜像** `ct_facts` 读（槽绑定，`check.ct_facts_sync` 填入），不 import check。F4 收尾后不再依赖 `proj`（文件表窄口改由 `parse` 传入） |
-| **check** | 18 / 9,239 | ast, cache, comptime, ir, proj, support, token, types | **语义中心**：①类型/符号表操作 `symbols.yh`（F2-K2 自 gen 迁入的语义动作）②语法→语义两遍（`sem_*`）③C ABI 分类 `abi_c`（含 `ABIValue/ABICursor/ABIArg/CABI_*`，ADR-0024）④受检快照 `CheckedModule`：捕获/校验/切片/键/视图 ⑤CT 镜像绑定点 `ct_bind` ⑥值内核诊断适配 `value_kernel.yh` ⑦受检前端阶段守卫 `front_stage.yh`（`front_checked_*`，ADR-0024） |
+| **check** | 21 / 9,852 | ast, cache, comptime, ir, proj, support, token, types | **语义中心**：①类型/符号表操作 `symbols.yh`（F2-K2 自 gen 迁入的语义动作）②语法→语义两遍（`sem_*` 内核）③**表达式/语句驱动入口**：`eval.yh`（表达式 `sem_eval_*`，自 `full.yh` 拆出）与 `stmt_eval.yh`（语句 `sem_eval_*`）；均含节点模式与仅算子模式（2026-11-11）④**影子门** `full.yh`（`YH_AST_FULL_CHECK`：从节点重算并与注解比对）⑤C ABI 分类 `abi_c`（含 `ABIValue/ABICursor/ABIArg/CABI_*`，ADR-0024）⑥受检快照 `CheckedModule`：捕获/校验/切片/键/视图 ⑦CT 镜像绑定点 `ct_bind` ⑧值内核诊断适配 `value_kernel.yh` ⑨受检前端阶段守卫 `front_stage.yh`（`front_checked_*`，ADR-0024） |
 
 ### L2/L3 前端装配与降低
 
 | 模块 | 规模 | 依赖 | 职责与关键入口 |
 | --- | --- | --- | --- |
-| **parse** | 13 / 7,585 | ast, check, comptime, ir, lex, proj, support, token | 语法分析：声明/语句/表达式/类型、comptime 语法、全局初始化、模块导入；**接口 `.s.i`/`.s.ct` 的发射与加载**也在这里。历史设计是「边解析边求值」——直接调用 `check` 的语义动作（277 处 `Res` 语义耦合，见 §5） |
+| **parse** | 14 / 7,760 | ast, check, errors, ir, lex, proj, support, table, token, types | 语法分析：声明/语句/表达式/类型、comptime 语法、全局初始化、模块导入；**接口 `.s.i`/`.s.ct` 的发射与加载**也在这里。表达式语义自 2026-11-11（S4-4）由 `check` 的分层 eval 入口计算——`check.` 引用 162 处（余下为语句/声明/类型级语义动作 + eval 入口调用，守卫 `front-coupling`） |
 | **builtin** | 1 / 181 | check, support | 语言内建：内建函数与内建类型登记、prelude 外部接口（含 Linux AArch64 `syscall6`） |
 | **lower** | 16 / 5,927 | ast, cache, check, ir, proj, support, token | `CheckedModule` → `IRModule`：SSA 降低（表达式/调用/控制流/for-in/全局与静态数据）。只吃快照，**不 import parse/build**。（四段计时随 clock 删除清理，ADR-0026；`CheckedLowerStats` 只剩缓存计数） |
 
@@ -85,7 +85,7 @@ L0  types  support  table  token  ir  cache  lex
 | comptime | support, token |
 | check | support, token, proj, ast, comptime, cache, ir |
 | builtin | support, check |
-| parse | support, token, lex, proj, ast, comptime, check, ir |
+| parse | support, token, lex, proj, ast, check, ir, errors, table, types |
 | lower | support, token, proj, ast, check, cache, ir |
 | backend | support, ir |
 | link | support, proj, backend, hash |
@@ -119,13 +119,17 @@ L0  types  support  table  token  ir  cache  lex
 
 | 债 | 现状 | 去向 |
 | --- | --- | --- |
-| `parse` 边解析边求值 | 内联读取 `Res` 语义字段 277 处（`type_id` 104、`ival` 71…），语法决策依赖语义结果 | 方案 `docs/01-finished/yh-F2-核收缩与parse纯语法化结论-2026-11-06.md` §3.5：改为「核收缩」，**已落地**（值内核迁 `support`，`gen` 已删除）；「纯语法 AST」确认属前端重构级，暂缓 |
+| `parse` 边解析边求值 | **表达式侧与语句侧均已完成（2026-11-11）**：表达式内联语义 0、`parse_stmt` 直调语句内核 0；`check.` 引用 162 处，均为声明/类型级语义动作与 eval 入口调用。`Res` 与现场事实仍参与部分语法决策（算子模式） | 方案 `docs/01-finished/yh-F2-核收缩与parse纯语法化结论-2026-11-06.md` §3.5「核收缩」**已落地**；表达式外置见 [S4-2 方案](../02-plan/yh-S4-2-表达式语义外置方案-2026-11-10.md) §4e-3、语句外置见 §4e-4。剩余：严格「只产语法节点」未达成（算子模式清单见方案 §4e-3/§4e-4） |
 | ~~`gen` 尚存 3 个 pub fn~~ | **已解决（2026-11-06）**：按「错误码 + 调用层格式化」拆开，值内核下沉 `support/value_kernel.yh`，`gen` 模块删除 | `docs/01-finished/finish-F4-comptime纯执行器-2026-11-06.md` 路线 A 已落地 |
 | `support` 内涵膨胀 | 2,740 行里有大量 GEN4/F2 下沉的状态与纯规则 | 有意为之：它是唯一无依赖模块，跨层共享数据的唯一无环落点；若将来拆分，必须保持「叶子」性质 |
 
 ## 6. 规模速查
 
 ### 6. 规模速查（2026-11-08 实测）
+> 2026-11-11 说明：本节表为 2026-11-08 快照，未随 S4-4 重排。最新实测（`just code-stats`，
+> 2026-11-11）：总计 **179 文件 / 64,371 行**；`check` 21 / 9,852、`parse` 14 / 7,760、
+> `support` 1 / 1,279（`support` 已缩为单文件，表中 28 文件为拆分前数值）。
+
 
 | 模块 | 文件 | 行数 | 模块 | 文件 | 行数 |
 | --- | ---: | ---: | --- | ---: | ---: |

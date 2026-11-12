@@ -1,0 +1,101 @@
+module link
+import support
+import proj
+
+// ============================================================================
+// darwin_sdk.test.yh —— C3：SDK 27（arm64e.x1）TAPI 识别
+//
+// 只由 `cd compiler && ../yh test link` 执行。验证：
+//   * `arm64e.x1` 能跨 64 KiB 分块被识别，缺失文件按兼容处理；
+//   * `MacOSX<major>[.<minor>].sdk` 目录名解析；
+//   * SDK 根目录只在 libSystem.tbd 含该标签时判为不兼容。
+// ============================================================================
+
+// dsdk_write：覆盖写一个测试文件；0 = 成功。
+fn dsdk_write(path *char, text *u8, count int) int {
+    let fd int = proj.open_out(path)
+    if (fd < 0) { return -1 }
+    let rc int = support.write_all(fd, text, count)
+    if (close(fd) != 0) { return -1 }
+    return rc
+}
+
+test "arm64e.x1：跨块命中与缺失文件" {
+    $assert(cmd_mkdirs("tmp") == 0, "创建测试目录")
+    let path [256]u8
+    let n int = support.append_str(&path[0], 0, "tmp/darwin_sdk_tag_")
+    n = support.append_int(&path[0], n, getpid())
+    path[n] = 0
+    let file *char = support.arr_cstr(&path[0])
+
+    let plain [128]u8
+    let pn int = support.append_str(&plain[0], 0, "targets: [ arm64-macos, arm64e-macos ]\n")
+    $assert(dsdk_write(file, &plain[0], pn) == 0, "写普通 TAPI")
+    $assert(cmd_darwin_tbd_has_tag(file, "arm64e.x1") == 0, "普通 TAPI 不应命中")
+
+    // 标签起点靠近 64 KiB 边界：第一次读只拿到前 3 字节，依赖尾部保留逻辑命中。
+    let total int = 65533
+    let data *u8 = malloc((total + 16).to_type(u64)).to_type(*u8)
+    $assert(data != 0, "分配跨界测试缓冲")
+    let i int = 0
+    for i < total {
+        data[i] = 'x'.to_type(u8)
+        i += 1
+    }
+    let tag *char = "arm64e.x1"
+    let j int = 0
+    for j < 10 {
+        data[total + j] = tag[j].to_type(u8)
+        j += 1
+    }
+    $assert(dsdk_write(file, data, total + 10) == 0, "写跨界 TAPI")
+    free(data.to_type(*void))
+    $assert(cmd_darwin_tbd_has_tag(file, "arm64e.x1") == 1, "跨界标签必须命中")
+
+    let missing [256]u8
+    let mn int = support.append_str(&missing[0], 0, "tmp/darwin_sdk_missing_")
+    mn = support.append_int(&missing[0], mn, getpid())
+    missing[mn] = 0
+    $assert(cmd_darwin_tbd_has_tag(support.arr_cstr(&missing[0]), "arm64e.x1") == 0,
+        "缺失文件按兼容处理")
+}
+
+test "SDK 目录名版本解析" {
+    let name [32]u8
+    let parts [3]int
+    let n int = support.append_str(&name[0], 0, "MacOSX26.5.sdk")
+    $assert(cmd_darwin_sdk_name_parts(&name[0], n, &parts[0]) == 0, "解析 MacOSX26.5.sdk")
+    $assert(parts[0] == 26 && parts[1] == 5, "版本应为 26.5")
+    n = support.append_str(&name[0], 0, "MacOSX27.sdk")
+    $assert(cmd_darwin_sdk_name_parts(&name[0], n, &parts[0]) == 0, "解析 MacOSX27.sdk")
+    $assert(parts[0] == 27 && parts[1] == 0, "缺省 minor 记 0")
+    n = support.append_str(&name[0], 0, "MacOSX.sdk")
+    $assert(cmd_darwin_sdk_name_parts(&name[0], n, &parts[0]) != 0, "无版本软链不解析")
+    n = support.append_str(&name[0], 0, "MacOSX26.5.1.sdk")
+    $assert(cmd_darwin_sdk_name_parts(&name[0], n, &parts[0]) != 0, "四段版本不解析")
+}
+
+test "SDK 兼容性：只看 libSystem.tbd 标签" {
+    let root [256]u8
+    let n int = support.append_str(&root[0], 0, "tmp/darwin_sdk_bad_")
+    n = support.append_int(&root[0], n, getpid())
+    root[n] = 0
+    let lib [400]u8
+    let ln int = support.append_str(&lib[0], 0, support.arr_cstr(&root[0]))
+    ln = support.append_str(&lib[0], ln, "/usr/lib")
+    lib[ln] = 0
+    $assert(cmd_mkdirs(support.arr_cstr(&lib[0])) == 0, "创建 SDK 目录")
+    let tbd [420]u8
+    ln = support.append_str(&tbd[0], 0, support.arr_cstr(&lib[0]))
+    ln = support.append_str(&tbd[0], ln, "/libSystem.tbd")
+    tbd[ln] = 0
+    let text [128]u8
+    let tn int = support.append_str(&text[0], 0, "targets: [ arm64e.x1-macos ]\n")
+    $assert(dsdk_write(support.arr_cstr(&tbd[0]), &text[0], tn) == 0, "写不兼容 libSystem")
+    $assert(cmd_darwin_sdk_incompatible(support.arr_cstr(&root[0])) == 1,
+        "含 arm64e.x1 应判不兼容")
+    tn = support.append_str(&text[0], 0, "targets: [ arm64-macos ]\n")
+    $assert(dsdk_write(support.arr_cstr(&tbd[0]), &text[0], tn) == 0, "写兼容 libSystem")
+    $assert(cmd_darwin_sdk_incompatible(support.arr_cstr(&root[0])) == 0,
+        "不含该标签应判兼容")
+}

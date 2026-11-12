@@ -1,0 +1,271 @@
+module check
+import support
+import table
+import comptime
+
+// ============================================================================
+// check/ct_gate.yh —— S4-3 parse→comptime 下沉门面
+//
+// parse 不再直接调用 comptime 引擎：布局队列查询、值依赖发现、枚举元信息与
+// comptime 签名/正文校验经本文件转发或吸收。comptime 保持叶子计算引擎
+// （只依赖 errors/support/table/token），parse 只经 check 调用。
+// ============================================================================
+
+// sem_comptime_sig：校验 @[comptime] 函数签名可被编译期 IR 解释——返回/形参
+// 类型须为受支持标量、定长数组、结构体/联合体或受支持元素切片（吸收自
+// parse_decl 的原两段检查）。返回 0 通过、-1 返回类型不支持、-2 形参不支持；
+// 诊断消息由调用方按返回值给出（两处消息不同）。
+pub fn sem_comptime_sig(ret int, ptypes *int, np int) int {
+    if (comptime.ct_ir_return_supported(ret) == 0) { return -1 }
+    let i int = 0
+    for i < np {
+        if (comptime.ct_ir_param_supported(ptypes[i]) == 0) { return -2 }
+        i += 1
+    }
+    return 0
+}
+
+// sem_ct_body_ready：公开编译期函数须有匹配的 .s.ct 正文——正文符号已登记
+// （ct_find 命中）且与公开签名同型。返回 0 匹配、-1 正文缺失/未登记、
+// -2 签名不匹配（吸收自 iface 校验与 $module.fn 解析两处）。
+pub fn sem_ct_body_ready(sym int, public_type int) int {
+    if (sym < 0 || comptime.ct_find(sym) < 0) { return -1 }
+    if (table.ms().syms[sym].type_id != public_type) { return -2 }
+    return 0
+}
+
+// —— 布局队列（簇2：骨架留 parse，查询经此转发） ——
+
+// ct_layout_request_count：布局请求总行数（含已处理行）。
+pub fn ct_layout_request_count() int {
+    return comptime.ct_layout_request_count()
+}
+
+// ct_layout_expr_pending_count：待求值的数组长度表达式行数。
+pub fn ct_layout_expr_pending_count() int {
+    return comptime.ct_layout_expr_pending_count()
+}
+
+// ct_layout_register_rows：为指定文件登记全部待处理布局请求；先整文件登记
+// 使跨文件依赖边有稳定目标。返回非零表示登记失败。
+pub fn ct_layout_register_rows(file int) int {
+    let row int = 0
+    for row < comptime.ct_layout_request_count() {
+        if (comptime.ct_layout_expr_pending(row) != 0
+            && comptime.ct_layout_expr_file(row) == file
+            && comptime.ct_layout_expr_register(row) != 0) { return -1 }
+        row += 1
+    }
+    return 0
+}
+
+// ct_layout_row_span：取某行在指定文件中的待求值 token 区间。返回 1 有效并
+// 写出 first/after；0 表示该行不属于该文件或已处理完毕。
+pub fn ct_layout_row_span(row int, file int, first *int, after *int) int {
+    if (comptime.ct_layout_expr_pending(row) == 0
+        || comptime.ct_layout_expr_file(row) != file) { return 0 }
+    first[0] = comptime.ct_layout_expr_first(row)
+    after[0] = comptime.ct_layout_expr_after(row)
+    return 1
+}
+
+// ct_layout_expr_runnable：token 区间内的数组长度/初始化器表达式依赖是否已就绪。
+pub fn ct_layout_expr_runnable(first int, after int) int {
+    return comptime.ct_layout_expr_runnable(first, after)
+}
+
+// ct_layout_set_length：把求出的数组长度回填到布局请求行。
+pub fn ct_layout_set_length(row int, length i64) int {
+    return comptime.ct_layout_expr_set_length(row, length)
+}
+
+// —— 值依赖发现（簇2：判定在 check，token 扫描留 parse） ——
+
+// ct_layout_value_runnable / ct_layout_value_requested：布局常量求值就绪与
+// 已登记查询。
+pub fn ct_layout_value_runnable(sym int) int {
+    return comptime.ct_value_request_runnable(sym)
+}
+
+pub fn ct_layout_value_requested(sym int) int {
+    return comptime.ct_value_requested(sym)
+}
+
+// ct_layout_const_request：按符号定义位置登记布局常量求值请求。
+pub fn ct_layout_const_request(sym int) int {
+    return comptime.ct_value_request_add(sym,
+        table.ms().syms[sym].def_line, table.ms().syms[sym].def_col)
+}
+
+// ct_layout_const_dependency：登记初始化器中的未就绪 const 边；声明在 owner
+// 之前的依赖同样要进布局期求值（`const N int = M + 1;`），前向引用保持
+// 既有诊断。返回非零表示登记失败。
+pub fn ct_layout_const_dependency(owner int, dep int) int {
+    if (comptime.ct_value_dependency_add(owner, dep) != 0) { return -1 }
+    if (sym_declared_before(dep, table.ms().syms[owner].def_line,
+            table.ms().syms[owner].def_col) != 0
+        && comptime.ct_value_request_add(dep, table.ms().syms[dep].def_line,
+            table.ms().syms[dep].def_col) != 0) { return -1 }
+    return 0
+}
+
+// ct_layout_fn_dependency：登记初始化器中 `$fn` 指向的编译期函数依赖边。
+pub fn ct_layout_fn_dependency(owner int, fn_sym int) int {
+    return comptime.ct_value_function_dependency_add(owner, fn_sym)
+}
+
+// —— 枚举元信息（簇2：$for E.values 展开源） ——
+
+// —— 枚举元信息（簇2：$for E.values 展开源） ——
+
+// ct_enum_member_count / ct_enum_member_at：枚举成员总数与按声明序取成员符号。
+pub fn ct_enum_member_count(tid int) int {
+    return comptime.ct_enum_member_count(tid)
+}
+
+pub fn ct_enum_member_at(tid int, ordinal int) int {
+    return comptime.ct_enum_member_at(tid, ordinal)
+}
+
+// —— 展开簿记（簇1：$if/$for 骨架留 parse，控制/边界/计费/捕获经此转发） ——
+
+// ct_expand_control_enter/leave：一层编译期结构控制的深度守卫（上限 32）。
+pub fn ct_expand_control_enter() int {
+    return comptime.ct_enter_control()
+}
+
+pub fn ct_expand_control_leave() void {
+    comptime.ct_leave_control()
+}
+
+// ct_expand_for_begin/end：进入/退出一层区间展开边界（记录运行期循环深度）。
+pub fn ct_expand_for_begin(loop_depth int) int {
+    return comptime.ct_for_boundary_enter(loop_depth)
+}
+
+pub fn ct_expand_for_end() void {
+    comptime.ct_for_boundary_leave()
+}
+
+// ct_expand_iter：一轮展开的语法规模计费 + 边界值记录（原 charge_expansion
+// 与 for_boundary_value 的成对调用）。
+pub fn ct_expand_iter(body_token_count int, value i64) int {
+    if (comptime.ct_charge_expansion(body_token_count) != 0) { return -1 }
+    return comptime.ct_for_boundary_value(value)
+}
+
+// ct_expand_iter_ast：按逻辑实例数批量计入展开 AST 预算。
+pub fn ct_expand_iter_ast(count int) int {
+    return comptime.ct_charge_expansion_ast_nodes(count)
+}
+
+// ct_expand_capture_enter/leave：展开体 AST 捕获深度。
+pub fn ct_expand_capture_enter() void {
+    comptime.ct_expansion_capture_enter()
+}
+
+pub fn ct_expand_capture_leave() void {
+    comptime.ct_expansion_capture_leave()
+}
+
+// —— 全局聚合建模（簇3：逐元素填位留在 parse，模型对象操作经此转发） ——
+
+// ct_agg_modelable：类型能否建编译期聚合模型（数组/结构体可达标量）。
+pub fn ct_agg_modelable(type_id int) int {
+    return comptime.ct_global_agg_modelable(type_id, 0)
+}
+
+// ct_agg_new：按元素类型与个数建聚合模型对象，失败返回 0。
+pub fn ct_agg_new(elem_type int, count int) i64 {
+    return comptime.ct_global_agg_new(elem_type, count)
+}
+
+// ct_agg_set / ct_agg_set_obj：按下标填元素值或子对象。
+pub fn ct_agg_set(obj i64, index int, type_id int, value i64) int {
+    return comptime.ct_global_agg_set(obj, index, type_id, value)
+}
+
+pub fn ct_agg_set_obj(obj i64, index int, type_id int, child i64) int {
+    return comptime.ct_global_agg_set_obj(obj, index, type_id, child)
+}
+
+// ct_agg_register：把建好的模型挂到全局符号上，供编译期读字段/下标。
+pub fn ct_agg_register(sym_id int, obj i64) int {
+    return comptime.ct_global_agg_register(sym_id, obj)
+}
+
+// ct_agg_emit_global：把 CT 调用得到的顶层聚合结果发射到全局数据并与符号绑定。
+pub fn ct_agg_emit_global(sym_id int, type_id int, value i64, is_lit int,
+    lit_big int) int {
+    let ct_value comptime.CtValue
+    ct_value.type_id = type_id
+    ct_value.value = value
+    ct_value.is_lit = is_lit
+    ct_value.lit_big = lit_big
+    return comptime.ct_ir_data_emit_global(sym_id, type_id, &ct_value)
+}
+
+// ct_pub_agg_fn_add：登记 pub 聚合常量的 $ 调用目标（闭包可达种子）。
+pub fn ct_pub_agg_fn_add(sym_id int) int {
+    return comptime.ct_pub_agg_fn_add(sym_id)
+}
+
+// ct_is_prepared：编译期函数是否已捕获 typed IR。
+pub fn ct_is_prepared(sym_id int) int {
+    return comptime.ct_is_prepared(sym_id)
+}
+
+// ct_register：登记编译期函数签名与正文副本（names/name_lens/types 为并行数组）。
+pub fn ct_register(sym_id int, names *int, name_lens *int, types *int,
+    param_n int, ret_type int, body_first int, body_after int,
+    locs_path *char, locs_len int) int {
+    return comptime.ct_register(sym_id, names, name_lens, types,
+        param_n, ret_type, body_first, body_after, locs_path, locs_len)
+}
+
+// —— $-调用求值（簇2/3 余件，S4-4 eval 同层的引擎入口） ——
+
+// ct_fn_found：编译期函数是否已登记正文。
+pub fn ct_fn_found(sym_id int) int {
+    return comptime.ct_find(sym_id)
+}
+
+// ct_global_agg_lookup：按全局符号取已登记的编译期聚合模型。
+pub fn ct_global_agg_lookup(sym_id int) i64 {
+    return comptime.ct_global_agg_lookup(sym_id)
+}
+
+// ct_pool_elem_of：指针类型的池元素类型。
+pub fn ct_pool_elem_of(type_id int) int {
+    return comptime.ct_pool_elem_of(type_id)
+}
+
+// ct_pool_register_src：把源码区间登记为实参池对象的元素。
+pub fn ct_pool_register_src(start int, slen int, elem int) i64 {
+    return comptime.ct_pool_register_src(start, slen, elem)
+}
+
+// ct_call：执行一次编译期函数调用（实参数组经 support.Res）。
+pub fn ct_call(sym_id int, args *support.Res, arg_n int, out *support.Res) int {
+    return comptime.ct_call(sym_id, args, arg_n, out)
+}
+
+// ct_arg_pool_agg：把实参数组登记成编译期聚合对象（数组/切片/结构体实参）。
+pub fn ct_arg_pool_agg(elem_type int, vals *i64, tys *int, n int) i64 {
+    return comptime.ct_arg_pool_agg(elem_type, vals, tys, n)
+}
+
+// ct_target_symbol：解析 `$target` 平台谓词并给出结果。
+pub fn ct_target_symbol(start int, n int, out *support.Res) int {
+    return comptime.ct_target_symbol(start, n, out)
+}
+
+// ct_struct_layout_pending / ct_struct_layout_defer：结构布局是否因编译期
+// 依赖延迟，以及按（行,列）登记延迟请求。
+pub fn ct_struct_layout_pending(type_id int) int {
+    return comptime.ct_layout_struct_pending(type_id)
+}
+
+pub fn ct_struct_layout_defer(type_id int, is_union int, line int, col int) int {
+    return comptime.ct_layout_defer_struct(type_id, is_union, line, col)
+}

@@ -40,6 +40,33 @@ struct Packet {
     tag int;
 }
 
+struct Wrap {
+    p Packet;
+    n int;
+}
+
+fn sum4(v [4]int) int {
+    return v[0] + v[1] + v[2] + v[3]
+}
+
+fn pkt_tag(p Packet) int {
+    return p.tag
+}
+// take_ptr / sum_pack：调用 ABI 的两条特殊路径（数组实参按指针形参退化、
+// 类型化变参打包），eval 侧以 sem_call* 本体重放（方案 §4e 第 2 步）。
+fn take_ptr(p *int) int {
+    return *p
+}
+
+fn sum_pack(base int, rest ... int) int {
+    let total int = base
+    for value in rest {
+        total += value
+    }
+    return total
+}
+
+
 fn main() int {
     let a [SCALED]int = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     let k [NAMED]int = [1, 2, 3, 4, 5, 6]
@@ -49,7 +76,22 @@ fn main() int {
     let d int = (1 == 2) + 1
     let e int = 7 % 4 + MASKED + NAMED
     let f int = len(r)
-    printf("%d\\n", a[0] + b + c + d + e + f + sizeof(Packet))
+    let p *int = &a[0]
+    let deref int = *p
+    let s []int = a[0..2]
+    let slen int = len(s)
+    let t int = BASE > 1 ? 2 : 3
+    let lv int = 0
+    if (BASE > 1 && NAMED > 1) { lv = 1 }
+    let pkt Packet = Packet{items: [1, 2, 3, 4, 5, 6], tag: BASE}
+    let tag int = pkt.tag
+    let w Wrap = Wrap{p: Packet{items: [1, 2, 3, 4, 5, 6], tag: 2}, n: 3}
+    let s4 int = sum4([1, 2, 3, 4])
+    let pt int = pkt_tag(Packet{items: [1, 2, 3, 4, 5, 6], tag: 4})
+    let dpv int = take_ptr(a)
+    let spv int = sum_pack(0, 1, 2)
+    printf("%d\\n", a[0] + b + c + d + e + f + deref + slen + t + lv + tag + w.n
+        + s4 + pt + dpv + spv + sizeof(int))
     return 0
 }
 """

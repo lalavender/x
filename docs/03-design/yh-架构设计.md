@@ -283,7 +283,7 @@ testkit   main（cmd/yh）     ← 测试 runner / CLI 分派（main 唯一可�
 | 词法 | 源字节 → token、源位置 | 一次扫描；词法错误终止该单元 | `lex/` |
 | 语法 | token → 文件 AST、声明/函数索引 | 保留源位置与语法结构，不解析符号 | `parse/`（当前同时做语义动作；目标纯语法） |
 | 语义 | AST + 模块环境 + 目标数据模型 → 绑定和类型注解 | 解析名字、导入、类型、常量、成员和调用 | 当前 `parse/` + `check/symbols.yh`（原 `gen.sem_*`）；目标 `check.resolve/full` |
-| check | 带注解的表示 → `CheckedModule`/`CheckedFunction` | 检查类型、转换、控制流、可见性、初始化 | `check/`（当前只读 verifier；目标语义分析入口） |
+| check | 带注解的表示 → `CheckedModule`/`CheckedFunction` | 检查类型、转换、控制流、可见性、初始化 | `check/`（语义内核 + 表达式/语句 eval 入口 + 结构复核；2026-11-11 S4-4/S4-2） |
 | IR | 受检函数/全局 → typed SSA + 显式内存操作 | 只接收受检函数；不接收未受检函数 | `lower/` → `ir/` |
 | 后端 | SSA + 目标描述 → LLVM 文本/对象 | 语言语义保护、ABI 分类、LLVM 合法化 | `backend/` |
 | 汇编/链接 | 对象 + 启动/运行时 + 链接配置 → 程序 | 符号解析、重定位、入口与装载格式 | `link/`（内嵌 lld） |
@@ -295,6 +295,20 @@ testkit   main（cmd/yh）     ← 测试 runner / CLI 分派（main 唯一可�
 **2026-11-06 决定**：目标为 `parse(纯语法) → AST → check.resolve → check.expand
 → check.full`；CT 语法在 resolve 之后展开，语义分析统一归 `check`。2026-11-08
 重估后按 `docs/todo.md` 的 S1–S4 切片推进；当前代码仍是语义动作解析器。
+
+
+**2026-11-11 更新（S4-4 收官，表达式语义外置）**：`parse` 不再计算表达式语义。
+8 个二元层、一元层、postfix 链（下标/切片/`.to_type`/成员/元信息投影）、
+调用 ABI、字面量/名字/`sizeof` 与聚合字段检查共 47 处内联语义调用，全部改走
+`check` 的分层 eval 入口（`check/full.yh` 的 `sem_eval_*`）。
+守卫 `front-coupling` 实测：`parse→check=162`、`表达式内联=0`、`comptime=0`、
+eval 入口 **45**（表达式层 36 + 语句层 9）。
+**语句侧同日收尾**：`parse_stmt` 的 9 处语句语义内核改走 `check/stmt_eval.yh` 的
+`sem_eval_*`（赋值/return/诊断/break/continue/goto/标签/局部绑定）；多数语句入口是
+**算子模式**——输入是进行中的现场事实（循环深度、标签池、`ct_diag_*`、`c_ret_agg`），
+节点注解不承载。
+`parse` 仍是语义动作解析器，但剩余动作属**声明/类型级**（B 类）与节点构造。
+`check` 因此是「语义内核 + 表达式/语句驱动入口 + 结构复核」。
 
 > **评审结论（2026-11-10，[ADR-0022](../adr/0022-yh-管线数据结构契约.md)）**：
 > §6.11 的 AstGen/UIR 层**不引入**；CT 展开位置定为纯语法 AST。本表与 S1–S4
@@ -986,7 +1000,7 @@ F7  删除旧语义动作路径、固定点、滚种子
 | 自举方式 | 滚动自举，无 C stage0；种子是上一代二进制；固定点 + 语料保证正确性 | 生效 | ADR-0006/0007 |
 | 代码生成 | LLVM 是唯一后端；旧机器发射退役；lld 内嵌 | 生效 | ADR-0014、LL12 |
 | 优化架构 | Nanopass 只保留 NP3（受检契约与 lowering 解耦）；NP0/1/2/4/5 关闭；通用优化交给 LLVM | 生效 | ADR-0011 |
-| `check` 定位 | 目标：语义分析入口（resolve/expand/full）；当前仍是只读 verifier；迁移见 todo S1–S4（原 F0–F7 已重估） | 目标/待迁移 | 2026-11-06 决定；2026-11-08 重估 |
+| `check` 定位 | 目标：语义分析入口（resolve/expand/full）。当前：语义内核 + 表达式分层 eval 入口（`sem_eval_*`）+ 结构复核；语句/声明/类型级仍由 parse 驱动 | 部分完成（S4-4 收官 2026-11-11） | 2026-11-06 决定；2026-11-08 重估；2026-11-11 S4-4 |
 | Zig 对齐前端 | 草案 §6.11：AstGen/UIR/Sema/HIR；是否引入 UIR 待评审 | 草案 | 2026-11-06 讨论 |
 | 模块私有类型 | `struct`/`union`/`enum` 的 `pub` 可选；私有类型不进 `.s.i` | 生效 | ADR-0013 |
 | 模块导出面 | 只导出别的模块真的使用的声明；`pub` 同时决定 `.s.i` 与 `.globl` | 生效 | ADR-0007、导出面收缩 |
@@ -995,7 +1009,7 @@ F7  删除旧语义动作路径、固定点、滚种子
 | 扩展点 | 静态注册表，不做动态插件/常驻守护进程/查询数据库 | 生效 | 10-24 系统架构 |
 | 并发 | fork/COW 进程 worker；lld 一次性子进程；线程池待上下文隔离 | 生效 | 10-25/LA5 |
 | 对象粒度 | 模块级唯一；文件级不做，函数级 `.o` 暂缓（ADR-0020） | 生效 | ADR-0020、LA3 |
-| 前端阶段 | 两遍化：`parse` 纯语法 → AST → `check`（resolve/expand/full）→ lower；当前仍是语义动作解析器 | **已决定，待迁移（S1–S4）** | §6.10、todo S1–S4 |
+| 前端阶段 | 两遍化：`parse` 纯语法 → AST → `check`（resolve/expand/full）→ lower。**表达式语义已外置（S4-4）**；语句/声明/类型级仍是语义动作 | 部分完成（剩余见 todo S4-2） | §6.10、todo S4-2/S4-4 |
 | CT 展开位置 | `check.resolve` 之后、`check.full` 之前；AST→AST；`comptime` 只做求值 | 已决定 | §6.10 |
 | `gen` 拆分 | 目标只新增 `support`/`token`；语义分析全部归 `check`；`diag`/`target` 并入 `support`；复用 `lex`/`comptime`/`proj`/`builtin`；GEN0–GEN4 分阶段 | 目标 | ADR-0021 |
 | 平台顺序 | Linux 优先；Windows/x64 已接入；Darwin 默认 LLVM | 生效 | AGENTS.md |

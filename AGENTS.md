@@ -19,7 +19,6 @@
 - 计划的任务记录在docs/todo.md
 - 完成的任务记录在docs/finish.md
 - 每次修改完代码都要构建验证
-- 每个文件尽量保持在500-1000行
 - 结构体和函数都要有详细注释说明
 - 语法设计文档放在 docs/03-design/
 - 计划任务文档放在 docs/02-plan/，任务完成后删除文档
@@ -112,7 +111,7 @@ C4/C6 专项 `tests/selfhost/cache/llvm-global-cache.py` 使用显式临时目�
 `llvm` 是唯一开发线与 GitHub 默认分支。
 
 版本号有两处手写来源且**必须与 tag 完全一致**：`compiler/project.toml` 的
-`version` 与 `compiler/cmd/yh/cmd_base.yh` 的 `YH_VERSION_TEXT`（`--version` 只读
+`version` 与 `compiler/cmd/yh/api.yh` 的 `YH_VERSION_TEXT`（`--version` 只读
 后者）。rc 期写 rc 号（如 `0.0.13-rc.1`），正式发布前改成正式号并在主线提交。
 `release.yml` 的 prepare 校验 tag 形态、tag 与这两处版本号一致，正式 tag 还必须是
 `llvm` 的祖先，不一致直接红。

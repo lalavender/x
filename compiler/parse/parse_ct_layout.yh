@@ -3,7 +3,6 @@ import check
 import token
 import errors
 import table
-import comptime
 
 // p_ct_layout_array_close：在当前文件 token 中查找数组长度外层的右方括号。
 fn p_ct_layout_array_close(first int) int {
@@ -26,7 +25,7 @@ fn p_ct_layout_array_close(first int) int {
 fn p_decl_ct_layout_eval_runnable(start int) int {
     if (p_decl_ct_layout_const_unready(start) == 0) { return 0 }
     let sym int = p_decl_ct_layout_const_sym(start)
-    if (sym < 0 || comptime.ct_value_request_runnable(sym) == 0) { return 0 }
+    if (sym < 0 || check.ct_layout_value_runnable(sym) == 0) { return 0 }
     let i int = start
     for i < token.ctx().count && token.ctx().tokens[i].kind != token.TK_ASSIGN { i += 1 }
     if (i >= token.ctx().count) { return 0 }
@@ -43,7 +42,7 @@ fn p_decl_ct_layout_eval_runnable(start int) int {
             || kind == token.TK_RBRACE) { depth -= 1 }
         after += 1
     }
-    return comptime.ct_layout_expr_runnable(first, after)
+    return check.ct_layout_expr_runnable(first, after)
 }
 
 // p_decl_ct_layout_const_unready：选择需要在布局期求值的未就绪整数 const。
@@ -100,7 +99,7 @@ fn p_decl_ct_layout_const_unready(start int) int {
     }
     token.ctx().pos = saved
     if (has_call != 0) { return 1 }
-    return comptime.ct_value_requested(sym)
+    return check.ct_layout_value_requested(sym)
 }
 
 // p_decl_ct_layout_const_sym：取得合格布局常量请求对应的全局符号编号。
@@ -130,8 +129,7 @@ fn p_decl_ct_layout_const_register(start int) int {
     if (p_decl_ct_layout_const_unready(start) == 0) { return 0 }
     let sym int = p_decl_ct_layout_const_sym(start)
     if (sym < 0 || sym >= table.ms().sym_n) { return errors.fail("内部错误：布局常量符号丢失") }
-    if (comptime.ct_value_request_add(sym, table.ms().syms[sym].def_line,
-            table.ms().syms[sym].def_col) != 0) { return -1 }
+    if (check.ct_layout_const_request(sym) != 0) { return -1 }
     let i int = start
     for i < token.ctx().count && token.ctx().tokens[i].kind != token.TK_ASSIGN { i += 1 }
     if (i >= token.ctx().count) { return errors.fail("内部错误：布局常量缺少初始化器") }
@@ -152,13 +150,8 @@ fn p_decl_ct_layout_const_register(start int) int {
             let dep int = table.sym_lookup(token.ctx().tokens[i].start, token.ctx().tokens[i].len)
             if (dep >= 0 && dep < table.ms().sym_n && table.ms().syms[dep].kind == table.SYM_CONST
                 && table.ms().syms[dep].const_ready == 0) {
-                if (comptime.ct_value_dependency_add(sym, dep) != 0) { return -1 }
-                // 依赖链上的常量同样要在布局期求出（`const N int = M + 1;`），
-                // 但仅限声明在 owner 之前的依赖：前向引用保持既有诊断。
-                if (check.sym_declared_before(dep, table.ms().syms[sym].def_line,
-                        table.ms().syms[sym].def_col) != 0
-                    && comptime.ct_value_request_add(dep, table.ms().syms[dep].def_line,
-                        table.ms().syms[dep].def_col) != 0) { return -1 }
+                // 依赖登记与「声明在 owner 之前才一并请求」的语义判定在 check。
+                if (check.ct_layout_const_dependency(sym, dep) != 0) { return -1 }
             }
         }
         if (kind == token.TK_DOLLAR && i + 1 < token.ctx().count
@@ -166,8 +159,7 @@ fn p_decl_ct_layout_const_register(start int) int {
             let function_sym int = table.sym_lookup(token.ctx().tokens[i + 1].start,
                 token.ctx().tokens[i + 1].len)
             if (function_sym >= 0
-                && comptime.ct_value_function_dependency_add(sym,
-                    function_sym) != 0) { return -1 }
+                && check.ct_layout_fn_dependency(sym, function_sym) != 0) { return -1 }
         }
         i += 1
     }

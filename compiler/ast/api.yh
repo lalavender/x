@@ -100,6 +100,7 @@ pub struct AstExpr {
     child0 int         // 左操作数、基础表达式或前一段参数列表
     child1 int         // 右操作数或当前参数表达式
     child2 int         // 三元表达式第三支；其他节点为 -1
+    expect_type_id int // 聚合字面量的目标类型（解析期上下文）；其余节点为 -1
 }
 
 // 类型引用的语法节点类别（S4 切片：parse 只产语法，check 负责解析）。
@@ -655,6 +656,11 @@ pub fn ast_type_get(id int) AstType {
     return ast_type_nodes[id]
 }
 
+// ast_type_count_now：当前模块类型 arena 的节点数（影子门按区间反查根类型节点）。
+pub fn ast_type_count_now() int {
+    return ast_type_count
+}
+
 // ast_type_param_add：追加一个 fn 参数类型节点编号，返回参数表下标。
 pub fn ast_type_param_add(tid int) int {
     if (tid < 0 || tid >= ast_type_count) {
@@ -717,6 +723,24 @@ pub fn ast_expr_end(id int) int {
 // ast_expr_add：追加一个表达式节点，子节点必须已先完成构造。
 pub fn ast_expr_add(kind int, op int, first int, after int, type_id int,
     child0 int, child1 int, child2 int) int {
+    return ast_expr_add_inner(kind, op, first, after, type_id, child0, child1, child2, 0)
+}
+
+// ast_expr_finish_pending：挂一个「待求值」表达式节点——只记语法身份（kind/op/
+// token 范围/子节点），语义字段留空（type_id = -1），由 check 的 eval 入口随后
+// 求值并回填（S4-4「先建节点、后求值」；节点的语义结果不再是构造它的前提）。
+// capture 关闭（`$for` 模板后续轮次不建节点）时返回 -1，调用方走无节点的
+// 算子模式，值语义由同一内核给出。
+pub fn ast_expr_finish_pending(kind int, op int, first int,
+    child0 int, child1 int, child2 int) int {
+    if (support.session().ast_capture == 0) { return -1 }
+    return ast_expr_add_inner(kind, op, first, token.ctx().pos, -1, child0, child1, child2, 1)
+}
+
+// ast_expr_add_inner：追加表达式节点的唯一实现。`pending != 0` 允许 type_id 暂缺
+// （待 evaluate 节点），其余校验收敛在此，两个入口共用一套不变量。
+fn ast_expr_add_inner(kind int, op int, first int, after int, type_id int,
+    child0 int, child1 int, child2 int, pending int) int {
     if (support.session().ast_capture == 0) {
         return -1
     }
@@ -741,7 +765,7 @@ pub fn ast_expr_add(kind int, op int, first int, after int, type_id int,
     }
     if (kind == AST_EXPR_ARG_LIST || kind == AST_EXPR_STRUCT_FIELD) {
         if (type_id != -1) { return -1 }
-    } else if (type_id < 0) {
+    } else if (type_id < -1 || (type_id < 0 && pending == 0)) {
         return errors.fail("内部错误：表达式 AST 缺少语义类型")
     }
     let i int = 0
@@ -803,6 +827,7 @@ pub fn ast_expr_add(kind int, op int, first int, after int, type_id int,
     ast_expr_nodes[id].child0 = child0
     ast_expr_nodes[id].child1 = child1
     ast_expr_nodes[id].child2 = child2
+    ast_expr_nodes[id].expect_type_id = -1
     ast_expr_count += 1
     return id
 }
@@ -984,6 +1009,51 @@ pub fn ast_expr_sym_kind_of(id int) int {
 // ast_expr_sym_flags_of：节点捕获时引用的符号 F_* 属性位。
 pub fn ast_expr_sym_flags_of(id int) int {
     return ast_expr_nodes[id].sym_flags
+}
+
+// ast_expr_sym_type_of：节点捕获时引用的符号类型（快照，作用域弹出后仍有效）。
+pub fn ast_expr_sym_type_of(id int) int {
+    return ast_expr_nodes[id].sym_type_id
+}
+
+// ast_expr_sym_name_off_of：节点捕获时引用符号的名字池偏移（快照）。
+pub fn ast_expr_sym_name_off_of(id int) int {
+    return ast_expr_nodes[id].sym_name_off
+}
+
+// ast_expr_sym_name_len_of：节点捕获时引用符号的名字长度（快照）。
+pub fn ast_expr_sym_name_len_of(id int) int {
+    return ast_expr_nodes[id].sym_name_len
+}
+
+// ast_expr_set_expect：记录聚合字面量的目标类型（解析期上下文输入）。
+pub fn ast_expr_set_expect(id int, tid int) int {
+    if (id < 0 || id >= ast_expr_count || tid < 0) { return -1 }
+    ast_expr_nodes[id].expect_type_id = tid
+    return 0
+}
+
+// ast_expr_expect_of：聚合字面量的目标类型；未记录为 -1。
+pub fn ast_expr_expect_of(id int) int {
+    if (id < 0 || id >= ast_expr_count) { return -1 }
+    return ast_expr_nodes[id].expect_type_id
+}
+
+// ast_expr_fill_semantics：把重算结果写回节点的**语义结果**字段。
+// 只写类型/常量事实，不碰绑定快照（sym_* / binding_row）与布局依赖。
+pub fn ast_expr_fill_semantics(id int, r *support.Res) int {
+    if (id < 0 || id >= ast_expr_count) { return -1 }
+    if (r.type_id < 0 || (r.is_const != 0 && r.is_const != 1)
+        || (r.is_lit != 0 && r.is_lit != 1) || (r.lit_big != 0 && r.lit_big != 1)) {
+        return -1
+    }
+    ast_expr_nodes[id].type_id = r.type_id
+    ast_expr_nodes[id].is_const = r.is_const
+    ast_expr_nodes[id].const_bits = r.ival
+    ast_expr_nodes[id].is_lit = r.is_lit
+    ast_expr_nodes[id].lit_big = r.lit_big
+    ast_expr_nodes[id].fval_bits = r.fval_bits
+    return 0
 }
 
 // ast_expr_semantics_to：把节点上 parse 写入的语义注解读回 Re（供影子比对）。

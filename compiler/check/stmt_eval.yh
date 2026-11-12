@@ -1,0 +1,81 @@
+module check
+import ast
+import support
+// ============================================================================
+// check/stmt_eval.yh —— 语句层驱动入口（S4-2 语句侧，2026-11-11）
+//
+// 目标与表达式层一致：`parse` 不再直接调语句语义内核（`sem_break`/`sem_assign` …），
+// 只把**现场事实**交给这里的入口；语句语义与诊断全部留在 `check`。
+//
+// 形态（统一说明）：
+// - **节点模式**：入口能从表达式节点注解取操作数（`sem_eval_assign` 的左右两侧）。
+// - **仅算子模式**：语句语义的输入是现场事实——循环深度与展开边界（break/continue）、
+//   标签文本（goto/标签）、绑定名与类型（局部绑定）、编译期诊断字段（`ct_diag_*` 不写
+//   进节点注解）、聚合返回标记（`c_ret_agg`）。
+//
+// 语句层没有「结果值」需要回填：节点注解仍由表达式层与 parse 的节点构造负责。
+// ============================================================================
+
+// stmt_operand：语句层的操作数取值——`expr_ast >= 0` 时读该表达式节点的**注解**，
+// 否则拷贝现场 `Res`。返回 1 表示走了节点模式。
+fn stmt_operand(expr_ast int, live *support.Res, buf *support.Res) int {
+    if (expr_ast >= 0 && expr_ast < ast.ast_expr_count_now()) {
+        ast.ast_expr_semantics_to(expr_ast, buf)
+        if (buf.type_id >= 0) { return 1 }
+    }
+    support.res_copy(buf, live)
+    return 0
+}
+
+// sem_eval_assign：赋值语句——**节点模式**取左右两侧表达式节点的注解（类型/常量事实），
+// 交给 `sem_assign` 内核做复合赋值定型；结果写回现场 `Res`（parse 之后仍读 `lres.type_id`）。
+// 可寻址性（`c_res_is_addr`）由 parse 在调用前单独校验，不经本入口。
+pub fn sem_eval_assign(op int, lhs_ast int, rhs_ast int, lres *support.Res,
+    rres *support.Res) int {
+    let l support.Res
+    let r support.Res
+    stmt_operand(lhs_ast, lres, &l)
+    stmt_operand(rhs_ast, rres, &r)
+    if (sem_assign(op, &l, &r) != 0) { return -1 }
+    support.res_copy(lres, &l)
+    support.res_copy(rres, &r)
+    return 0
+}
+
+// sem_eval_return：`return` 语句的收尾——**仅算子模式**：聚合返回标记挂在现场
+// `fc().c_ret_agg`，节点注解不承载该事实（返回值本体由 lowering 生成）。
+pub fn sem_eval_return(r *support.Res) int {
+    return sem_return_value(r)
+}
+
+// sem_eval_stmt_diag：语句位置的编译期诊断收尾——**仅算子模式**：`ct_diag_*`
+// 字段只写在现场 `Res` 上（`ast_expr_fill_semantics` 不写这些字段）。
+pub fn sem_eval_stmt_diag(res *support.Res, test_body int) int {
+    return sem_stmt_diag(res, test_body)
+}
+
+// sem_eval_break：`break` —— **仅算子模式**：判据是现场循环深度与展开边界。
+pub fn sem_eval_break() int {
+    return sem_break()
+}
+
+// sem_eval_continue：`continue` —— **仅算子模式**：同 break。
+pub fn sem_eval_continue() int {
+    return sem_continue()
+}
+
+// sem_eval_goto：`goto 标签` —— **仅算子模式**：输入是源区间的标签文本（前向引用登记）。
+pub fn sem_eval_goto(start int, n int) int {
+    return sem_goto(start, n)
+}
+
+// sem_eval_deflabel：标签定义 —— **仅算子模式**：输入是源区间的标签文本（定义/重定义）。
+pub fn sem_eval_deflabel(start int, n int) int {
+    return sem_deflabel(start, n)
+}
+
+// sem_eval_local_bind：局部/迭代绑定登记 —— **仅算子模式**：输入是名字区间与类型，
+// 返回符号槽（调用方随后挂 AST 绑定行）。零初始化归 lowering。
+pub fn sem_eval_local_bind(start int, n int, tid int) int {
+    return sem_declare_local(start, n, tid)
+}

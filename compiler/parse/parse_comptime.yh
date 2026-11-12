@@ -5,7 +5,6 @@ import errors
 import types
 import support
 import table
-import comptime
 import ast
 
 // parse_comptime_block_end：查找从指定左花括号开始的匹配右花括号位置。
@@ -42,7 +41,7 @@ fn parse_comptime_branch(selected int) int {
         support.session().compile = 0
         support.session().ast_capture = 0
     } else if (saved_capture != 0 && support.fc().c_ct_prepare_active == 0) {
-        comptime.ct_expansion_capture_enter()
+        check.ct_expand_capture_enter()
     }
     let status int = 0
     if (p_cur() == token.TK_DOLLAR && p_peek(1) == token.TK_IF) {
@@ -57,7 +56,7 @@ fn parse_comptime_branch(selected int) int {
     support.session().ast_capture = saved_capture
     if (selected == 1 && saved_compile != 0 && saved_capture != 0
         && support.fc().c_ct_prepare_active == 0) {
-        comptime.ct_expansion_capture_leave()
+        check.ct_expand_capture_leave()
     }
     if (selected != 1 || saved_compile == 0) { support.fc().c_fn_falls = saved_falls }
     return status
@@ -65,9 +64,9 @@ fn parse_comptime_branch(selected int) int {
 
 // parse_comptime_if：在函数体内按已就绪常量选择一个语句块，不发条件跳转。
 fn parse_comptime_if() int {
-    if (comptime.ct_enter_control() != 0) { return -1 }
+    if (check.ct_expand_control_enter() != 0) { return -1 }
     let status int = parse_comptime_if_body()
-    comptime.ct_leave_control()
+    check.ct_expand_control_leave()
     return status
 }
 
@@ -155,14 +154,14 @@ fn parse_comptime_if_body() int {
 
 // parse_comptime_for：按半开整数区间重复解析语句块，并为每次展开建立常量绑定。
 fn parse_comptime_for() int {
-    if (comptime.ct_enter_control() != 0) { return -1 }
-    if (comptime.ct_for_boundary_enter(support.fc().c_loop_depth) != 0) {
-        comptime.ct_leave_control()
+    if (check.ct_expand_control_enter() != 0) { return -1 }
+    if (check.ct_expand_for_begin(support.fc().c_loop_depth) != 0) {
+        check.ct_expand_control_leave()
         return -1
     }
     let status int = parse_comptime_for_body()
-    comptime.ct_for_boundary_leave()
-    comptime.ct_leave_control()
+    check.ct_expand_for_end()
+    check.ct_expand_control_leave()
     return status
 }
 
@@ -188,7 +187,7 @@ fn parse_comptime_enum_for(name_start int, name_len int, name_token int,
     if (table.ms().types[enum_type].kind != types.TY_ENUM) {
         return token.err_tok("$for values 来源必须是枚举类型")
     }
-    let member_count int = comptime.ct_enum_member_count(enum_type)
+    let member_count int = check.ct_enum_member_count(enum_type)
     if (member_count < 0) { return errors.fail("内部错误：枚举 values 成员表无效") }
     if (member_count > 1024) { return token.err_tok("单个枚举 values 展开超过 1024 次") }
     if (typed_for != 0 && ast.ast_stmt_current_now() >= 0) {
@@ -201,12 +200,12 @@ fn parse_comptime_enum_for(name_start int, name_len int, name_token int,
     let parent_falls int = support.fc().c_fn_falls
     let ordinal int = 0
     for ordinal < member_count {
-        let member int = comptime.ct_enum_member_at(enum_type, ordinal)
+        let member int = check.ct_enum_member_at(enum_type, ordinal)
         if (member < 0) { return errors.fail("内部错误：枚举 values 成员序号失效") }
-        if (comptime.ct_charge_expansion(body_after - body_first) != 0
-            || comptime.ct_for_boundary_value(ordinal.to_type(i64)) != 0) { return -1 }
+        if (check.ct_expand_iter(body_after - body_first,
+                ordinal.to_type(i64)) != 0) { return -1 }
         if (typed_for != 0 && support.session().ast_capture != 0
-            && comptime.ct_charge_expansion_ast_nodes(body_after - body_first) != 0) {
+            && check.ct_expand_iter_ast(body_after - body_first) != 0) {
             return -1
         }
         token.ctx().pos = body_first
@@ -270,10 +269,10 @@ fn parse_comptime_field_for(name_start int, name_len int, name_token int,
     let index int = 0
     for index < field_count {
         let field types.SField = table.ms().fields[table.ms().types[owner].sub + index]
-        if (comptime.ct_charge_expansion(body_after - body_first) != 0
-            || comptime.ct_for_boundary_value(index.to_type(i64)) != 0) { return -1 }
+        if (check.ct_expand_iter(body_after - body_first,
+                index.to_type(i64)) != 0) { return -1 }
         if (typed_for != 0 && support.session().ast_capture != 0
-            && comptime.ct_charge_expansion_ast_nodes(body_after - body_first) != 0) {
+            && check.ct_expand_iter_ast(body_after - body_first) != 0) {
             return -1
         }
         token.ctx().pos = body_first
@@ -401,10 +400,9 @@ fn parse_comptime_for_body() int {
     let template_body_stmt int = -1
     let value i64 = lo.ival
     for value < hi.ival {
-        if (comptime.ct_charge_expansion(body_after - body_first) != 0) { return -1 }
-        if (comptime.ct_for_boundary_value(value) != 0) { return -1 }
+        if (check.ct_expand_iter(body_after - body_first, value) != 0) { return -1 }
         if (use_template != 0 && value > lo.ival
-            && comptime.ct_charge_expansion_ast_nodes(template_node_cost) != 0) {
+            && check.ct_expand_iter_ast(template_node_cost) != 0) {
             return -1
         }
         token.ctx().pos = body_first
@@ -507,10 +505,11 @@ fn parse_test_assert_call(res *support.Res, condition *support.Res, msg *support
     let callee support.Res
     support.res_reset(&callee, table.ms().syms[sym].type_id)
     callee.sym = sym
-    if (check.sem_call_begin(&callee) != 1) {
+    // S4-4：`$assert` 降级的合成调用树也走统一 eval 入口（仅算子模式：ABI 现场增量）。
+    if (check.sem_eval_call_begin(&callee) != 1) {
         return token.err_tok("内部错误：测试断言入口不是直接函数")
     }
-    if (check.sem_push_arg(condition, &callee) != 0) { return -1 }
+    if (check.sem_eval_call_arg(condition, &callee) != 0) { return -1 }
     // 生成的实参节点与实参链统一使用断言调用的 token 范围：实参链按追加
     // 顺序逐层包住前一项，若各实参范围互不包含会让父节点范围校验失败。
     let lit_first int = first
@@ -518,13 +517,13 @@ fn parse_test_assert_call(res *support.Res, condition *support.Res, msg *support
     let line_res support.Res
     if (parse_test_assert_lit(&line_res, types.TY_I32, line.to_type(i64),
             lit_first, lit_last) != 0) { return -1 }
-    if (check.sem_push_arg(&line_res, &callee) != 0) { return -1 }
+    if (check.sem_eval_call_arg(&line_res, &callee) != 0) { return -1 }
     let col_res support.Res
     if (parse_test_assert_lit(&col_res, types.TY_I32, col.to_type(i64),
             lit_first, lit_last) != 0) { return -1 }
-    if (check.sem_push_arg(&col_res, &callee) != 0) { return -1 }
-    if (check.sem_push_arg(msg, &callee) != 0) { return -1 }
-    if (check.sem_call(&callee, res) != 0) { return -1 }
+    if (check.sem_eval_call_arg(&col_res, &callee) != 0) { return -1 }
+    if (check.sem_eval_call_arg(msg, &callee) != 0) { return -1 }
+    if (check.sem_eval_call_end(-1, &callee, res) != 0) { return -1 }
     if (support.session().ast_capture == 0) { return 0 }
     let args int = -1
     if (ast.ast_expr_assert_args_add(&args, condition.ast_id, line_res.ast_id,
@@ -584,7 +583,7 @@ fn parse_comptime_diag_call(res *support.Res, kind int, line int, col int) int {
                 }
                 if (parse_expr_iso(&msg) != 0) { return -1 }
             } else {
-                if (parse_test_assert_lit(&msg, check.ty_ptr(types.TY_CHAR), 0,
+                if (parse_test_assert_lit(&msg, table.ty_ptr(types.TY_CHAR), 0,
                         first, token.ctx().pos) != 0) { return -1 }
             }
             if (p_expect(token.TK_RPAREN, "编译期诊断调用期望 ')'") != 0) { return -1 }

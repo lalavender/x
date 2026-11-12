@@ -1,0 +1,281 @@
+module check
+import ast
+import support
+
+// ============================================================================
+// check/eval.yh —— 表达式层驱动入口（S4-4 / S4-2，2026-11-11 自 full.yh 拆出）
+//
+// `sem_eval_*` 是 parse 侧唯一允许调用的表达式语义入口：节点模式下取**子节点注解**
+// 作为操作数、把结果回填本节点注解；无节点（`$for` 模板后续轮次 capture=0）或子树
+// 缺注解时退化为**算子模式**（用现场 `Res`）——两种模式都调同一套 `sem_*` 内核。
+//
+// 与 `full.yh` 的分工：`full.yh` 是影子门（`YH_AST_FULL_CHECK`，从节点重算并与注解
+// 比对）；本文件是**生产路径**的入口。两者共享 `full_expr_at`/`full_local`（同模块）。
+// ============================================================================
+
+// sem_eval_node：全树重算入口（影子门/回填通道/顶层驱动）——从节点递归重算语义，
+// 并把父级 expect 透传下去。结果回填节点注解，供后续增量求值的父级读取。
+pub fn sem_eval_node(id int, expect int, out *support.Res) int {
+    let st int = full_expr_at(id, expect, out)
+    if (st == 0) {
+        if (ast.ast_expr_fill_semantics(id, out) != 0) { return -1 }
+    }
+    return st
+}
+
+// sem_eval_local：增量求值入口——按**子节点注解**求本节点并回填注解。
+// 前提：子节点都已求过（同一 parse 链上自底向上）。子级注解缺类型（CT 节点/
+// parse 尚未求过）时回退全树重算，保证结果不退化为“猜”。
+pub fn sem_eval_local(id int, expect int, out *support.Res) int {
+    full_local = 1
+    let st int = full_expr_at_top(id, expect, out)
+    full_local = 0
+    if (st == 0) {
+        if (ast.ast_expr_fill_semantics(id, out) != 0) { return -1 }
+    }
+    return st
+}
+
+// sem_eval_bin：二元层的驱动入口（S4-4）——节点模式取**子节点注解**作为操作数，
+// 交给 `sem_binop` 内核（现场 `c_fold` 上下文照旧生效，与 parse 内联时的调用同一次），
+// 求值结果回填节点注解并回传；节点不存在（node < 0，`$for` 模板后续轮次不建节点）
+// 或其子树缺注解时走**算子模式**：直接用现场 `lhs`/`rhs`，语义仍是同一内核，
+// 不退化为猜测。
+//
+// 为什么不复用 `full_binary` 的折叠判定：那里的「旧路径是否折过」只能从注解
+// `is_const` 反推（拆解后现场 `c_fold` 已消失）。驱动模式下节点先于语义存在，
+// 注解为空，反推不成立；驱动必须用现场上下文，故此处直接调内核。
+pub fn sem_eval_bin(op int, node int, lhs *support.Res, rhs *support.Res,
+    out *support.Res) int {
+    let node_mode int = 0
+    let la support.Res
+    let ra support.Res
+    if (node >= 0) {
+        let ln int = ast.ast_expr_child_of(node, 0)
+        let rn int = ast.ast_expr_child_of(node, 1)
+        if (ln >= 0 && ln < ast.ast_expr_count_now()
+            && rn >= 0 && rn < ast.ast_expr_count_now()) {
+            ast.ast_expr_semantics_to(ln, &la)
+            ast.ast_expr_semantics_to(rn, &ra)
+            // 子节点已求过（type_id >= 0）才走节点模式；待求值/未覆盖节点回退现场算子。
+            if (la.type_id >= 0 && ra.type_id >= 0) { node_mode = 1 }
+        }
+    }
+    if (node_mode != 0) {
+        if (sem_binop(op, &la, &ra) != 0) { return -1 }
+        support.res_copy(out, &la)
+    } else {
+        support.res_copy(out, lhs)
+        if (sem_binop(op, out, rhs) != 0) { return -1 }
+    }
+    if (node >= 0) {
+        if (ast.ast_expr_fill_semantics(node, out) != 0) { return -1 }
+        // 绑定快照与 `ast_expr_finish` 一致（二元节点的 `sym` 由内核结果决定）。
+        if (ast.ast_expr_set_semantics(node, out) != 0) { return -1 }
+    }
+    return 0
+}
+
+// sem_eval_un：一元层的驱动入口（S4-4 第二片）——节点模式取**操作数子节点注解**，
+// 交给 `sem_unary` 内核。`c_res_is_addr`（操作数是否可寻址）是 parse 现场事实、
+// 不在注解里，但调用点紧跟操作数解析，现场值就是该操作数的值，因此节点模式**不改动**
+// 它：`&x` 的左值判定、`*p` 的聚合装载分支与旧路径看到同一个事实。
+// node < 0（`$for` 模板后续轮次不建节点）或子树缺注解时走算子模式，同一内核。
+pub fn sem_eval_un(op int, node int, operand *support.Res, out *support.Res) int {
+    let node_mode int = 0
+    let ca support.Res
+    if (node >= 0) {
+        let cn int = ast.ast_expr_child_of(node, 0)
+        if (cn >= 0 && cn < ast.ast_expr_count_now()) {
+            ast.ast_expr_semantics_to(cn, &ca)
+            if (ca.type_id >= 0) { node_mode = 1 }
+        }
+    }
+    if (node_mode != 0) {
+        if (sem_unary(op, &ca) != 0) { return -1 }
+        support.res_copy(out, &ca)
+    } else {
+        support.res_copy(out, operand)
+        if (sem_unary(op, out) != 0) { return -1 }
+    }
+    if (node >= 0) {
+        if (ast.ast_expr_fill_semantics(node, out) != 0) { return -1 }
+        if (ast.ast_expr_set_semantics(node, out) != 0) { return -1 }
+    }
+    return 0
+}
+
+// eval_operand：驱动入口的通用取操作数——节点模式下读第 i 个子节点的**注解**
+// （前提：子级已在更内层求过），否则拷贝现场 `live`。返回 1 表示走了节点模式。
+fn eval_operand(node int, i int, live *support.Res, buf *support.Res) int {
+    if (node >= 0) {
+        let c int = ast.ast_expr_child_of(node, i)
+        if (c >= 0 && c < ast.ast_expr_count_now()) {
+            ast.ast_expr_semantics_to(c, buf)
+            if (buf.type_id >= 0) { return 1 }
+        }
+    }
+    support.res_copy(buf, live)
+    return 0
+}
+
+// eval_fill_node：把驱动入口的求值结果写成节点注解（`node < 0` 无节点时直接返回）。
+// 先写语义结果（type/常量事实）、再写绑定快照，与 `ast_expr_finish` 的写法一致。
+fn eval_fill_node(node int, out *support.Res) int {
+    if (node < 0) { return 0 }
+    if (ast.ast_expr_fill_semantics(node, out) != 0) { return -1 }
+    if (ast.ast_expr_set_semantics(node, out) != 0) { return -1 }
+    return 0
+}
+
+// sem_eval_index：下标层的驱动入口（S4-4）——节点模式取基底/下标的子节点注解，
+// 交给 `sem_index` 内核；`c_lvalue`/`c_res_is_addr`/`c_fold` 是现场事实，节点模式
+// 不改动它们（调用点紧跟基底与下标解析，生效的正是这两个操作数的事实）。
+pub fn sem_eval_index(node int, base *support.Res, idx *support.Res,
+    out *support.Res) int {
+    let b support.Res
+    let i support.Res
+    eval_operand(node, 0, base, &b)
+    eval_operand(node, 1, idx, &i)
+    if (sem_index(&b, &i) != 0) { return -1 }
+    support.res_copy(out, &b)
+    return eval_fill_node(node, out)
+}
+
+// sem_eval_slice：切片层的驱动入口——基底/起/止三支取子节点注解（或现场值），
+// 结果由 `sem_slice` 内核给出（`{len, data}` 切片类型 + 地址语义）。
+pub fn sem_eval_slice(node int, base *support.Res, lo *support.Res,
+    hi *support.Res, out *support.Res) int {
+    let b support.Res
+    let l support.Res
+    let h support.Res
+    eval_operand(node, 0, base, &b)
+    eval_operand(node, 1, lo, &l)
+    eval_operand(node, 2, hi, &h)
+    if (sem_slice(&b, &l, &h) != 0) { return -1 }
+    support.res_copy(out, &b)
+    return eval_fill_node(node, out)
+}
+
+// sem_eval_cast：`.to_type(T)` 的驱动入口——操作数取子节点注解（或现场值），
+// 目标类型由 parse 解析类型引用后传入（类型不是表达式，不参与注解通道）。
+pub fn sem_eval_cast(node int, operand *support.Res, tid int, out *support.Res) int {
+    let o support.Res
+    eval_operand(node, 0, operand, &o)
+    if (sem_cast(&o, tid) != 0) { return -1 }
+    support.res_copy(out, &o)
+    return eval_fill_node(node, out)
+}
+
+// sem_eval_member：字段访问的驱动入口——基底取子节点注解（或现场值），成员名由
+// parse 从 token 传入。`sem_member` 读的 `c_res_is_addr`（基底形态）是现场事实。
+pub fn sem_eval_member(node int, base *support.Res, name_start int,
+    name_len int, out *support.Res) int {
+    let b support.Res
+    eval_operand(node, 0, base, &b)
+    if (sem_member(&b, name_start, name_len) != 0) { return -1 }
+    support.res_copy(out, &b)
+    return eval_fill_node(node, out)
+}
+
+// sem_eval_meta：元信息投影的驱动入口——`kind`：0 字段名、1 枚举名、2 枚举值。
+// 投影只依赖绑定的 `sym`（没有子表达式），因此**仅算子模式**：把现场 `meta` 交给
+// 对应内核，结果写回 `out`（调用方据此建 `PRIMARY/NUMBER|STRING` 节点）。
+pub fn sem_eval_meta(kind int, meta *support.Res, out *support.Res) int {
+    support.res_copy(out, meta)
+    if (kind == 0) {
+        if (sem_field_meta_name(out) != 0) { return -1 }
+    } else if (kind == 1) {
+        if (sem_enum_meta_name(out) != 0) { return -1 }
+    } else if (kind == 2) {
+        if (sem_enum_meta_value(out) != 0) { return -1 }
+    } else {
+        return -1
+    }
+    return 0
+}
+
+// sem_eval_call_begin：调用 ABI 的建栈入口（S4-4）——**仅算子模式**：调用 ABI 的
+// `c_args`/`c_arg_n`/`c_call_depth`/`c_call_direct` 现场必须在解析实参时增量建立
+// （每个实参解析完立刻入栈），节点注解承载不了「进行中的 ABI 状态」，因此只做内核
+// 转发。返回 1 = 直接调用（被调者是已绑定的函数符号），<0 = 诊断。
+pub fn sem_eval_call_begin(callee *support.Res) int {
+    return sem_call_begin(callee)
+}
+
+// sem_eval_call_arg：实参入栈——**仅算子模式**：ABI 现场保存完整 `Res`（含绑定快照
+// `sym` 与字面量事实），节点注解只存语义结果字段，因此用现场值。
+pub fn sem_eval_call_arg(arg *support.Res, callee *support.Res) int {
+    return sem_push_arg(arg, callee)
+}
+
+// sem_eval_call_end：收栈并给出结果（S4-4）——实参按原次序已在现场栈里，`sem_call`
+// 内核给出结果类型与诊断；`node >= 0` 时把结果回填到 CALL 节点注解。
+pub fn sem_eval_call_end(node int, callee *support.Res, out *support.Res) int {
+    if (sem_call(callee, out) != 0) { return -1 }
+    return eval_fill_node(node, out)
+}
+
+// sem_eval_number：整型/浮点字面量——`sem_number` 从 token 文本解码（含超宽字面量的
+// lit_big 与浮点位型）。
+pub fn sem_eval_number(start int, n int, out *support.Res) int {
+    return sem_number(start, n, out)
+}
+
+// sem_eval_char：字符字面量——解码与常量性判定同 `sem_char`。
+pub fn sem_eval_char(start int, n int, out *support.Res) int {
+    return sem_char(start, n, out)
+}
+
+// sem_eval_string：普通字符串字面量——**标签分配是一次性现场副作用**
+// （`data_label_advance` + 登记字节），注解无法重放，因此每次求值只分配一次；
+// 结果（类型 `*char`、常量标签）由调用方写成节点注解，成为该节点的身份。
+pub fn sem_eval_string(start int, n int, out *support.Res) int {
+    return sem_string(start, n, out)
+}
+
+// sem_eval_raw_string：插值的原始字符串片段——同上（一次性标签分配）。
+pub fn sem_eval_raw_string(start int, n int, out *support.Res) int {
+    return sem_raw_string(start, n, out)
+}
+
+// sem_eval_ident：按名字区间求值（需查表的裸名）——语义与诊断同 `sem_ident`。
+pub fn sem_eval_ident(start int, n int, out *support.Res) int {
+    return sem_ident(start, n, out)
+}
+
+// sem_eval_ident_val：按已绑定符号下标求值——绑定身份是 parse 现场事实（B 类），
+// 值语义（const/地址常量/函数名）由 `sem_ident_val` 给出。
+pub fn sem_eval_ident_val(idx int, out *support.Res) int {
+    return sem_ident_val(idx, out)
+}
+
+// sem_eval_struct_field：聚合字面量的字段兼容性检查（`sem_struct_lit_field`）。
+pub fn sem_eval_struct_field(tid int, fidx int) int {
+    return sem_struct_lit_field(tid, fidx)
+}
+
+// sem_eval_sizeof：`sizeof(...)` 层入口——两种形态共用：
+// `tid >= 0` 是类型引用形态（parse 先解析/查询类型语法得到 tid）；
+// `tid < 0 && node >= 0` 是表达式形态，操作数取**子节点注解**的 `type_id`。
+pub fn sem_eval_sizeof(node int, tid int, operand *support.Res,
+    out *support.Res) int {
+    let t int = tid
+    if (t < 0 && node >= 0) {
+        let o support.Res
+        eval_operand(node, 0, operand, &o)
+        t = o.type_id
+    } else if (t < 0) {
+        t = operand.type_id
+    }
+    if (t < 0) { return -1 }
+    if (sem_sizeof(t, out) != 0) { return -1 }
+    return eval_fill_node(node, out)
+}
+
+// sem_eval_sizeof_path：`sizeof` 歧义形态的类型路径判定（`sizeof_type_path`）——
+// 这是**类型语法查询**（不是表达式语义），经此汇点后 parse 不再直接调用类型解析。
+// 返回类型编号（>= 0）或 -1（不是类型，调用方回退表达式解析）。
+pub fn sem_eval_sizeof_path(first int, after int) int {
+    return sizeof_type_path(first, after)
+}

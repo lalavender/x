@@ -8,6 +8,658 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+
+## 2026-11-11：S4 收尾——驱动入口拆出 `check/eval.yh`；S4-2 严格形态关闭
+
+**结果**：`check/full.yh` 从 1,159 → **892 行**；23 个 `sem_eval_*` 驱动入口搬到新文件
+`check/eval.yh`（281 行）。S4-2 的「严格形态」按用户决定关闭，记入 `docs/todo.md`
+的「设计决定不做」。
+- `compiler/check/eval.yh`（新增 281 行）：从 `full.yh` 整体搬出 `sem_eval_node`、
+  `sem_eval_local`、`sem_eval_bin`、`sem_eval_un`、`sem_eval_index`、`sem_eval_slice`、
+  `sem_eval_cast`、`sem_eval_member`、`sem_eval_meta`、`sem_eval_call_begin/arg/end`、
+  `sem_eval_number/char/string/raw_string/ident/ident_val/struct_field/sizeof/
+  sizeof_path` 与通用件 `eval_operand`、`eval_fill_node`。同模块共享 `full_local` 与
+  `full_expr_at`（跨文件模块级 `let` 可见，先例 `checked_check_cache_in`）。
+- `compiler/check/full.yh`：只剩影子门（`YH_AST_FULL_CHECK`）与重算内核
+  （`full_expr_at` 等）；头部注释补「驱动入口已拆到 `eval.yh`」。
+- **严格形态关闭**：不再追求「`parse` 只产语法节点、无算子模式」。理由——字面量/名字/
+  调用 ABI/元信息投影与多数语句入口的输入是现场事实（token 文本、绑定下标、
+  `c_args`/`c_arg_n`、`c_res_is_addr`、循环深度、标签池、`ct_diag_*`、`c_ret_agg`），
+  注解不承载；消除需改注解 + lowering + 接口闭包 + 缓存键。
+- 文档：方案 §4e-5；todo 的 S4 段剩 S4-5（字符串只读/去重问题记录）与 5 条技术债
+  （S4-6…S4-10：影子门独立性、`sizeof_path` 转发、合成调用树节点化、可寻址性在
+  parse、局部零初始化），基线规模与 `check` 文件数已更新；
+  模块职责/编译流程的 `check` 行补 `eval.yh`。
+
+**验证**：`just dev` 0；`just test` 0（389/391 跳 2、fail 147/147、front-coupling 4/4）；
+`just front-shadow` 0；`just selfhost-native` 0（228s，两代固定点一致、project cases
+125/125）；`just code-stats` 179 文件 / 64,371 行（`check` 21 / 9,852）；守卫不变
+`check=162 / comptime=0 / 内联=0 / eval=45`。
+
+**影响范围**：纯文件搬移，无语义、接口、缓存键变化。
+
+## 2026-11-11：前端 S4 语句侧——`parse_stmt` 语义动作外置（直调内核 9 → 0）
+
+**结果**：`parse_stmt` 不再直接调用 8 个语句语义内核，改走新增的 `check/stmt_eval.yh`
+8 个入口；守卫 `check=162 / 表达式内联=0 / eval 36 → 45`；四道门禁全绿。
+- `compiler/check/stmt_eval.yh`（新增 81 行）：`sem_eval_assign` 为**节点模式**（左右
+  两侧取表达式节点注解，交 `sem_assign` 定型）；`sem_eval_return`、
+  `sem_eval_stmt_diag`、`sem_eval_break`、`sem_eval_continue`、`sem_eval_goto`、
+  `sem_eval_deflabel`、`sem_eval_local_bind` 为**仅算子模式**，理由写在每个入口注释里：
+  输入是进行中的现场事实（循环深度、展开边界、标签池、绑定名与类型、`ct_diag_*`、
+  `c_ret_agg`），节点注解不承载，搬进注解等于改语义。
+- `compiler/parse/parse_stmt.yh`：9 处调用替换——`sem_break`/`sem_continue`/`sem_goto`/
+  `sem_deflabel`/`sem_assign`/`sem_stmt_diag`/`sem_return_value` 各 1，
+  `sem_declare_local` 2（for-in 元素与索引）。
+- `tests/tools/front-coupling/check.py`：`PARSE_CHECK_EVAL_BUDGET 36 → 45`，
+  `PARSE_CHECK_BUDGET` 保持 162；注释按调用点列出 45 的构成（表达式层 36 + 语句层 9）。
+- 新增语料 `tests/yh-run/run/stmt-eval-layer.yh`（break/continue、goto 与标签、
+  复合赋值全谱、return）。
+
+**验证**：`just dev` 0；`just test` 0（运行语料 389/391 跳 2、fail 147/147、
+front-coupling 4/4、front-syntax、front-full 全 PASS）；`just front-shadow` 0；
+`just selfhost-native` 0（220s，两代固定点一致、project cases 125/125）；
+`--filter stmt-eval-layer` 1/1 PASS；`grep` 复核 `parse_stmt` 直调语句内核 = 0。
+
+**影响范围**：只改语句语义的调用路径；语义、诊断文本与次序、求值次序、后端/ABI/
+缓存键均未变。
+
+**遗留**：赋值目标可寻址性（`c_res_is_addr`）仍由 parse 判定并给诊断；局部零初始化
+仍在 `sem_declare_local`；严格「只产语法节点」形态未达成（多数语句入口是算子模式，
+判据见方案 §4e-4）。`check/full.yh` 已 1,159 行，拆分待办记在 `docs/todo.md`。
+
+## 2026-11-11：文档刷新——S4-4 收官后的设计/TODO/finish 一致性刷新
+
+**任务**：开发完成后刷新设计文档、TODO 与 finish，使三者与代码和测试结果一致。
+本轮**未改业务代码**。
+- 设计文档：`docs/03-design/yh-架构设计.md`（§6.10 增加 2026-11-11 更新段；§3.1
+  `check` 行、§7 决策表「`check` 定位」「前端阶段」两行改为「部分完成」）；
+  `docs/03-design/yh-编译流程-当前实现.md`（修改时间改 2026-11-11；§5.6 pass2b
+  条目改为「表达式走 `sem_eval_*`、语句/声明/类型级仍走 `sem_*`」；§11 前端阶段与
+  `check` 两行按 S4-4 重写）；`docs/03-design/yh-模块职责-当前实现.md`（基线规模
+  改为 177 文件 / 64,274 行；`check` 行增加「表达式分层 eval 入口」；`parse` 行去掉
+  「277 处 `Res` 耦合」旧述、依赖表去掉已不再 import 的 `comptime`；§5 结构债行改为
+  「表达式侧已完成、语句侧未开始」；§6 表加 2026-11-11 实测说明）。
+- TODO：`docs/todo.md`（S4-2 标注「部分完成」并写明表达式侧完成、语句侧未开始；
+  新增三项待办：S4-2 语句侧、字符串标签对象身份侧表、`check/full.yh` 拆分）。
+  **清理（按项目规则「已完成项一律删除」）**：删除 4 个 `[x]` 条目（多线程 L1、
+  L2-Linux；S4-3；S4-4）及 S4 段「已完成四片」的历史罗列，原位留指引进
+  `finish.md` 与方案 §4e-3；合并重复的「S4-2 语句侧」条目进 S4-2。清理后
+  `grep -c "^- \[x\]"` = 0，待办 `[ ]` 127 条。
+- finish：本条记录。
+
+**验证**：本轮只读检查。`python3 tests/tools/front-coupling/check.py` 通过
+（`check=162 comptime=0 表达式内联=0 eval=36`）；`just code-stats` 实测
+177 文件 / 64,274 行（`check` 19 / 9,755、`parse` 14 / 7,760）。
+四道代码门禁（`just dev`/`test`/`front-shadow`/`selfhost-native`）本轮**未重跑**，
+原因：无代码变更；结果见同日「S4-4 收官」条目。
+
+**待确认**：`docs/03-design/yh-模块职责-当前实现.md` 基线的「20 个模块」计数口径
+未复核（`just code-stats` 只统计目录与文件）；同文 §5「`support` 内涵膨胀」行写
+「2,740 行」为拆分前数值，未随本轮刷新（与本轮变更无关）。
+
+## 2026-11-11：前端 S4-4 收官——表达式内联语义 A 类 47 → 0（parse 纯化达成）
+
+**结果**：`parse` 对 `check` 的**表达式内联语义**（A 类 47 处）全部改走分层 eval 入口，
+`parse→check` **174 → 162**、`parse→comptime` 0、eval 入口点位 36；守卫
+`PARSE_CHECK_EXPR_INLINE_BUDGET = 0`（目标形态）。
+- 第三片（postfix）：下标 / 切片 / `.to_type` / 成员×2 / 元信息投影×3 →
+  `sem_eval_index`、`sem_eval_slice`、`sem_eval_cast`、`sem_eval_member`、`sem_eval_meta`
+  （A 类 36 → 28）；parse 侧 `pe_index_eval` / `pe_slice_eval` / `pe_cast_eval` /
+  `pe_member_eval` / `pe_meta_eval` 各一处引用。
+- 第四片（调用 ABI）：`sem_eval_call_begin` / `sem_eval_call_arg` / `sem_eval_call_end`
+  ——parse_expr 调用 3 处、插值合成调用 4 处、`$assert` 降级 6 处（A 类 28 → 15）。
+  ABI 现场（`c_args`/`c_arg_n`/`c_call_depth`/`c_call_direct`）必须随实参解析增量建立，
+  因此这三段是**仅算子模式**；`call_end` 额外回填 CALL 节点注解。
+- 第五片（字面量/名字/sizeof）：`sem_eval_number/string/char/raw_string`（token 文本输入、
+  字符串标签一次性分配）、`sem_eval_ident/ident_val`（绑定身份来自现场 B 类事实）、
+  `sem_eval_struct_field`、`sem_eval_sizeof`（类型引用形态交 tid、表达式形态取子节点注解）
+  与 `sem_eval_sizeof_path`（类型语法查询汇点）（A 类 15 → **0**）。
+- 基础设施（前两片）：`ast.ast_expr_finish_pending`（先挂待求值节点、语义后填）、
+  `check.sem_eval_bin/un`（节点模式读子节点注解 + 模板轮次算子模式）、
+  `eval_operand`/`eval_fill_node` 两个通用件。
+- 守卫修正：eval 点位正则改 `check.sem_eval_\w+`（此前漏记 `sem_eval_local`，印 `eval=0` 假绿）。
+
+**验证**：`just dev` 0；`just test` 0（运行语料 **388/390 跳 2**、fail 147/147、
+front-coupling 4/4、front-syntax、front-full 全 PASS）；`just front-shadow` 0（全语料 +
+libs 全量影子门）；`just selfhost-native` 0（191s，两代固定点一致、project cases 125/125）。
+新增语料：`binary-eval-layers.yh`、`unary-eval-layer.yh`、`postfix-eval-chain.yh`、
+`primary-eval-leaf.yh`。
+设计与残留（字符串标签仍按分配次序做身份、影子门不再独立互证等）见方案 §4e-3。
+
+## 2026-11-11：前端 S4-4 第一、二片——二元层与一元层迁 eval 入口（A 类 47 → 36）
+
+**结果**：8 个二元优先级层（`| ^ & ==/!= </<=/>/>= << >> + - * / %`）与 3 个一元层
+（`- + ! ~`、`*` 解引用、`&` 取地址）不再在 parse 内联调 `check.sem_binop` /
+`check.sem_unary`，改走统一 eval 入口；表达式内联 A 类 **47 → 36**，
+`parse→check` **174 → 165**，语句级 eval 点位 **0 → 3**。
+- `compiler/check/full.yh`：新增两个驱动入口 `sem_eval_bin` / `sem_eval_un`——节点模式取
+  **子节点注解**作为操作数调 `sem_binop` / `sem_unary` 内核（现场 `c_fold`、
+  `c_res_is_addr` 生效）并回填节点注解；`$for` 模板后续轮次（capture=0、不建节点）
+  与子树缺注解时退化为现场算子模式，语义同内核不退化。
+  一元层不需要额外可寻址性通道：`&x`/`*p` 的左值判定用的就是紧跟操作数解析后仍有效的
+  现场 `c_res_is_addr`。
+- `compiler/ast/api.yh`：新增 `ast_expr_finish_pending` + `ast_expr_add_inner`
+  ——先挂「待求值」节点（`kind/op/范围/子节点`，`type_id` 暂缺），语义由 eval 回填；
+  `ast_expr_add` 行为不变（`pending=0` 时仍要求语义类型）。
+- `compiler/parse/parse_expr.yh`：新增 `pe_bin_eval`（二元）/ `pe_un_eval`（一元）各一处
+  引用；8 个二元层与 3 个一元层各 7–8 行改为 3 行（删 `check.sem_binop` /
+  `check.sem_unary` 与原 `ast_expr_finish` 调用）。
+- `tests/tools/front-coupling/check.py`：eval 点位正则改为 `check.sem_eval_\w+`
+  （**修正假绿**：`sem_eval_local` 此前不计入，守卫印 `eval=0`）；
+  `PARSE_CHECK_BUDGET 174→165`、`PARSE_CHECK_EXPR_INLINE_BUDGET 47→36`。
+
+**验证**：`just dev` 过；`just test` 退出码 0（运行语料 386/388 跳 2、fail 147/147、
+front-coupling 4/4（`check=165 A 类=36 comptime=0 eval=3`））；`just front-shadow`
+退出码 0（全语料 + libs 全量影子门）；`just selfhost-native` 退出码 0（两代固定点 +
+project cases 125/125）；新增语料 `tests/yh-run/run/binary-eval-layers.yh`、
+`tests/yh-run/run/unary-eval-layer.yh`。
+**一次门禁抖动（非回归）**：`tests/modules/test-check.py` 的 `execute-timeout` 用
+`--timeout 1` 判「死循环用例被终止、后续用例继续」，机器负载高时第二个用例会被误判
+超时（复跑即绿，单独跑该目录也绿）。
+**剩余**：A 类 36（postfix/primary/调用/字面量/元信息/插值/CT 降级），后续片须先解
+`$for` 模板轮次的无节点语义、「驱动模式不能用注解反推折叠」以及 postfix/调用需要的
+现场事实通道，见 [S4-4 中期报告§7](01-finished/yh-S4-4-切换中期报告-2026-11-11.md)。
+
+## 2026-11-11：前端 S4-4 中期——语句级 eval 驱动落地，A 类 47 未删
+
+**结果**：`parse` 首次具备语句级 eval 驱动（`parse_expr_inner` 顶层回填 `Res`），
+并补齐三处 eval 覆盖缺口（名字按记录 `sym` 重放、字符串标签按节点身份判定、
+`PRIMARY(TOK_IDENT)` 包裹透传），全部门禁绿。
+- 守卫：`parse→check 173 → 174`（驱动 +1）；A 类 **47**、comptime 0、eval 点位 **1**。
+- libs 全量 eval：判定 46528→**49236**、未判定 9537→**6829**；扣结构节点后
+  实质缺口 2996→**258**（PRIMARY 111、CAST 60、BINARY 53、CALL 31、STRUCT_INIT 2、UNARY 1）。
+- **未完成**：A 类 47 一处未删（不可分片，被「eval 全节点覆盖」与「字符串标签归属」
+  挡住），故 `parse→check` 未降到 ≈126，`just selfhost-native` 本轮未跑。
+
+**验证**：`just dev` 过；`just test` 退出码 0（运行语料 384/386 跳 2、fail 147/147、
+front-coupling 4/4）；`just front-shadow` 退出码 0（全语料 383/385 跳 2 + libs 全通过）。
+设计与后续步骤见 [S4-4 切换中期报告](01-finished/yh-S4-4-切换中期报告-2026-11-11.md)。
+
+## 2026-11-12：前端 S4-4 第 1–2 步——eval 调用 ABI 重放与覆盖度量（A 类 47 未删）
+
+**结果**：按方案 §4e 实施序的第 1–2 步落地，`check` 的 eval 侧补齐「调用 ABI
+现场」这条缺口，并新增覆盖度量能力。
+- `check/full.yh`：`full_call` 改为按源码顺序重算实参（新增 `full_arg_at` 从
+  ARG_LIST 逆序链表按源码位置取实参，形参位透传 `expect`）后以
+  `sem_call_begin → sem_push_arg → sem_call` 本体重放调用——实参个数约束、
+  数组→指针退化、C-ABI 聚合值拷贝、类型化变参打包与结果类型都由同一内核给出，
+  不再读 parse 留下的 `c_args`。重放保存/恢复 `c_arg_n`/`c_call_depth`/`c_fold`
+  （含错误路径），嵌套调用互不污染。
+- 覆盖度量：`check/full_stats_report`（判定/未判定 + 按 `AST_EXPR_*` 种类的未判定
+  分布），`build/module_worker.yh` 在 `YH_AST_FULL_STATS=1` 时打印；
+  新增 `errors.note`（只写 stderr、不计错误数的说明输出）。
+- 语料：新增 `tests/yh-run/run/215-call-abi-shapes.yh`（数组→指针、类型化变参、
+  聚合按值三条路径）；`tests/tools/front-full` 夹具同步补两条路径形状。
+
+**实测**：libs 全量 `判定 46528 / 未判定 9537`，扣掉结构节点（ARG_LIST 6468、
+STRUCT_FIELD 103，设计内无注解）后实质缺口 **2996**：PRIMARY 1628、BINARY 589、
+CALL 529、CAST 214、STRUCT_INIT 5、UNARY 1。缺口归因已写入方案 §4e-1：
+字符串字面量登记（PRIMARY 主因）、CALL 传染、内联聚合字面量实参、非 const
+名字绑定。
+
+**验证**：`just dev` 构建过；`python3 tests/tools/front-coupling/check.py` 4/4
+（check=173、comptime=0、表达式内联=47、eval=0，预算未动）；front-full 夹具
+PASS；`just front-shadow`（全语料 383/385 跳 2 + libs 全通过）绿；
+`tests/yh-run/check.py --filter 215-call-abi-shapes` 1/1。
+
+**未完成**：A 类 47 处表达式内联语义一行未删（切换不可分片，仍被「字符串字面量
+登记身份」与「非 const 名字绑定重放」两件前置挡住，见方案 §4e-1）。S4-4 收口
+（全量门禁 + 文档收口）随后续切换一起做。
+
+## 2026-11-12：内存安全分析交付（只读评审，零代码改动）
+
+**结果**：新增 [yh 内存安全分析](03-design/yh-内存安全分析.md)，按「编译器自身」
+与「生成程序语义」两条边界评审；结论表 S1–S11 + 8 条正面结论，每条带可重放的
+复现语料与根因 file:line。加固项 M1–M6 记入 [todo](todo.md)。
+
+**已实测（`./yh` = `yh 0.0.14`，Darwin arm64）**：
+- S1 常量下标越界无诊断：`a[4]`/`a[-1]` 对 `[4]u8` 编译通过并运行。
+- S2 切片范围不校验：`a[0..16]` 对 `[4]u8` 得到 `len=16`，`bad[100]` 读出相邻栈字节。
+- S3 越界无检测：16 字节堆分配外写 4000 字节完全静默（mmap 页粒度 4 KiB）；
+  栈数组越界 28 字节 → 打印 ok 后 Bus error（138）。
+- S4 解析递归无守卫：16000 层 `if`、8000 个 `*` 令 `--syntax-check` SIGSEGV
+  （语句 8000 层仍通过，类型 7000 层仍通过）；表达式侧 `PX_NEST_MAX=256` 正常报错。
+- S5 `printf("%s %s %s", a)` 编译通过，缺失实参的 `%s` 解引用垃圾槽并输出乱码字节。
+- S6 `let a [1000000000]u8` 编译通过 → 运行时 1 GB alloca SIGSEGV。
+- S7 `return &buf[0]`（局部数组）编译通过；S8 重复/释放后 `free`/读 → SIGSEGV(139)。
+- 正面：`5/0 → 0`、`1u64<<64 → 1`（移位掩码 63）、`INT64_MAX+1` 定义回绕，
+  无 SIGFPE；`nm -m` 显示 `_memcpy/_memset/_strlen/_printf` 为 private external，
+  不劫持 libc 符号。
+
+**未改动任何 `.yh` 源码**，因此未跑 `just test`（本条目只增文档；加固项落地时按
+M1–M6 各自验收）。复现语料留在 `tmp/sec-audit/`（`tmp/` 已被忽略，不随提交）。
+
+## 2026-11-11：前端 S4-3 五片——$-调用求值门面下沉，parse→comptime = 0
+
+**结果**（簇2/3 余 9 处，全部在 parse_expr 的 `$` 调用求值路径）：
+`check/ct_gate.yh` 追加 `ct_fn_found`（正文登记查询）、`ct_global_agg_lookup`、
+`ct_pool_elem_of`、`ct_pool_register_src`、`ct_call`（实参经 `support.Res` 数组）、
+`ct_arg_pool_agg`、`ct_target_symbol`。parse_expr 删 `import comptime`。
+- 守卫：**`PARSE_COMPTIME_BUDGET` = 0**（S4-3 目标形态达成：parse 不再直接
+  引用 comptime，引擎只经 check 调用）；`PARSE_CHECK_BUDGET` 164 → **173**
+  （S4-4 删 A 类 47 后净降约 126）。
+
+**验证**：`just dev` 构建过；front-coupling 4/4（check=173 **comptime=0**
+表达式内联=47 eval=0）；`YH_AST_FULL_CHECK=1 YH_AST_FULL_FILL=1 just
+selfhost-native` **全绿**——两轮最终树各跑一遍（bdej7vlrg、b9ctcjv3w；后者
+含 `check.sem_eval_node` 公开面）：反例 49/49、运行语料 383/385 跳 2 平台例、
+project cases 125/125、两代固定点。
+
+**S4-3 结论**：`parse→comptime = 0` 目标形态达成并全量验证；comptime 保持
+叶子引擎，全部交互经 `check/ct_gate.yh` 门面。剩余 S4 工作为 S4-4
+（表达式内联 A 类 47 → 0 + 语句级 eval），逐点清单与设计见方案 §4e。
+
+## 2026-11-11：前端 S4-3 四片——全局聚合建模与声明收尾门面下沉（31 → 9）
+
+**结果**（簇3 主体 + 簇2/4 余件，`check/ct_gate.yh` 收尾）：
+- **全局聚合建模**（parse_global_init 17）：`ct_agg_modelable/new/set/set_obj/
+  register` 门面；`ct_agg_emit_global` 把 `comptime.CtValue` 构造吸收进 check
+  （parse 不再出现 comptime 类型）；`ct_pub_agg_fn_add` 转发。逐元素填位仍在
+  parse（§4f「先门面后吸收」的第一段；吸收需改初始化器解析形状，另行立项）。
+- **声明收尾**（parse_decl 4）：`ct_is_prepared`、`ct_struct_layout_pending/
+  defer`、`ct_register` 转发；parse_decl 与 parse_global_init 删 `import comptime`。
+- 守卫：`PARSE_COMPTIME_BUDGET` 31 → **9**；`PARSE_CHECK_BUDGET` 143 → **164**。
+- **余 9 处全部在 parse_expr**（`$-调用求值`：ct_find/ct_call/agg_lookup/
+  pool_elem_of/pool_register_src/arg_pool_agg×3/ct_target_symbol），按 §4f 属
+  S4-4 eval 语义动作同层，与表达式内联删除一并完成（届时 parse→comptime=0）。
+
+**验证**：`just dev` 构建过；front-coupling 4/4（check=164 comptime=9
+表达式内联=47 eval=0）；`YH_AST_FULL_CHECK=1 YH_AST_FULL_FILL=1 just
+selfhost-native` 运行中（完成后回填）。
+
+## 2026-11-11：前端 S4-3 三片——展开簿记门面下沉（49 → 31）
+
+**结果**（簇1 余 18 处，`check/ct_gate.yh` 追加展开簿记门面）：
+- `ct_expand_capture_enter/leave`（2）、`ct_expand_control_enter/leave`（5）、
+  `ct_expand_for_begin/end`（5）、`ct_expand_iter`（charge_expansion +
+  for_boundary_value 成对，6）、`ct_expand_iter_ast`（3）。`$if`/`$for` 展开
+  骨架（逐轮重解析、模板捕获）与阶段次序不动，parse_comptime 删 `import comptime`。
+- 守卫：`PARSE_COMPTIME_BUDGET` 49 → **31**；`PARSE_CHECK_BUDGET` 128 → **143**。
+  剩余 31 = parse_expr 9（$-调用求值，随 S4-4 eval 删）+ parse_global_init 18
+  （全局聚合建模）+ parse_decl 4（is_prepared/struct 延迟/ct_register）。
+
+**验证**：`just dev` 构建过；front-coupling 4/4（check=143 comptime=31
+表达式内联=47 eval=0）；`YH_AST_FULL_CHECK=1 YH_AST_FULL_FILL=1 just
+selfhost-native` 全绿（反例 49/49、运行语料 383/385 跳 2 平台例、
+project cases 125/125、两代固定点）。
+
+## 2026-11-11：前端 S4-3 二片——布局/依赖/枚举/签名门面下沉（75 → 49）
+
+**结果**（§4f 归位：簇2 主体 + 簇4 签名，新增 `check/ct_gate.yh` 门面文件）：
+- **签名校验吸收**：`parse_decl` 的 comptime 返回/形参可解释性两段循环 →
+  `check.sem_comptime_sig(ret, ptypes, np)`（返回 -1/-2 两档，诊断消息原样保留）。
+- **布局驱动门面**（15 → 6 入口）：`ct_layout_register_rows`（整文件登记循环）、
+  `ct_layout_request_count`、`ct_layout_expr_pending_count`、`ct_layout_row_span`
+  （pending+file 判定与 first/after 一次取回）、`ct_layout_expr_runnable`、
+  `ct_layout_set_length`；驱动三阶段骨架与阶段次序保持不动（build 调用点不变）。
+- **依赖发现门面**（7 → 5 入口）：`ct_layout_value_runnable/requested`、
+  `ct_layout_const_request`、`ct_layout_const_dependency`（把「声明在 owner 之前
+  才一并请求」的语义判定连同 dependency_add 一起吸收）、`ct_layout_fn_dependency`；
+  parse 只留 token 区间定位与 `$`/标识符扫描。
+- **枚举元信息**：`$for E.values` 的 `ct_enum_member_count/at` 走门面。
+- **iface 正文校验**：`parse/api:248` 的 `ct_find`+签名比对 → `check.sem_ct_body_ready`
+  （诊断消息留在调用点）。
+- 守卫：`PARSE_COMPTIME_BUDGET` 75 → **49**；`PARSE_CHECK_BUDGET` 111 → **128**
+  （临时 +16 门面，S4-4 删 A 类 47 后净降约 81）。
+
+**验证**：`just dev` 构建过；front-coupling 4/4（check=128 comptime=49 表达式
+内联=47 eval=0）；`YH_AST_FULL_CHECK=1 YH_AST_FULL_FILL=1 just selfhost-native`
+全绿（反例 49/49、运行语料 383/385 跳 2 平台例、project cases 125/125、
+两代固定点）。
+
+## 2026-11-11：前端 S4-2f 字符串侧表实验——full_string 内容比对证伪回退
+
+**结果**：实现 `check.full_string`（注解数据标签经 `table.data_str_lookup` 反查
+登记字节，与节点 `TOK_STRING` token 字节逐字节比对，一致复刻注解结果、不一致
+`full_fail_node`），意图覆盖影子门最后一个未判定字面量。**证伪回退**：
+- 语料 + libs（`YH_AST_FULL_CHECK=1 YH_AST_FULL_FILL=1 just test`）全绿；
+  但 selfhost-native 的 project cases `ct5b-cross-module-body` 与
+  `ct5b-string-pointer-constant-closure` 报「字符串标签登记与节点长度不一致」。
+- 根因：跨模块 CT 闭包采纳把注解标签改指**提供方**登记（fixture 断言字符串
+  数据隔离在提供方 .data）——「登记字节 == 节点 token 字节」的前提在采纳后
+  本身不成立，非真漂移，不得放宽比较，按预登记方案回退 -2（注释保留实验结论）。
+- 稳定侧表若要做，需按内容/对象身份另建表（`data_str` 无属主元数据，无法先验
+  区分采纳节点），不做。
+
+**验证**：回退后 `just dev` 构建过；ct5b host 在影子门 env 下手动构建通过；
+`YH_AST_FULL_CHECK=1 YH_AST_FULL_FILL=1 just selfhost-native` 全绿（反例
+49/49、运行语料 383/385 跳 2 平台例、project cases 125/125、两代固定点）。
+**教训**：`just test` 不含 project cases，跨模块语义改动必须以 selfhost-native 为准。
+
+## 2026-11-11：新增标准库专项 CI（stdlib.yml）+ justfile 门禁拆分
+
+**结果**：
+- 新增 `.github/workflows/stdlib.yml`：四端（linux-x64、linux-arm64、
+  darwin-arm64、windows-x64）只跑标准库。Linux/Darwin 执行
+  `just test-stdlib-unix`（core + extras + `SYNC_REPEAT` 次 sync 压力），
+  Windows 执行 `just test-stdlib-windows`（core + 压力；安装布局验收仅 Unix）。
+  触发路径限于 `libs/**`、`tests/{string,toml,fmt,num}/**`、
+  `tests/modules/projects/**`、`justfile` 与本工作流；种子/LLVM 闭包/缓存 key
+  与 `ci.yml` 一致，四端命中同一份闭包缓存。
+- justfile 拆分：`test-libs` → `test-libs-core`（跨平台 test 块 O0/O2）+
+  `test-libs-extras`（Unix 外部 runner/安装布局）；新增 `test-sync-stress`、
+  `test-stdlib-unix`、`test-stdlib-windows`；`SYNC_REPEAT` 可覆盖重复次数。
+
+**证据**：
+- `just test-libs`（拆分后）exit 0；`SYNC_REPEAT=2 just test-sync-stress`
+  两轮各 10 passed。
+- `just --dry-run test-stdlib-unix` 展开为 core → extras → 10 次
+  `--filter sync`；YAML 解析通过（4 个 job，6/6/7/7 步）。
+
+**限制**：Actions 本身需 push 触发，本机未执行；Windows 的并发用例在
+`prim.windows.yh` 落地前自动跳过。
+
+## 2026-11-11：sync 接入 Linux（libc pthread）+ 修复三处标准库安装清单
+
+**结果**：
+- `libs/sync/prim.linux.yh` 由占位改为 libc pthread：与 Darwin 同形
+  （`pthread_create/join/detach/self`、`pthread_mutex_*`、`pthread_cond_*`，
+  yh 侧 C ABI 跳板），`platform_ready()` 返回 1。不需要 clone 垫片：
+  `tools/llvm-sdk.py` 用构建机 GCC 的 `collect2` 参数生成 ELF 链接模板，
+  固定包含 crt1/crti/crtn 与 `-lc`。
+- 修复 api.yh 迁移遗留的三处陈旧安装清单（`tests/string|fmt|toml/install.py`）：
+  改为从 `libs/<mod>/*.yh`（排除 `.test.yh`）推导，不再硬编码已删除的
+  文件名；`just test-libs` 从失败恢复为全绿。
+
+**证据**：
+- `yh check --target {aarch64,x86_64}-unknown-linux-gnu` 通过；交叉产物
+  `yh_libs-sync.s` 含 `bl pthread_create` / `bl pthread_join` /
+  `b pthread_mutex_lock` / `bl pthread_cond_wait` / `b pthread_self`。
+- Darwin：`cd libs && ../yh test --filter sync` 10 passed（O0；变更后复跑）。
+- `just test`、`just test-libs`、`just build` 全部 exit 0。
+
+**限制**：本机无 Linux 容器，Linux 线程运行期验证待容器门；Windows 仍占位。
+
+## 2026-11-11：多线程标准库 L1（Darwin）——`libs/sync` 落地，零语言改动
+
+**结果**：
+- 新增 `libs/sync`：`api.yh`（类型/状态码/互斥与条件变量公开面/内部派发块）、
+  `thread.yh`（Thread 状态机与派发块）、`waitgroup.yh`、`once.yh`、
+  `prim.darwin.yh`（pthread + yh 侧 C ABI 跳板）、`prim.linux.yh` /
+  `prim.windows.yh`（显式失败占位）、`doc.yh`、`README.md` 与两个测试文件。
+- 线程入口固定 `fn(*void) void`，参数与结果由调用方装箱；`Thread` 支持
+  join/detach；`Mutex/Cond/WaitGroup/Once` 全部基于不透明块 + 平台原语。
+- 未改语言/语法/AST/检查器/IR/缓存，未滚种子；库只用既有 `@[extern]` 能力。
+
+**证据**：
+- `cd libs && ../yh test --filter sync` → 10 passed；`-O2` 同样 10 passed；
+  连续 20 次重复 0 失败。
+- 带 `[dependencies] yh_libs` 的临时项目端到端：2 线程 × 100000 次互斥累加
+  输出 `200000`。
+- Darwin `sizeof`：pthread_mutex_t 64 / pthread_cond_t 48 / pthread_attr_t 64 /
+  pthread_t 8 / pthread_rwlock_t 200（后两者决定 Thread 用 u64、L4 的 RwLock
+  需要更大块）。
+
+**踩坑**：模块内类型按文件名字节序生效；`prim.darwin.yh` 排在 `thread.yh`
+之前，`Dispatch` 必须定义在第一个文件 `api.yh`，否则报「未知类型」。
+
+## 2026-11-11：前端 S4-3 一片——边界校验与诊断收尾吸收进 check（77 → 75）
+
+**结果**（§4f 普查后的第一片落地，两个「吸收进现有钩子」归位）：
+- `ct_validate_loop_exit` 并入 `check.sem_break/sem_continue`
+  （check/api.yh:3328 起）：校验保持在循环深度检查**之前**（顺序承载语义：
+  `$for` 体顶层 break 必须报边界错误而非「不在循环内」，fail/82/83 钉住）；
+  parse_stmt 删除前置校验与 `import comptime`。
+- 新门面 `check.sem_stmt_diag(&res, test_body)`（语句级编译期诊断收尾，
+  $assert/$compile_error/$compile_warn）：条件原样搬入（compile/comptime 函数体/
+  test 体断言三重早退），parse_stmt 语句末尾改调此门面。
+- 守卫：`PARSE_COMPTIME_BUDGET` 77 → 75；`PARSE_CHECK_BUDGET` 110 → 111
+  （+1 门面入口，§4f 预期内暂升；S4-4 删 A 类 47 后净降到约 64）。
+
+**验证**：`just dev` 构建过；front-coupling 4/4（check=111 comptime=75
+表达式内联=47 eval=0）；`YH_AST_FULL_CHECK=1 YH_AST_FULL_FILL=1 just test`
+全绿——语料 383/385（2 平台跳过），**fail/82-comptime-for-break-escape 与
+fail/83-continue-escape 全过**（诊断次序与消息不变，无需新增语料；
+钉住案例即行为验证）；同 env `just selfhost-native` 两代固定点 exit 0。
+
+## 2026-11-11：前端 S4-3 前置——77 处 parse→comptime 施工普查（方案 §4f）
+
+**结果**：通读 parse_comptime（$if/$for 展开驱动）与 parse_interp（字符串插值
+降级，其 check 引用属 S4-4 A 类），77 处 parse→comptime 逐点归位（剥注释口径
+精确计数，与 front-coupling 一致）：
+- **展开控制 19**：parse_comptime 18（enter/leave_control 5、for_boundary 5、
+  capture 2、charge 6）+ parse_stmt 1（`ct_validate_loop_exit` 吸收进
+  `check.sem_break/sem_continue`）。展开骨架（逐轮重解析、模板捕获）留 parse。
+- **值/布局查询 32**：布局驱动 15（parse/api——骨架留 parse，build 三处调用
+  module_worker/llvm_emit/module_emit，队列查询走 check 门面）+ 值依赖队列 7
+  （parse_ct_layout，语义判定进 check）+ 枚举元信息 2 + $-调用求值 4
+  （parse_expr，与 S4-4 eval 同层，check 新 `sem_ct_call` 一族）+ 就绪查询 3
+  （parse_decl）+ iface .s.ct 校验 1（parse/api:1243 → check/iface_emit）。
+- **数据登记 22**：全局聚合建模 17（parse_global_init 逐元素穿插填位——
+  先门面后吸收，分两片）+ $-实参池 4 + comptime 函数登记 1（parse_decl）。
+- **诊断/IR 支持 4**：`ct_diag_emit` 吸收进 check 语句收尾；`ct_target_symbol`
+  归 $-表达式求值层；`ct_ir_return/param_supported` 吸收进签名检查。
+
+**已确认的通路**：check 已 import comptime（api/iface_emit/type_syntax 三处），
+parse→check→comptime 守卫允许；comptime 保持叶子引擎（只依赖
+errors/support/table/token）；`$if` 条件求值走 c_fold+check（无 comptime 引用）。
+目标形态：parse→comptime = 0，parse→check +约 12-15 门面入口
+（预算 110−47+20 ≈ 83），check→comptime +77。
+
+**验证**：纯勘察与方案文档，无代码改动。
+
+## 2026-11-11：前端 S4-4 前置——front-coupling 守卫按类别计数
+
+**结果**：
+- parse→check 预算从单一总数升级为三道：**总数 ≤110**（外帽）+ **表达式内联
+  A 类 ≤47**（S4-4 改版删除目标，达标线 0；按方案 §4e 符号集
+  `sem_binop/unary/cast/sizeof/member/index/slice/ident*/number/string/char/
+  raw_string/struct_lit_field/field_meta_name/enum_meta_*/call_begin/push_arg/
+  call/sizeof_type_path` × `parse_expr/parse_interp/parse_comptime` 三文件实测）+
+  语句级 eval 点位 `check.sem_eval_subtree` **≤25**（§4e 普查 ≈20，改版前为 0）。
+- 实测分布（剥注释口径）：A=47（parse_expr 34 / parse_interp 7 /
+  parse_comptime 6）；其余 63 处是语句/声明/类型级（语句侧 `sem_can_assign`、
+  绑定登记、类型语法），永久留在 parse，不设 A 类预算。
+- 词边界防误计：`sem_call\b` 不吃 `sem_call_begin`；parse_type 的
+  `sizeof_type_path` 是类型语法，归 B 类不计入 A。
+
+**验证**：`python3 tests/tools/front-coupling/check.py` →
+`check=110 comptime=77 表达式内联=47 eval=0`，4/4 通过。
+
+## 2026-11-11：前端 S4-2f 二片——类型导向重算 `full_expr_at`
+
+**结果**：
+- `full_expr` 升级为**类型导向**入口 `full_expr_at(id, expect, out)`：父级把目标类型
+  传给子节点——调用实参按签名形参位（`sig_params[sfirst+pos]`，ARG_LIST 逆序单链，
+  位置=总数-1-深度）、聚合元素/字段值、三元两支、括号透传；ARRAY/STRUCT_INIT 比对
+  「上下文推导 vs 解析期记录的 `expect_type_id`」，不一致即 -1（漂移）。操作数位置
+  （二元/一元/cast/index/member/slice 的子节点）保持无上下文——类型由自身推导，
+  与 parse 的 `sem_*` 同源。
+- 意义：证明聚合字面量的目标类型可**不经 parse 的 Res 独立重建**（语料+标准库
+  无一处漂移），这是 S4-4「parse 先纯语法、后 fill」切换能保持产物不变的依据。
+- `full_fail_report` 探针收缩：删 `c0*`/`c1*` 子节点探针字段，保留
+  节点/差异位/kind/op/newt/oldt 与 `text=` 源码片段（future 诊断仍够用）。
+- `front-full` 夹具扩展两条新路径：聚合作实参（`sum4([1,2,3,4])`、
+  `pkt_tag(Packet{…})`——实参目标类型来自签名形参位）与嵌套结构体
+  （`Wrap{p: Packet{…}, n: 3}`——字段类型逐层下传）。
+- **can_assign 镜像补齐**（影子门绿，无假红）：`full_array` 逐元素
+  `table.vk_can_assign`（镜像 parse_expr:293，big 位实传）、`full_struct_init`
+  逐字段（镜像 `sem_struct_lit_field`，big 位硬编码 0）；未判定元素/字段
+  （st==-2）不镜像。实测结论：字面量注解不被窄化改写（u8 字段里的 `200`
+  注解仍是 i32），expect 只影响接受性；调用实参兼容有三条特殊路径
+  （数组→指针退化等），盲镜像会假红，留给 eval 调 `sem_call` 本体（见方案 §4e）。
+- 语料：`run/aggregate-lit-narrow`（u8 字段/数组元素/三元分支/实参的合法窄化）
+  与 `fail/106-aggregate-lit-out-of-range`（字段窄化越界钉诊断）；踩坑：裸
+  `let` 表达式不能跨行续写（不在括号内的换行会拆语句），多行只在调用括号内合法。
+
+**验证**：`just dev` 构建绿；`just front-shadow`（verify+fill）语料 381/383
+（跳过 2 个平台专属）+ 标准库全绿；`front-full` 扩展夹具绿；`just test`
+（verify+fill 双开）全绿；`front-coupling` 基线 110；`selfhost-native`
+（verify+fill 双开）全绿。
+
+## 2026-11-11：前端 S4-2f 首片——回填通道与死语义调用删除（基线 161 → 110）
+
+**结果**：
+- **回填通道**：`ast.ast_expr_fill_semantics` 把重算结果写回节点的语义结果字段
+  （不碰绑定快照/布局字段）；`check.full_fill_file` 逐文件回填；模块 worker 新增
+  `YH_AST_FULL_FILL=1`（与 verify 同循环、先 verify 再 fill），lower 从此消费的
+  就是回填值。`just front-shadow` 同时打开 verify+fill。
+- **删除死语义调用**（parse→check 基线 **161 → 110**）：
+  - 三元：`sem_ternary_cond/mid/end` 只剩旧发射器的标签栈（无消费者）；改为
+    parse 内联「折叠拒绝 + 嵌套深度」两条诊断。
+  - 逻辑与/或：`sem_shortcircuit/_end` 的折叠值改为 parse 内联（左右真值、原有
+    诊断、运行期只清 is_const），标签栈一并删除。
+  - `sem_stash_lvalue`（空实现）、`sem_len`（类型判定内联）、`sem_bool`（字面量）、
+    `sem_forin_set_bind/check/load/step`（lowering 接管后的空实现）、
+    `sem_forin_begin/end`（只剩深度簿记，parse 内联）、
+    `sem_struct_lit_begin/end`（目标类型改参数传递，留在 fc 的上下文栈无消费者）、
+    `sem_forin_elem_type`（元素类型两行内联）。
+- **纯类型操作下移 `table`**：`ty_ptr`/`ty_slice`/`ty_sig_param`/`ty_add_name_attrs`/
+  `sym_mangle`/`tname_mangle`（类型构造与名字改写）与 `ty_field_lookup`
+  （按名查字段表），parse 改调 `table.*`；check 删除随之无用的 `intvec_grow`、
+  `errors` 导入。
+
+**同片清理**：删除调用后变为死状态的 `FrontCtx` 字段一并移除（`tn_*`/`sc_*`
+标签栈、`c_fi_*` 迭代槽、`c_lit_save_*`/`c_lit_tid`/`c_lit_off` 字面量上下文、
+`c_temp_off`），`sem_init_tables` 的对应分配与校验同步收缩。
+
+**补语料**：`fail/100-logic-float-operand`、`fail/101-len-non-array`、
+`fail/102-ternary-in-const`（钉住内联后保留的三条诊断）与
+`run/logic-const-fold`（常量上下文 `&&`/`||` 折叠结果）。
+
+**踩坑**：三个模块夹具（`gen-split`/`ctfacts`/`llvmchecked`）直接调用
+`check.ty_ptr`/`check.ty_slice`/`ty_sig_param`；公共面下移 `table` 后必须同步夹具，
+否则项目门在 `main.yh` 报「模块没有导出该名字」。
+
+**验证**：`just front-shadow`（语料+标准库，verify+fill）绿；`just test` 绿；
+`selfhost-native` 固定点/自解析/模块/项目全绿；`front-coupling` 4/4（预算 110）。
+
+## 2026-11-11：前端 S4-2f 前置——影子门覆盖全部运行期表达式
+
+**结果**：
+- `AstExpr`/`CtExpr` 末尾新增 `expect_type_id`（两结构布局必须一致，
+  `check/api.yh` 有 sizeof 相等的运行期守卫）；`ast` 新增
+  `ast_expr_set_expect/expect_of`，ARRAY/STRUCT_INIT 的四个创建点（局部、全局、
+  嵌套）写入解析期目标类型。
+- `check/full.yh` 新增重算：`sizeof(T)`（类型 arena 反查根节点 + `type_resolve`）、
+  `len(x)`（数组折常量、切片 TY_I32）、`&x`/`*p`（指针/元素类型）、
+  `&&`/`||`（运行期沿用右操作数类型；折叠按两侧真值）、`ARRAY`（元素链个数核对）、
+  `STRUCT_INIT`（字段下标与值存在性核对）。
+- `front-coupling` 守卫跟上 `types`/`table` 拆分：`TYPE_TABLE_LOOKUPS` 改
+  `table.*`/`proj.*`（旧 `support.*` 名已不存在，守卫此前形同虚设），并锁定
+  `types` 无依赖、`table` 不依赖上层模块。
+- `front-full` 夹具补齐：指针取址/解引用、切片与 `len`、三元、`&&`、
+  结构体命名式字面量、`sizeof(int)`。
+
+**踩坑**：
+- `&&`/`||` 的运行期结果类型**不是** BOOL：parse 把右支解析进 `res`，
+  `sem_shortcircuit_end` 只清 `is_const`，因此 `!x || y` 这类结果沿用右支的
+  int 类型（`!boolvar` 本身是 int）。重算必须整体取右操作数，不能在左操作数上改。
+- `ARRAY`/`STRUCT_INIT` 的语义输入只有解析期目标类型；`expect_type_id` 是记录
+  下来的输入，不是独立重算结果，本片核对的是「元素链个数 / 字段下标与值」。
+
+**验证**：新增 `just front-shadow`（yh-run 语料 + `libs` 全模块 `yh check`，均带
+`YH_AST_FULL_CHECK=1`）供复跑；语料 381/383（2 跳过，新增 4 例）；`just test` 全绿；
+`selfhost-native` 固定点一致、cc4 自解析、modules 19/19、project cases 125/125。
+
+**S4-2f 仍未完成**：删除 parse (A) 类调用需要整棵表达式树改为「先纯语法、
+后 check 回填」，而 parse 的后缀判定（`.成员`/`sizeof` 类型路径/结构体字面量）
+与语句检查仍依赖当场算出的类型与符号——按方案属于 S4-4 的语法决策自足化。
+影子门现已覆盖全部可重算形态，为回填提供判据。
+
+## 2026-11-11：前端 S4-2d——影子门覆盖到运行期表达式（含混合类型）
+
+**结果**：`check/full.yh` 的非折叠二元不再跳过混合操作数类型，而是**直接复用
+`sem_binop` 本体**（字面量适配、整数/无符号提升、指针分支、比较结果 BOOL 全由它
+决定）；并新增以下重算：
+
+- `INDEX`/`SLICE`：由基址类型重算元素/切片类型（指针/数组/切片同规则）。
+- `MEMBER`：由基址结构体与成员名 token 重查字段表；枚举成员与元信息投影跳过。
+- `CALL`：被调者重算须为函数类型，结果取签名返回类型；`$` 调用跳过。
+- `CAST`：按节点 token 区间在类型 arena 找同一次解析创建的根类型节点
+  （新增 `ast.ast_type_count_now()`），走 `type_resolve` 独立重解。
+- `TERNARY`：结果语义取中支（parse 的 `res_copy(res, &mid)`）。
+- 地址常量（`F_ADDR`）：改重走 `sem_ident`（读符号表里已登记的数据标签，不重复登记）。
+
+**留白**：
+- 字符串字面量的常量值是会话内分配的字符串数据标签；跨模块/CT 重放时同一标签
+  指向提供方的登记项（实测：`base` 模块里本地 `"hi"` 节点的注解标签 2 指向提供方
+  21 字节的登记），标签号与登记内容都不可比。留给 S4-2f 的稳定字符串侧表。
+- `ARRAY`/`STRUCT_INIT`/`STRUCT_FIELD` 的结果类型来自解析期期望类型上下文
+  （`c_expect_tid`/`c_lit_tid`），节点里没有独立语法输入，随 S4-2f「期望类型记进节点」
+  一并纳入。
+
+**S4-2e 结论**：`lower/` 对 `support.fc()`/`check.sem_*` 的引用为 0，表达式读点
+已经是快照里的 `ast.AstExpr` 注解（`check/checked_model.yh` 深拷贝 arena）——
+读点切换无需额外改动。
+
+**踩坑**（影子门从语料扩到 stdlib/自举时逐个暴露）：
+- `CAST` 在折叠上下文里会把常量字面量按目标宽度归一（浮点写位模式）并保留
+  字面量性；`full_cast` 必须复刻这条常量转换，否则 `is_const` 逐位不一致。
+- 二元是否折叠**不能**用「操作数是不是字面量」判断：函数体里的 `1 << 63`
+  操作数都是字面量，但旧路径在运行期求值（折叠会误报编译期溢出）。改为看注解
+  `is_const`：算术运行期必清 `is_const`；比较先算折叠候选值，与注解 ival 一致
+  才算折过，否则走运行期（`sem_binop` 本体）。
+- `parse_primary` 会给**模块限定名**（`m.f`）包一个 `PRIMARY/TOK_IDENT` 节点，
+  区间从模块名开始。`full_name` 加了「区间 token 文本 = 快照符号名」的前置判定，
+  这类节点不判定（否则会拿模块名重查符号报「未声明」）。
+
+**验证**（darwin-arm64）：`YH_CACHE=off just dev`；`YH_AST_FULL_CHECK=1` 下
+yh-run 语料 377/379（2 跳过）全通过；`tests/tools/front-full/check.py` PASS；
+`YH_AST_FULL_CHECK=1 just test` 全绿（含 libs/模块/工具链层）。
+
+## 2026-11-11：合入 `s4-2c` 工作区（类型表外置 + 影子门扩覆盖）
+
+`tmp/wt-s42c`（分支 `s4-2c`，基线 `d055c87`）的两个提交与一处未提交改动，逐文件
+归一化比对后确认**代码内容已全部在主工作区**：`types`/`table` 拆分（0dec7b8）时
+已经按新模块重限定落地，`support.` 名字由 `table.*`/`types.*` 承担。
+
+| s4-2c 内容 | 主工作区落点 |
+| --- | --- |
+| af3ae42：影子门判定扩到所有表达式类型 | `check/full.yh` + `ast.ast_expr_sym_type_of`（工作树内，随 S4-2d 一并提交） |
+| f740e26：类型表与文本判定外置 | `table.sig_add`/`cabi_scalar`/`cabi_param`/`c_layout`/`fn_abi`、`support.num_is_float`；check 侧只留转发 |
+| 未提交：`loop_push`/`loop_pop` 上移 | `support.loop_push`/`loop_pop`，`parse_stmt` 调用点已切 |
+
+**验证**：
+- 8 个搬迁函数按「去模块限定符 + 去空白」归一化后与 `s4-2c` 版本逐字一致；
+  `parse_stmt.yh` 归一化后与工作树逐行一致；`check/api.yh` 已无 `sem_loop_*`。
+- `tests/tools/front-coupling/check.py` 4/4（parse→check 139）。
+
+**结论**：`s4-2c` 不再持有主工作区缺失的代码，worktree 可退役（其两个提交内容以
+下方两条记录为准）。**遗留**：`front-coupling` 的 `TYPE_TABLE_LOOKUPS` 仍写
+`support.ms()`/`support.ty_lookup_name` 等旧名，`table` 拆分后该守卫对
+`table.*` 查表不会报警，需随 S4-4 补 `table` 模式。
+
+## 2026-11-11：前端 S4 片——类型表与文本判定外置（parse→check 150 → 145）
+
+**结果**：把 check 里纯数据/纯文本的辅助下沉：
+
+- `sig_add`（签名登记）、`cabi_scalar`/`cabi_param`/`c_layout`（C ABI 兼容性纯类型表
+  查询）、`fn_abi`（函数类型查找/登记）迁出 check；`num_is_float`（数字字面量浮点
+  形态判定）迁出 check，parse 直接调用，`check.sem_num_is_float` 变转发。
+- check 的 `ty_sig_add`/`ty_cabi_scalar` 在调用点归零后删除；`ty_fn_abi`/
+  `ty_cabi_param`/`ty_c_layout` 保留薄转发。
+- `parse/parse_decl.yh`、`parse/parse_global_init.yh` 调用点改走新入口。
+- 同日 `table` 拆分（ADR-0027）后，纯类型表操作落在 `table`（`table.sig_add` 等），
+  `support` 只留 `num_is_float`/`loop_push`/`loop_pop`。
+
+**验证**（2026-11-11，darwin-arm64，隔离 worktree 分支 `s4-2c`）：`YH_CACHE=off just build`；
+yh-run 377/379（2 跳过）全通过；front-coupling/front-syntax/front-full 全 PASS；
+模块门 `build-check.py --backend llvm` 128 通过且失败集合与基线一致（零新增）。
+
+## 2026-11-10：前端 S4-2c——影子门判定扩到「所有表达式类型」
+
+**结果**：`check/full.yh` 的判定口径拆两档——**类型**始终可比（非折叠表达式也有
+类型，从节点重算后逐节点比对）；**常量值/字面量性/浮点位型**只在旧路径折叠过
+（注解 `is_const != 0`）时可比。
+
+为把「类型」重算做对，本片踩出并复刻了三条真实语义：
+
+1. 一元非折叠路径同样做 BOOL→int 提升（`!boolvar` 的结果类型是 int，不是 bool）。
+2. 二元非折叠路径里比较运算仍调用 `sem_res_const(BOOL, 0)`，注解因此带
+   `is_const = 1, ival = 0`；影子门照抄，否则把「本来如此」判成不一致。
+3. 折叠内核输出浮点结果时同时写 `fval_bits`（const 初始化与浮点装载都读它）。
+
+**有意留白**：混合操作数类型（无符号提升/字面量适配/聚合与指针特例）不猜，留给
+S4-2d（届时复用 `sem_binop` 本体而非复刻规则）。名字叶子只判定全局 const 与由
+`sym_type_id` 快照判定的变量类型。
+
+**验证**（2026-11-10，worktree 分支 `s4-2c`，基线 `d055c87`）：
+`YH_AST_FULL_CHECK=1 just test` 377/379 全通过；`YH_AST_FULL_CHECK=1 just selfhost-native`
+模块固定点一致（54 产物）、cc4 自解析 181 文件；`build-check.py --backend llvm`
+开门禁与关门票的失败集合完全一致（128 通过，同一批环境性失败）。
+
 ## 2026-11-11：static_data 并入 table（ADR-0028）
 
 把静态数据目录从 support 并入 `table`，完成「语义存储全在 table」的收口。

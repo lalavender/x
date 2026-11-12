@@ -11,6 +11,45 @@
 - 添加接口功能
 - project.toml 添加[env]
 
+## 2026-11-12 内存安全加固（P0/P1，分析已交付）
+
+分析：[yh 内存安全分析](03-design/yh-内存安全分析.md)（2026-11-12，已验证 S1–S8）。
+下列各项都**只做编译期静态诊断或运行时零成本校验**，不引入边界检查/生命周期防护
+（那是 ADR-0001 与文末「设计决定不做」的口径）。
+
+- [ ] M1（P0）：语句/类型解析加深度守卫（上限 256，复用 `PX_NEST_MAX` 机制）。
+      复现：16000 层 `if` / 8000 个 `*` 让 `./yh --syntax-check` SIGSEGV 且无诊断。
+      落点 `compiler/parse/parse_stmt.yh`、`compiler/parse/parse_type.yh`；
+      验收 `tmp/sec-audit/deep_stmt.yh`、`deep_type.yh` 变诊断 + `just test` 绿。
+- [ ] M2（P0）：常量下标静态检查（下标为常量且越界 → 诊断）。
+      复现 `tmp/sec-audit/idx.yh`（`a[4]`/`a[-1]` 对 `[4]u8` 当前无诊断）。
+      落地前先扫 `tests/` 是否依赖「越界不报错」。
+- [ ] M3（P1）：常量切片范围静态检查（`a[0..16]` 对 `[4]u8` 当前给出 len=16）。
+      落点 `compiler/check/full.yh` 的 `full_slice`。
+- [ ] M4（P1）：`printf` 字面量格式串的数量/类型检查（当前 `printf("%s %s", a)`
+      编译通过并解引用垃圾指针）。先确认 `libs/` 是否有「按整数打指针」的用法。
+- [ ] M5（P1）：分配器头部魔数（16 字节头目前只用 8 字节，余 8 字节可用），
+      `free` 校验后 `munmap`，把重复 `free`/野指针 `free` 由 SIGSEGV 变为诊断。
+      落点 `compiler/backend/llvm_runtime.yh`。
+- [ ] M6（P1）：栈对象字节预算（`let a [1000000000]u8` 当前编译通过 → 运行时 1 GB
+      alloca 崩溃）；阈值待定（建议 8 MiB），先统计 `libs` 大数组局部变量。
+- [ ] S10（P2）：尺寸算术用宽类型（`compiler/support/api.yh` 的 `read_source`
+      在约 1 GiB 边界 `cap * 2` 32 位回绕）。
+
+## 2026-11-11 多线程标准库（P1，Darwin/Linux 已交付）
+
+方案：[yh 多线程标准库设计](03-design/yh-多线程标准库设计.md)；
+实施：[yh 多线程标准库实施方案](02-plan/yh-多线程标准库实施方案-2026-11-11.md)。
+目标：多线程做成**纯标准库** `libs/sync`，不改语言/语法/检查器/IR；
+线程入口固定 `fn(*void) void`（参数自行装箱），平台差异收敛在
+`libs/sync/prim.<os>.yh`。Darwin（pthread）与 Linux（libc pthread）已交付，
+见 [finish.md](finish.md)。
+
+- [ ] L0：Windows KERNEL32 导入清单（Linux 已确认链接 libc；Darwin 尺寸已实测入用例）。
+- [ ] L2-Windows：补 KERNEL32 导入 + `prim.windows.yh`（CreateThread/SRW）。
+- [ ] L3：`Chan`（有/无缓冲、close、try_*）+ 库内压力测试。
+- [ ] L4（可选）：RwLock/Semaphore/Pool/原子/TSan。
+
 ## 2026-11-11 编译诊断 V 风格源片段（P0，规划）
 
 方案：[yh-V风格编译诊断实施方案](02-plan/yh-V风格编译诊断实施方案-2026-11-11.md)。
@@ -27,6 +66,21 @@
 - [ ] D4：`说明:` 行、期望/实际类型名、未声明名字/类型的「是否想用」建议。
 - [ ] D5（待定）：TTY 颜色、多错误恢复、多行跨度；不阻塞 D1–D4。
 
+## 2026-11-11 编译期符号依赖解析（P0，规划）
+
+方案：[yh-编译期符号依赖解析实施方案](02-plan/yh-编译期符号依赖解析实施方案-2026-11-11.md)。
+目标：模块级类型/值依赖在编译期按依赖求值，不再依赖声明顺序；
+`const B = A + 1; const A = 1` 可编译；循环依赖报完整路径。
+`pub` API 仍强制显式类型。
+
+- [ ] S1：模块级 `let`/`const` 初值 probe→commit 固定点调度（跨文件）；
+      直接值依赖、循环诊断；`const B = A+1; const A=1` 通过。
+- [ ] S2：类型声明前向引用（struct/union/enum/type 别名）依赖排序解析；
+      数组长度/布局交界；指针间接环允许、值语义自包含拒绝。
+- [ ] S3：CT `$` 调用与 CT 函数体依赖纳入调度；CT 与全局循环诊断；
+      之后再放开模块级推断初值的 `$`。
+- [ ] S4：接口/缓存稳定顺序、文档、自举；`just selfhost-native`。
+
 ## 2026-11-11 类型推导（P0，规划）
 
 方案：[yh-类型推导实施方案](02-plan/yh-类型推导实施方案-2026-11-11.md)。
@@ -41,35 +95,51 @@
       结构体/函数值推导；局部 `const`；语法/语义用例。
 - [ ] I2：`ParseCtx.infer_lit` + `parse_array_literal` 推断模式；首元素定类型、
       逐元素 `sem_can_assign`、空数组/嵌套数组；O0/O2 降低验证。
-- [ ] I3：模块级私有推断：pass1 `TY_VOID` 占位 + pass1 后/CT 前类型解析子遍 +
-      `c_type_probe` 副作用抑制；`pub` 推断拒绝；跨文件/CT/接口用例。
+- [ ] I3：模块级私有推断：pass1 `TY_VOID` 占位 + pass1 后/CT 前**按依赖多轮**
+      类型解析；`c_type_probe` 副作用抑制；`pub` 推断与含 `$` 初值拒绝；
+      值依赖由 S1 调度；跨文件/接口用例。
 - [ ] I4：推断诊断、类型显示、`yh.g4`/编码规范/设计文档/ADR；种子兼容审计；
       `just build` + `just test` + `just selfhost-native`。
 
 ## 2026-11-10 前端 S4：parse 纯化后续（P0，进行中）
 
-已完成四片：类型语法外置（`parse/parse_type.yh` 只构造 `ast.AstType`，
-`check/type_syntax.yh` 接管类型表、数组长度布局、函数 ABI 与 C ABI 校验）；
-`sizeof` 歧义判定外置（parse 只判无歧义类型起始与 `*`链+名字路径形态，
-`check.sizeof_type_path` 查表，非类型回退表达式）；S4-2 地基（纯语法 AST
-解析模式：`YH_SYNTAX_AST` 门控，`build/module_worker.yh` 在项目上下文全链路
-跑一次纯语法 parse，`front-syntax` 门用例覆盖类型/字面量/控制流；
-`Res` 纯字段清零上移 `support.res_reset`，`check.sem_res_reset` 转发）；
-数组长度求值外置（`check/const_eval.yh` 的 `type_array_length` 按模式码
-判定「立即折叠 / 延迟符号 / 延迟区间 / 表达式兜底」，parse 只记录语法与游标）。
-`AstExpr`/lower/快照契约不变。剩余：
+> **已完成**：地基四片（类型语法外置、`sizeof` 歧义判定外置、纯语法 AST 解析模式 +
+> `Res` 清零上移、数组长度求值外置）、S4-2（表达式内联 47 → 0、`parse_stmt` 直调
+> 内核 9 → 0；**严格形态已决策不做**，见文末「设计决定不做」）、S4-3（CT 展开下沉）、
+> S4-4（表达式语义外置）、结构整理（`check/full.yh` 1,159 → 892 行，驱动入口拆到
+> `check/eval.yh`）。
+> 历史与证据见 [finish.md](finish.md)；各层 eval 入口与形态表见
+> [S4-2 方案 §4e-3/§4e-4](02-plan/yh-S4-2-表达式语义外置方案-2026-11-10.md)。
+> 本文件只保留未完成项。
 
-- [ ] S4-2 表达式/语句语义外置：`parse_expr`/`parse_stmt` 只产语法节点，
-      `check.full` 后序回填 `type_id`/`sym`/常量。方案见
-      [S4-2 实施方案](02-plan/yh-S4-2-表达式语义外置方案-2026-11-10.md)。
-      **S4-2a/S4-2b 已落地**（影子门）：`ast` 节点读面 + `check/full.yh` 对字面量/
-      一元/二元常量链与 char/bool/全局 const 名字从节点重算，`YH_AST_FULL_CHECK=1`
-      下与 parse 注解逐字段比对，`just test` 全语料 0 不一致。下一步 S4-2c：绑定
-      重放（局部/形参名字）与 `CAST`/`MEMBER`/`INDEX`/`SLICE`/`CALL`（含字符串与
-      地址常量的标签号可比化）。
-- [ ] S4-3 CT 展开下沉：`$if`/`$for` 结构节点 + `check.expand`；删 `parse→comptime`。
-- [ ] S4-4 收口：删 `parse→check`（当前只剩 `parse_type.yh` 的 `type_resolve`
-      转发），补模块依赖守卫。
+剩余：
+
+- [ ] S4-5 字符串字面量：只读化 + 多模块去重 + 标签身份 — **问题已记录，方案未定**
+      （2026-11-11 用户要求「先记录，想好方案再做」）。三个问题分离（数据多份 /
+      字面量可写 / 标签跨模块不一致）、实测证据（两模块同串 = 2 份；`let s *char =
+      "abc"; s[0]='x'` 通过；`const` 绑定 + 别名仍可写）、机制位置、候选方案 A/B/C、
+      与 `string.String`/`View` 的定位分析、验证判据、4 条待决策，见
+      [问题记录](02-plan/yh-字符串字面量只读与去重-2026-11-11.md)。
+      **阻塞**：去重的必要条件是 `*const T`（字面量类型只读），未决策前不实施。
+
+技术债（2026-11-11 收口时登记，均**未开始**；来源见
+[S4-2 方案](02-plan/yh-S4-2-表达式语义外置方案-2026-11-10.md) §4e-3/§4e-4）：
+
+- [ ] S4-6 影子门独立性：已迁移层的注解由 eval 写入，`full_verify` 重算走同一内核，
+      `YH_AST_FULL_CHECK` 退化为「注解与重算一致」，失去「两套实现互证」。需先决定
+      是否保留一条独立重算路径（代价：重复实现语义）。来源 §4e-3 第 2 条。
+- [ ] S4-7 `sem_eval_sizeof_path` 是纯转发：只有 `sizeof_type_path` 的别名，无加工。
+      若类型语法查询在 `check/type_syntax.yh` 有稳定公开面，可删此转发让 parse 直调。
+      来源 §4e-3 第 3 条。
+- [ ] S4-8 合成调用树只能算子模式：插值 `$format` 与 `$assert` 降级的实参 `Res` 是
+      parse 构造的现场值，没有对应 AST 节点。节点化会影响
+      `ast.ast_expr_assert_args_add` 与插值构造器。来源 §4e-3 第 4 条。
+- [ ] S4-9 赋值目标可寻址性仍在 parse：`parse_stmt` 仍判 `fc().c_res_is_addr == 0`
+      并给「赋值目标必须是可寻址的表达式」。迁入 check 需把该事实作为语句层入口的
+      输入（或加注解字段）。来源 §4e-4 第 1 条。
+- [ ] S4-10 局部零初始化仍在 `sem_declare_local`（`strb/strh/str` 等发射串）。
+      与 lowering 的分工未变；若要迁，需先确认 lowering 能生成零初始化。
+      来源 §4e-4 第 2 条。
 
 ## 2026-11-10 管线数据结构重设计（P0，实施中）
 
@@ -709,6 +779,12 @@ LA0–LA3 已完成，历史与证据见 [finish.md](finish.md) 与
 
 ## 设计决定不做（非缺口，勿列为任务）
 
+- **S4-2 严格形态（`parse` 只产语法节点、无算子模式）**：2026-11-11 用户决定关闭。
+  理由：字面量/名字/调用 ABI/元信息投影与多数语句入口的语义输入是**现场事实**
+  （token 文本、绑定下标、`c_args`/`c_arg_n`、`c_res_is_addr`、循环深度与展开边界、
+  标签池、`ct_diag_*`、`c_ret_agg`），`ast.AstExpr` 注解不承载。要消除算子模式，
+  须给注解加这些字段并同步 lowering、接口闭包与缓存键——属架构改动，不是迁移收尾。
+  达成形态：两侧语义动作均已外置，`parse` 只调 `sem_eval_*` 入口（方案 §4e-3、§4e-4）。
 - **编译器模块 worker 上限（原 TG-3）**：`active < 4` 保持 ADR-0009 的过渡默认；
   实测放宽到 8 每次冷编只省 5–8s，峰值内存从约 490MB 升到约 800MB，收益不足。
 - **批量 `--syntax-check`（原 TG-4）**：并行后只再省十几秒，性价比低。

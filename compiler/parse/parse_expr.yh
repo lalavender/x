@@ -6,7 +6,6 @@ import types
 import support
 import table
 import proj
-import comptime
 import ast
 
 // ============================================================================
@@ -96,6 +95,27 @@ fn parse_expr_inner(res *support.Res) int {
     if (r == 0 && support.session().compile != 0 && res.ct_diag != 0
         && support.fc().c_ct_diag_stmt == 0) {
         return token.err_tok("编译期诊断只能作为独立语句")
+    }
+    // S4-4 eval 驱动：parse 在每个表达式边界（顶层与嵌套子表达式）建完节点后就地
+    // 增量求值——`sem_eval_local` 按**子节点注解**求本节点（子级已在更内层求过，
+    // 因此每节点只算一次），把结果回填 `Res` 与节点注解；-2/-1 保留 parse 现场值
+    //（切换期回退）。折叠上下文/CT 捕获/CT 目标上下文仍由 parse 现场算。
+    if (r == 0 && res.ct_diag == 0
+        && support.session().compile != 0 && res.ast_id >= 0
+        && support.fc().c_fold == 0 && support.fc().c_ct_prepare_active == 0
+        && support.fc().c_ct_target_ctx == 0) {
+        let keep_id int = res.ast_id
+        // 切换期：eval 只接管 `Res`，不接管 `fc` 现场（`c_res_is_addr` 是语句层
+        // 刚用到的可寻址性事实，parse 内联路径已写好，回填后必须保留）。
+        let keep_addr int = support.fc().c_res_is_addr
+        let evr support.Res
+        let ev int = check.sem_eval_local(keep_id, support.fc().c_expect_tid, &evr)
+        if (ev < 0) { ev = -2 }   // 切换期回退：eval 报错/未判定时保留 parse 现场算出的 Res
+        if (ev == 0) {
+            support.res_copy(res, &evr)
+            res.ast_id = keep_id
+            support.fc().c_res_is_addr = keep_addr
+        }
     }
     if (r == 0 && res.ct_diag == 0 && ast.ast_expr_depth_now() == 0
         && ast.ast_stmt_add_expr(res.ast_id) != 0) {
@@ -322,6 +342,8 @@ fn parse_array_literal(res *support.Res, first int) int {
         && ast.ast_expr_finish(res, ast.AST_EXPR_ARRAY, token.TK_LBRACKET, first, list, -1, -1) != 0) {
         return -1
     }
+    if (support.session().ast_capture != 0
+        && ast.ast_expr_set_expect(res.ast_id, tid) != 0) { return -1 }
     return 0
 }
 
@@ -356,9 +378,15 @@ fn parse_ternary(res *support.Res) int {
             first = ast.ast_expr_start(cond_ast)
         }
         p_adv()
-        if (check.sem_ternary_cond(res) != 0) {
-            return -1
+        // 结果语义取自中支（下面 res_copy），跳转标签随旧发射器删除，闸口只剩
+        // 两条诊断：折叠上下文不接受三元、嵌套深度上限防止解析递归失控。
+        if (support.fc().c_fold != 0) {
+            return token.err_tok("三元不支持编译期折叠")
         }
+        if (support.fc().tn_depth >= 64) {
+            return token.err_tok("三元表达式嵌套超过 64 层")
+        }
+        support.fc().tn_depth += 1
         let mid support.Res
         if (parse_expr(&mid) != 0) {
             return -1
@@ -367,16 +395,11 @@ fn parse_ternary(res *support.Res) int {
         if (p_expect(token.TK_COLON, "期望 ':'") != 0) {
             return -1
         }
-        if (check.sem_ternary_mid(res) != 0) {
-            return -1
-        }
         if (parse_expr(res) != 0) {
             return -1
         }
         let else_ast int = res.ast_id
-        if (check.sem_ternary_end(res) != 0) {
-            return -1
-        }
+        support.fc().tn_depth -= 1
         support.res_copy(res, &mid)
         support.fc().c_res_is_addr = 0
         if (support.session().ast_capture != 0
@@ -385,6 +408,100 @@ fn parse_ternary(res *support.Res) int {
             return -1
         }
     }
+    return 0
+}
+
+// pe_bin_eval：二元层的统一求值入口（S4-4）——先挂「待求值」二元节点（记 kind/op/
+// token 范围/左右子节点），再由 check 从**子节点注解**求语义并回填节点注解，最后把
+// 结果写回 `res`（`res` 原本是左操作数的现场值，被求值结果替换）。
+// 两条路径同语义：capture 关闭（`$for` 模板后续轮次不建节点 → node = -1）或子树
+// 缺注解时，check 走算子模式，直接用现场 `res`/`rhs` 调同一内核。
+fn pe_bin_eval(op int, first int, left_ast int, right_ast int,
+    res *support.Res, rhs *support.Res) int {
+    let node int = ast.ast_expr_finish_pending(ast.AST_EXPR_BINARY, op, first,
+        left_ast, right_ast, -1)
+    let er support.Res
+    if (check.sem_eval_bin(op, node, res, rhs, &er) != 0) {
+        return -1
+    }
+    support.res_copy(res, &er)
+    if (node >= 0) { res.ast_id = node }
+    return 0
+}
+
+// pe_un_eval：一元层的统一求值入口（S4-4 第二片）——先挂「待求值」一元节点，再由
+// check 从**操作数子节点注解**求语义并回填注解，最后把结果写回 `res`。
+// 操作数是否可寻址由现场 `c_res_is_addr` 承担（刚解析完操作数时它正是该操作数的值），
+// 所以节点模式不需要额外的可寻址性通道。
+fn pe_un_eval(op int, first int, res *support.Res) int {
+    let child int = res.ast_id
+    let node int = ast.ast_expr_finish_pending(ast.AST_EXPR_UNARY, op, first,
+        child, -1, -1)
+    let er support.Res
+    if (check.sem_eval_un(op, node, res, &er) != 0) {
+        return -1
+    }
+    support.res_copy(res, &er)
+    if (node >= 0) { res.ast_id = node }
+    return 0
+}
+
+// pe_post_finish：postfix 求值收尾——把 check 入口的结果写回 `res`，节点身份交给
+// `res.ast_id`（capture 关闭时 node = -1，只有现场值，没有节点）。
+fn pe_post_finish(node int, res *support.Res, er *support.Res) int {
+    support.res_copy(res, er)
+    if (node >= 0) { res.ast_id = node }
+    return 0
+}
+
+// pe_index_eval：下标层求值 —— 挂待求值 INDEX 节点（基底/下标），由
+// `check.sem_eval_index` 从子节点注解求值并回填，再写回 `res`。
+fn pe_index_eval(first int, base_ast int, idx_ast int, res *support.Res,
+    idx *support.Res) int {
+    let node int = ast.ast_expr_finish_pending(ast.AST_EXPR_INDEX,
+        token.TK_LBRACKET, first, base_ast, idx_ast, -1)
+    let er support.Res
+    if (check.sem_eval_index(node, res, idx, &er) != 0) { return -1 }
+    return pe_post_finish(node, res, &er)
+}
+
+// pe_slice_eval：切片层求值 —— 挂待求值 SLICE 节点（基底/起/止），由
+// `check.sem_eval_slice` 求值并回填，再写回 `res`。
+fn pe_slice_eval(first int, base_ast int, lo_ast int, hi_ast int,
+    res *support.Res, lo *support.Res, hi *support.Res) int {
+    let node int = ast.ast_expr_finish_pending(ast.AST_EXPR_SLICE,
+        token.TK_RANGE, first, base_ast, lo_ast, hi_ast)
+    let er support.Res
+    if (check.sem_eval_slice(node, res, lo, hi, &er) != 0) { return -1 }
+    return pe_post_finish(node, res, &er)
+}
+
+// pe_cast_eval：`.to_type(T)` 求值 —— 挂待求值 CAST 节点（操作数），目标类型由
+// parse 解析后传入（类型引用不是表达式节点）。
+fn pe_cast_eval(first int, base_ast int, tid int, res *support.Res) int {
+    let node int = ast.ast_expr_finish_pending(ast.AST_EXPR_CAST,
+        token.TK_TO_TYPE, first, base_ast, -1, -1)
+    let er support.Res
+    if (check.sem_eval_cast(node, res, tid, &er) != 0) { return -1 }
+    return pe_post_finish(node, res, &er)
+}
+
+// pe_member_eval：字段访问求值 —— `kind/op` 由调用点给出（postfix 的 MEMBER/TK_DOT
+// 与编译期字段的 CTFIELD/TOK_STRING 共用同一入口），成员名来自 token 文本。
+fn pe_member_eval(kind int, op int, first int, base_ast int, name_start int,
+    name_len int, res *support.Res) int {
+    let node int = ast.ast_expr_finish_pending(kind, op, first, base_ast, -1, -1)
+    let er support.Res
+    if (check.sem_eval_member(node, res, name_start, name_len, &er) != 0) { return -1 }
+    return pe_post_finish(node, res, &er)
+}
+
+// pe_meta_eval：元信息投影求值（字段名/枚举名/枚举值）——投影没有子表达式，
+// 只有绑定的 `sym`，因此只走 check 的算子模式，节点由调用点随后自行挂载。
+fn pe_meta_eval(kind int, res *support.Res) int {
+    let er support.Res
+    if (check.sem_eval_meta(kind, res, &er) != 0) { return -1 }
+    support.res_copy(res, &er)
     return 0
 }
 
@@ -400,18 +517,33 @@ fn parse_logical_or(res *support.Res) int {
             left_ast = res.ast_id
             first = ast.ast_expr_start(left_ast)
         }
+        let left_type int = res.type_id
+        let left_const int = res.is_const
+        let left_true int = (res.ival != 0).to_type(int)
         let op int = p_cur()
         p_adv()
-        if (check.sem_shortcircuit(token.TK_OROR, res) != 0) {
-            return -1
+        if (support.fc().c_fold != 0) {
+            if (table.ty_is_scalar(left_type) == 0 || table.ty_is_float(left_type) != 0) {
+                return token.err_tok("逻辑运算要求非浮点标量")
+            }
+            if (left_const == 0) { return token.err_tok("逻辑运算要求编译期常量") }
         }
         if (parse_logical_and(res) != 0) {
             return -1
         }
         let right_ast int = res.ast_id
-        if (check.sem_shortcircuit_end(token.TK_OROR, res) != 0) {
-            return -1
+        if (support.fc().c_fold != 0) {
+            if (table.ty_is_scalar(res.type_id) == 0 || table.ty_is_float(res.type_id) != 0) {
+                return token.err_tok("逻辑运算要求非浮点标量")
+            }
+            if (res.is_const == 0) { return token.err_tok("逻辑运算要求编译期常量") }
+            let right_true int = (res.ival != 0).to_type(int)
+            let value int = (left_true != 0 || right_true != 0).to_type(int)
+            if (support.sem_res_const(res, types.TY_BOOL, value.to_type(i64)) != 0) { return -1 }
+        } else {
+            res.is_const = 0
         }
+        support.fc().c_res_is_addr = 0
         if (support.session().ast_capture != 0
             && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, right_ast, -1) != 0) {
             return -1
@@ -432,18 +564,33 @@ fn parse_logical_and(res *support.Res) int {
             left_ast = res.ast_id
             first = ast.ast_expr_start(left_ast)
         }
+        let left_type int = res.type_id
+        let left_const int = res.is_const
+        let left_true int = (res.ival != 0).to_type(int)
         let op int = p_cur()
         p_adv()
-        if (check.sem_shortcircuit(token.TK_ANDAND, res) != 0) {
-            return -1
+        if (support.fc().c_fold != 0) {
+            if (table.ty_is_scalar(left_type) == 0 || table.ty_is_float(left_type) != 0) {
+                return token.err_tok("逻辑运算要求非浮点标量")
+            }
+            if (left_const == 0) { return token.err_tok("逻辑运算要求编译期常量") }
         }
         if (parse_bit_or(res) != 0) {
             return -1
         }
         let right_ast int = res.ast_id
-        if (check.sem_shortcircuit_end(token.TK_ANDAND, res) != 0) {
-            return -1
+        if (support.fc().c_fold != 0) {
+            if (table.ty_is_scalar(res.type_id) == 0 || table.ty_is_float(res.type_id) != 0) {
+                return token.err_tok("逻辑运算要求非浮点标量")
+            }
+            if (res.is_const == 0) { return token.err_tok("逻辑运算要求编译期常量") }
+            let right_true int = (res.ival != 0).to_type(int)
+            let value int = (left_true != 0 && right_true != 0).to_type(int)
+            if (support.sem_res_const(res, types.TY_BOOL, value.to_type(i64)) != 0) { return -1 }
+        } else {
+            res.is_const = 0
         }
+        support.fc().c_res_is_addr = 0
         if (support.session().ast_capture != 0
             && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, right_ast, -1) != 0) {
             return -1
@@ -470,11 +617,8 @@ fn parse_bit_or(res *support.Res) int {
         if (parse_bit_xor(&rhs) != 0) {
             return -1
         }
-        if (check.sem_binop(token.TK_PIPE, res, &rhs) != 0) {
-            return -1
-        }
-        if (support.session().ast_capture != 0
-            && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
+        // S4-4：二元语义走统一 eval 入口（节点模式读子节点注解、算子模式用现场值）。
+        if (pe_bin_eval(op, first, left_ast, rhs.ast_id, res, &rhs) != 0) {
             return -1
         }
     }
@@ -499,11 +643,8 @@ fn parse_bit_xor(res *support.Res) int {
         if (parse_bit_and(&rhs) != 0) {
             return -1
         }
-        if (check.sem_binop(token.TK_CARET, res, &rhs) != 0) {
-            return -1
-        }
-        if (support.session().ast_capture != 0
-            && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
+        // S4-4：二元语义走统一 eval 入口（节点模式读子节点注解、算子模式用现场值）。
+        if (pe_bin_eval(op, first, left_ast, rhs.ast_id, res, &rhs) != 0) {
             return -1
         }
     }
@@ -528,11 +669,8 @@ fn parse_bit_and(res *support.Res) int {
         if (parse_equality(&rhs) != 0) {
             return -1
         }
-        if (check.sem_binop(token.TK_AMP, res, &rhs) != 0) {
-            return -1
-        }
-        if (support.session().ast_capture != 0
-            && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
+        // S4-4：二元语义走统一 eval 入口（节点模式读子节点注解、算子模式用现场值）。
+        if (pe_bin_eval(op, first, left_ast, rhs.ast_id, res, &rhs) != 0) {
             return -1
         }
     }
@@ -557,11 +695,8 @@ fn parse_equality(res *support.Res) int {
         if (parse_relational(&rhs) != 0) {
             return -1
         }
-        if (check.sem_binop(op, res, &rhs) != 0) {
-            return -1
-        }
-        if (support.session().ast_capture != 0
-            && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
+        // S4-4：二元语义走统一 eval 入口（节点模式读子节点注解、算子模式用现场值）。
+        if (pe_bin_eval(op, first, left_ast, rhs.ast_id, res, &rhs) != 0) {
             return -1
         }
     }
@@ -586,11 +721,8 @@ fn parse_relational(res *support.Res) int {
         if (parse_shift(&rhs) != 0) {
             return -1
         }
-        if (check.sem_binop(op, res, &rhs) != 0) {
-            return -1
-        }
-        if (support.session().ast_capture != 0
-            && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
+        // S4-4：二元语义走统一 eval 入口（节点模式读子节点注解、算子模式用现场值）。
+        if (pe_bin_eval(op, first, left_ast, rhs.ast_id, res, &rhs) != 0) {
             return -1
         }
     }
@@ -615,11 +747,8 @@ fn parse_shift(res *support.Res) int {
         if (parse_additive(&rhs) != 0) {
             return -1
         }
-        if (check.sem_binop(op, res, &rhs) != 0) {
-            return -1
-        }
-        if (support.session().ast_capture != 0
-            && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
+        // S4-4：二元语义走统一 eval 入口（节点模式读子节点注解、算子模式用现场值）。
+        if (pe_bin_eval(op, first, left_ast, rhs.ast_id, res, &rhs) != 0) {
             return -1
         }
     }
@@ -644,11 +773,8 @@ fn parse_additive(res *support.Res) int {
         if (parse_multiplicative(&rhs) != 0) {
             return -1
         }
-        if (check.sem_binop(op, res, &rhs) != 0) {
-            return -1
-        }
-        if (support.session().ast_capture != 0
-            && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
+        // S4-4：二元语义走统一 eval 入口（节点模式读子节点注解、算子模式用现场值）。
+        if (pe_bin_eval(op, first, left_ast, rhs.ast_id, res, &rhs) != 0) {
             return -1
         }
     }
@@ -673,11 +799,8 @@ fn parse_multiplicative(res *support.Res) int {
         if (parse_unary(&rhs) != 0) {
             return -1
         }
-        if (check.sem_binop(op, res, &rhs) != 0) {
-            return -1
-        }
-        if (support.session().ast_capture != 0
-            && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
+        // S4-4：二元语义走统一 eval 入口（节点模式读子节点注解、算子模式用现场值）。
+        if (pe_bin_eval(op, first, left_ast, rhs.ast_id, res, &rhs) != 0) {
             return -1
         }
     }
@@ -695,12 +818,8 @@ fn parse_unary(res *support.Res) int {
         if (parse_unary(res) != 0) {
             return -1
         }
-        let child int = res.ast_id
-        if (check.sem_unary(k, res) != 0) {
-            return -1
-        }
-        if (support.session().ast_capture != 0
-            && ast.ast_expr_finish(res, ast.AST_EXPR_UNARY, k, first, child, -1, -1) != 0) {
+        // S4-4：一元语义走统一 eval 入口（操作数取自子节点注解，可寻址性用现场事实）。
+        if (pe_un_eval(k, first, res) != 0) {
             return -1
         }
         return 0
@@ -715,12 +834,8 @@ fn parse_unary(res *support.Res) int {
         if (r != 0) {
             return -1
         }
-        let child2 int = res.ast_id
-        if (check.sem_unary(token.TK_STAR, res) != 0) {
-            return -1
-        }
-        if (support.session().ast_capture != 0
-            && ast.ast_expr_finish(res, ast.AST_EXPR_UNARY, token.TK_STAR, first2, child2, -1, -1) != 0) {
+        // S4-4：一元语义走统一 eval 入口（操作数取自子节点注解，可寻址性用现场事实）。
+        if (pe_un_eval(token.TK_STAR, first2, res) != 0) {
             return -1
         }
         return 0
@@ -737,12 +852,8 @@ fn parse_unary(res *support.Res) int {
         if (r2 != 0) {
             return -1
         }
-        let child3 int = res.ast_id
-        if (check.sem_unary(token.TK_AMP, res) != 0) {
-            return -1
-        }
-        if (support.session().ast_capture != 0
-            && ast.ast_expr_finish(res, ast.AST_EXPR_UNARY, token.TK_AMP, first3, child3, -1, -1) != 0) {
+        // S4-4：一元语义走统一 eval 入口（操作数取自子节点注解，可寻址性用现场事实）。
+        if (pe_un_eval(token.TK_AMP, first3, res) != 0) {
             return -1
         }
         return 0
@@ -771,7 +882,7 @@ fn parse_postfix(res *support.Res) int {
             }
             // 调用：实参表为行内列表，不允许尾逗号
             p_adv()
-            let direct int = check.sem_call_begin(res)
+            let direct int = check.sem_eval_call_begin(res)
             if (direct < 0) {
                 return -1
             }
@@ -805,7 +916,7 @@ fn parse_postfix(res *support.Res) int {
                         return -1
                     }
                     argi += 1
-                    if (check.sem_push_arg(&arg, res) != 0) {
+                    if (check.sem_eval_call_arg(&arg, res) != 0) {
                         return -1
                     }
                     if (p_cur() == token.TK_COMMA) {
@@ -818,14 +929,15 @@ fn parse_postfix(res *support.Res) int {
             if (p_expect(token.TK_RPAREN, "期望 ')'") != 0) {
                 return -1
             }
-            if (check.sem_call(res, res) != 0) {
+            // S4-4：调用收栈走统一 eval 入口（实参已在现场 ABI 栈里，结果回填 CALL 节点）。
+            let node int = ast.ast_expr_finish_pending(ast.AST_EXPR_CALL,
+                token.TK_LPAREN, first, base_ast, args, -1)
+            let er support.Res
+            if (check.sem_eval_call_end(node, res, &er) != 0) {
                 return -1
             }
-            if (support.session().ast_capture != 0
-                && ast.ast_expr_finish(res, ast.AST_EXPR_CALL, token.TK_LPAREN,
-                    first, base_ast, args, -1) != 0) {
-                return -1
-            }
+            support.res_copy(res, &er)
+            if (node >= 0) { res.ast_id = node }
             continue
         }
         if (k == token.TK_LBRACKET) {
@@ -861,12 +973,9 @@ fn parse_postfix(res *support.Res) int {
                 if (p_expect(token.TK_RBRACKET, "期望 ']'") != 0) {
                     return -1
                 }
-                if (check.sem_slice(res, &idx, &eidx) != 0) {
-                    return -1
-                }
-                if (support.session().ast_capture != 0
-                    && ast.ast_expr_finish(res, ast.AST_EXPR_SLICE, token.TK_RANGE,
-                        first2, base_ast2, start_ast, end_ast) != 0) {
+                // S4-4：切片语义走统一 eval 入口（基底/起/止取子节点注解）。
+                if (pe_slice_eval(first2, base_ast2, start_ast, end_ast,
+                    res, &idx, &eidx) != 0) {
                     return -1
                 }
                 continue
@@ -875,12 +984,8 @@ fn parse_postfix(res *support.Res) int {
             if (p_expect(token.TK_RBRACKET, "期望 ']'") != 0) {
                 return -1
             }
-            if (check.sem_index(res, &idx) != 0) {
-                return -1
-            }
-            if (support.session().ast_capture != 0
-                && ast.ast_expr_finish(res, ast.AST_EXPR_INDEX, token.TK_LBRACKET,
-                    first2, base_ast2, idx_ast, -1) != 0) {
+            // S4-4：下标语义走统一 eval 入口（基底/下标取子节点注解）。
+            if (pe_index_eval(first2, base_ast2, idx_ast, res, &idx) != 0) {
                 return -1
             }
             continue
@@ -906,14 +1011,8 @@ fn parse_postfix(res *support.Res) int {
                 if (p_expect(token.TK_RPAREN, "期望 ')'") != 0) {
                     return -1
                 }
-                if (check.sem_cast(res, tid) != 0) {
-                    return -1
-                }
-                if (support.session().ast_capture != 0
-                    && ast.ast_expr_finish(res, ast.AST_EXPR_CAST, token.TK_TO_TYPE,
-                        first3, base_ast3, -1, -1) != 0) {
-                    return -1
-                }
+                // S4-4：类型转换语义走统一 eval 入口（操作数取子节点注解）。
+                if (pe_cast_eval(first3, base_ast3, tid, res) != 0) { return -1 }
                 continue
             }
             if (is_member_name(p_cur()) != 0) {
@@ -935,7 +1034,7 @@ fn parse_postfix(res *support.Res) int {
                     if (field_name == 0 || n != 4) {
                         return token.err_tok("字段元信息迭代变量只支持 .name")
                     }
-                    if (check.sem_field_meta_name(res) != 0) { return -1 }
+                    if (pe_meta_eval(0, res) != 0) { return -1 }
                     if (support.session().ast_capture != 0) {
                         let id int = ast.ast_expr_add(ast.AST_EXPR_PRIMARY, token.TOK_STRING,
                             first3, token.ctx().pos, res.type_id, -1, -1, -1)
@@ -950,9 +1049,9 @@ fn parse_postfix(res *support.Res) int {
                     let ast_op int = token.TOK_NUMBER
                     if (enum_name != 0 && n == 4) {
                         ast_op = token.TOK_STRING
-                        if (check.sem_enum_meta_name(res) != 0) { return -1 }
+                        if (pe_meta_eval(1, res) != 0) { return -1 }
                     } else if (enum_value != 0 && n == 5) {
-                        if (check.sem_enum_meta_value(res) != 0) { return -1 }
+                        if (pe_meta_eval(2, res) != 0) { return -1 }
                     } else {
                         return token.err_tok("枚举 values 迭代变量只支持 .name 和 .value")
                     }
@@ -966,12 +1065,9 @@ fn parse_postfix(res *support.Res) int {
                     }
                     continue
                 }
-                if (check.sem_member(res, start, n) != 0) {
-                    return -1
-                }
-                if (support.session().ast_capture != 0
-                    && ast.ast_expr_finish(res, ast.AST_EXPR_MEMBER, token.TK_DOT,
-                        first3, base_ast3, -1, -1) != 0) {
+                // S4-4：字段访问语义走统一 eval 入口（基底取子节点注解）。
+                if (pe_member_eval(ast.AST_EXPR_MEMBER, token.TK_DOT, first3,
+                    base_ast3, start, n, res) != 0) {
                     return -1
                 }
                 continue
@@ -1130,15 +1226,11 @@ fn parse_comptime_field_access(res *support.Res) int {
     }
     if (field_index < 0) { return token.err_tok("结构体没有该字段") }
     let base_ast int = base.ast_id
-    if (check.sem_member(&base, name_start, name_len) != 0) { return -1 }
+    // S4-4：字段访问语义走统一 eval 入口（基底取子节点注解，成员名来自 token）。
+    if (pe_member_eval(ast.AST_EXPR_CTFIELD, token.TOK_STRING, first, base_ast,
+        name_start, name_len, &base) != 0) { return -1 }
     support.res_copy(res, &base)
-    if (support.session().ast_capture != 0) {
-        let id int = ast.ast_expr_add(ast.AST_EXPR_CTFIELD, token.TOK_STRING, first,
-            token.ctx().pos, res.type_id, base_ast, -1, -1)
-        if (id < 0 || ast.ast_expr_set_semantics(id, res) != 0) { return -1 }
-        ast.ast_expr_op_set(id, field_index)
-        res.ast_id = id
-    }
+    if (res.ast_id >= 0) { ast.ast_expr_op_set(res.ast_id, field_index) }
     return 0
 }
 
@@ -1207,7 +1299,7 @@ fn parse_comptime_call(res *support.Res) int {
                 if (iface_ct_export_name(mi, entry, &hidden_off,
                         &hidden_len) != 0) { return -1 }
                 sym = table.sym_lookup_off(hidden_off, hidden_len)
-                if (sym < 0 || comptime.ct_find(sym) < 0) {
+                if (sym < 0 || check.ct_fn_found(sym) < 0) {
                     return token.err_tok("公开编译期函数缺少匹配的 .s.ct 正文")
                 }
                 if (table.ms().syms[sym].type_id
@@ -1297,7 +1389,7 @@ fn parse_comptime_call(res *support.Res) int {
                     let asym int = table.sym_lookup(astart, alen)
                     if (asym < 0) { return token.err_tok("引用了未声明的名字") }
                     if (table.ms().syms[asym].kind == table.SYM_CONST) {
-                        let model i64 = comptime.ct_global_agg_lookup(asym)
+                        let model i64 = check.ct_global_agg_lookup(asym)
                         if (model == 0) {
                             return token.err_tok("编译期实参里的全局聚合常量尚未在编译期建模（只支持标量元素的定长数组与标量字段结构体）")
                         }
@@ -1328,10 +1420,10 @@ fn parse_comptime_call(res *support.Res) int {
             if (ar != 0) { return -1 }
             if (sig >= 0 && arg_n < np) {
                 let ptid int = table.ms().sig_params[table.ms().sig_first[sig] + arg_n]
-                let pelem int = comptime.ct_pool_elem_of(ptid)
+                let pelem int = check.ct_pool_elem_of(ptid)
                 if (pelem >= 0) {
                     if (arg_str_tok >= 0) {
-                        let addr i64 = comptime.ct_pool_register_src(
+                        let addr i64 = check.ct_pool_register_src(
                             token.ctx().tokens[arg_str_tok].start,
                             token.ctx().tokens[arg_str_tok].len, pelem)
                         if (addr == 0) { return -1 }
@@ -1398,7 +1490,7 @@ fn parse_comptime_call(res *support.Res) int {
         support.fc().c_res_is_addr = 0
         return 0
     }
-    return comptime.ct_call(sym, &args[0], arg_n, res)
+    return check.ct_call(sym, &args[0], arg_n, res)
 }
 
 
@@ -1451,7 +1543,7 @@ fn p_ct_arg_array_literal(res *support.Res, tid int) int {
     }
     if (p_expect(token.TK_RBRACKET, "期望 ']'") != 0) { return -1 }
     if (idx != at.len) { return 1 }
-    let obj i64 = comptime.ct_arg_pool_agg(at.elem, &vals[0], &tys[0], at.len)
+    let obj i64 = check.ct_arg_pool_agg(at.elem, &vals[0], &tys[0], at.len)
     if (obj == 0) { return -1 }
     support.res_reset(res, tid)
     res.is_const = 1
@@ -1509,7 +1601,7 @@ fn p_ct_arg_slice_literal(res *support.Res, tid int) int {
         p_adv()
     }
     if (p_expect(token.TK_RBRACKET, "期望 ']'") != 0) { return -1 }
-    let obj i64 = comptime.ct_arg_pool_agg(st.elem, &vals[0], &tys[0], idx)
+    let obj i64 = check.ct_arg_pool_agg(st.elem, &vals[0], &tys[0], idx)
     if (obj == 0) { return -1 }
     support.res_reset(res, tid)
     res.is_const = 1
@@ -1599,7 +1691,7 @@ fn p_ct_arg_struct_literal(res *support.Res, tid int) int {
     }
     if (p_expect(token.TK_RBRACE, "期望 '}'") != 0) { return -1 }
     if (filled != st.len) { return 1 }
-    let obj i64 = comptime.ct_arg_pool_agg(tid, &vals[0], &tys[0], st.len)
+    let obj i64 = check.ct_arg_pool_agg(tid, &vals[0], &tys[0], st.len)
     if (obj == 0) { return -1 }
     support.res_reset(res, tid)
     res.is_const = 1
@@ -1626,23 +1718,25 @@ fn parse_primary_impl(res *support.Res, first int) int {
     }
     if (k == token.TOK_NUMBER) {
         p_adv()
-        return check.sem_number(start, n, res)
+        return check.sem_eval_number(start, n, res)
     }
     if (k == token.TOK_STRING) {
         p_adv()
-        return check.sem_string(start, n, res)
+        return check.sem_eval_string(start, n, res)
     }
     if (k == token.TOK_CHAR) {
         p_adv()
-        return check.sem_char(start, n, res)
+        return check.sem_eval_char(start, n, res)
     }
     if (k == token.TK_TRUE) {
         p_adv()
-        return check.sem_bool(1, res)
+        support.sem_res_const(res, types.TY_BOOL, 1.to_type(i64))
+        return 0
     }
     if (k == token.TK_FALSE) {
         p_adv()
-        return check.sem_bool(0, res)
+        support.sem_res_const(res, types.TY_BOOL, 0.to_type(i64))
+        return 0
     }
     if (k == token.TK_LPAREN) {
         p_adv()
@@ -1665,20 +1759,20 @@ fn parse_primary_impl(res *support.Res, first int) int {
             if (p_expect(token.TK_RPAREN, "期望 ')'") != 0) {
                 return -1
             }
-            return check.sem_sizeof(tid, res)
+            return check.sem_eval_sizeof(-1, tid, res, res)
         }
         // 歧义形态（`*` 链 + 名字路径）：check 查表判定是否类型；
         // 不是类型则回退表达式解析，诊断与旧路径一致。
         let path_first int = token.ctx().pos
         let path_after int = sizeof_operand_end(path_first)
         if (path_after > path_first && sizeof_path_shape(path_first, path_after) != 0) {
-            let tid int = check.sizeof_type_path(path_first, path_after)
+            let tid int = check.sem_eval_sizeof_path(path_first, path_after)
             if (tid >= 0) {
                 token.ctx().pos = path_after
                 if (p_expect(token.TK_RPAREN, "期望 ')'") != 0) {
                     return -1
                 }
-                return check.sem_sizeof(tid, res)
+                return check.sem_eval_sizeof(-1, tid, res, res)
             }
         }
         // sizeof(expr)：发射层静默求型（表达式不求值、不发码），
@@ -1694,7 +1788,7 @@ fn parse_primary_impl(res *support.Res, first int) int {
         if (p_expect(token.TK_RPAREN, "期望 ')'") != 0) {
             return -1
         }
-        return check.sem_sizeof(er.type_id, res)
+        return check.sem_eval_sizeof(-1, er.type_id, &er, res)
     }
     if (k == token.TK_LEN) {
         p_adv()
@@ -1708,7 +1802,26 @@ fn parse_primary_impl(res *support.Res, first int) int {
             return -1
         }
         let len_child int = res.ast_id
-        if (check.sem_len(res) != 0) { return -1 }
+        // len 的语义只依赖操作数类型：数组折成长度常量，切片是运行期 TY_I32。
+        // 纯语法模式（compile==0）下类型尚未解析，与 sem_len 一样直接返回。
+        if (support.session().compile == 0) {
+            res.type_id = 0
+        } else {
+            let lk int = table.ms().types[res.type_id].kind
+            if (lk == types.TY_ARRAY) {
+                support.sem_res_const(res, types.TY_I32,
+                    table.ms().types[res.type_id].len.to_type(i64))
+                support.fc().c_res_is_addr = 0
+            } else if (lk == types.TY_SLICE) {
+                if (support.fc().c_fold != 0) {
+                    return token.err_tok("切片长度不是编译期常量")
+                }
+                support.res_reset(res, types.TY_I32)
+                support.fc().c_res_is_addr = 0
+            } else {
+                return token.err_tok("len 需要一个数组或切片")
+            }
+        }
         if (support.session().ast_capture != 0
             && ast.ast_expr_finish(res, ast.AST_EXPR_UNARY, token.TK_LEN, first,
                 len_child, -1, -1) != 0) { return -1 }
@@ -1732,7 +1845,7 @@ fn parse_ident_primary(res *support.Res) int {
     let istart int = token.ctx().tokens[token.ctx().pos].start
     let ilen int = token.ctx().tokens[token.ctx().pos].len
     if (support.session().compile != 0 && support.fc().c_ct_target_ctx != 0) {
-        let target_name int = comptime.ct_target_symbol(istart, ilen, res)
+        let target_name int = check.ct_target_symbol(istart, ilen, res)
         if (target_name != 0) {
             p_adv()
             return 0
@@ -1768,7 +1881,7 @@ fn parse_ident_primary(res *support.Res) int {
                 p_adv()
                 p_adv()
                 p_adv()
-                return check.sem_ident_val(msym, res)
+                return check.sem_eval_ident_val(msym, res)
             }
         }
     }
@@ -1793,12 +1906,12 @@ fn parse_ident_primary(res *support.Res) int {
             }
             // 回退：该 '{' 是 for/switch/case 体，标识符保持裸形式
             p_adv()
-            return check.sem_ident(istart, ilen, res)
+            return check.sem_eval_ident(istart, ilen, res)
         }
         return parse_struct_init_forced(res)
     }
     p_adv()
-    return check.sem_ident(istart, ilen, res)
+    return check.sem_eval_ident(istart, ilen, res)
 }
 
 // parse_module_qualified：m.member 的模块成员访问（消费 m . member）。
@@ -1825,7 +1938,7 @@ fn parse_module_qualified(res *support.Res, mi int, unused int) int {
         }
         i += 1
     }
-    return check.sem_ident_val(proj.fs().mods[mi].ns[e].sym, res)
+    return check.sem_eval_ident_val(proj.fs().mods[mi].ns[e].sym, res)
 }
 
 // parse_module_struct_lit：m.T { … } 限定结构体字面量（消费 m . T）。
@@ -1858,7 +1971,6 @@ fn parse_module_struct_lit(res *support.Res, mi int) int {
 fn try_struct_init() int {
     let save int = token.ctx().pos
     let save_fold int = support.fc().c_fold
-    let save_lit_off int = support.fc().c_lit_off
     let save_fp int = support.fc().c_fp_off
     let save_capture int = support.session().ast_capture
     if (support.session().syntax_ast != 0) {
@@ -1882,7 +1994,6 @@ fn try_struct_init() int {
     errors.diag().spec -= 1
     token.ctx().pos = save
     support.fc().c_fold = save_fold
-    support.fc().c_lit_off = save_lit_off
     support.fc().c_fp_off = save_fp
     support.session().ast_capture = save_capture
     if (ok == 1) {
@@ -1924,8 +2035,16 @@ fn parse_struct_init_tid(tid int, res *support.Res) int {
         return -1
     }
     if (support.session().compile != 0) {
-        if (check.sem_struct_lit_begin(tid) < 0) {
-            return -1
+        // 目标类型作为参数在第一层就已知，不再存解析上下文；这里只剩两条诊断：
+        // 不透明类型拒绝与嵌套深度上限（探测模式 c_fold>0 时短路，与旧语义一致）。
+        if (support.fc().c_fold == 0) {
+            if (table.ty_is_opaque(tid) != 0) {
+                return token.err_tok("不透明 C 类型不能构造实例")
+            }
+            if (support.fc().c_lit_depth >= 32) {
+                return token.err_tok("结构体字面量嵌套过深")
+            }
+            support.fc().c_lit_depth += 1
         }
     }
     let fields int = -1
@@ -1936,9 +2055,7 @@ fn parse_struct_init_tid(tid int, res *support.Res) int {
         return -1
     }
     if (support.session().compile != 0) {
-        if (check.sem_struct_lit_end(tid) != 0) {
-            return -1
-        }
+        if (support.fc().c_fold == 0) { support.fc().c_lit_depth -= 1 }
         support.res_reset(res, tid)
     }
     if (support.session().ast_capture != 0) {
@@ -1947,7 +2064,8 @@ fn parse_struct_init_tid(tid int, res *support.Res) int {
         }
         let id int = ast.ast_expr_add(ast.AST_EXPR_STRUCT_INIT, token.TK_LBRACE,
             init_first, token.ctx().pos, tid, fields, -1, -1)
-        if (id < 0 || ast.ast_expr_set_semantics(id, res) != 0) { return -1 }
+        if (id < 0 || ast.ast_expr_set_semantics(id, res) != 0
+            || ast.ast_expr_set_expect(id, tid) != 0) { return -1 }
         res.ast_id = id
     }
     return 0
@@ -1975,7 +2093,7 @@ fn parse_struct_init_body(tid int, fields *int) int {
             if (support.session().compile != 0 && support.fc().c_fold == 0) {
                 let fs int = token.ctx().tokens[token.ctx().pos].start
                 let fl int = token.ctx().tokens[token.ctx().pos].len
-                fidx = check.sem_lit_field_lookup(support.fc().c_lit_tid, fs, fl)
+                fidx = table.ty_field_lookup(tid, fs, fl)
                 if (fidx < 0) {
                     return token.err_tok("结构体没有该字段")
                 }
@@ -1998,10 +2116,10 @@ fn parse_struct_init_body(tid int, fields *int) int {
             support.fc().c_expect_tid = saved_expect
         } else {
             if (support.session().compile != 0 && support.fc().c_fold == 0) {
-                if (fpos >= table.ms().types[support.fc().c_lit_tid].len) {
+                if (fpos >= table.ms().types[tid].len) {
                     return token.err_tok("位置式字面量字段过多")
                 }
-                fidx = table.ms().types[support.fc().c_lit_tid].sub + fpos
+                fidx = table.ms().types[tid].sub + fpos
                 fpos += 1
             } else if (support.session().syntax_ast != 0) {
                 fidx = fpos
@@ -2021,7 +2139,7 @@ fn parse_struct_init_body(tid int, fields *int) int {
             support.fc().c_lit_last_type = fv.type_id
             support.fc().c_lit_last_lit = fv.is_lit
             support.fc().c_lit_last_ival = fv.ival
-            if (check.sem_struct_lit_field(support.fc().c_lit_tid, fidx) != 0) {
+            if (check.sem_eval_struct_field(tid, fidx) != 0) {
                 return -1
             }
         }

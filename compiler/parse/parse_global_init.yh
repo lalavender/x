@@ -5,7 +5,6 @@ import errors
 import types
 import support
 import table
-import comptime
 import ast
 
 // ============================================================================
@@ -182,8 +181,8 @@ fn parse_global_init(idx int, tid int, kind int) int {
         // 下标（聚合常量的 cval 只是数据段标签，见 comptime/ct_global_agg.yh）。
         let ct_obj i64 = 0
         if (kind == table.SYM_CONST
-            && comptime.ct_global_agg_modelable(tid, 0) != 0) {
-            ct_obj = comptime.ct_global_agg_new(tid, table.ms().types[tid].len)
+            && check.ct_agg_modelable(tid) != 0) {
+            ct_obj = check.ct_agg_new(tid, table.ms().types[tid].len)
             if (ct_obj == 0) { return -1 }
         }
         let struct_ast int = -1
@@ -199,7 +198,7 @@ fn parse_global_init(idx int, tid int, kind int) int {
             }
             table.ms().syms[idx].const_ready = 1
             if (ct_obj != 0
-                && comptime.ct_global_agg_register(idx, ct_obj) != 0) {
+                && check.ct_agg_register(idx, ct_obj) != 0) {
                 return -1
             }
         }
@@ -222,8 +221,8 @@ fn parse_global_init(idx int, tid int, kind int) int {
         // （CtValue 以聚合对象的 count/values 承载切片视图，无需「地址+长度」）。
         let ct_obj i64 = 0
         if (kind == table.SYM_CONST && fk == types.TY_ARRAY
-            && comptime.ct_global_agg_modelable(tid, 0) != 0) {
-            ct_obj = comptime.ct_global_agg_new(table.ms().types[tid].elem,
+            && check.ct_agg_modelable(tid) != 0) {
+            ct_obj = check.ct_agg_new(table.ms().types[tid].elem,
                 table.ms().types[tid].len)
             if (ct_obj == 0) { return -1 }
         }
@@ -239,7 +238,7 @@ fn parse_global_init(idx int, tid int, kind int) int {
             }
             table.ms().syms[idx].const_ready = 1
             if (ct_obj != 0
-                && comptime.ct_global_agg_register(idx, ct_obj) != 0) {
+                && check.ct_agg_register(idx, ct_obj) != 0) {
                 return -1
             }
         }
@@ -375,7 +374,7 @@ fn parse_global_comptime_aggregate_ex(idx int, tid int, kind int,
         let fname_len int = token.ctx().tokens[init_pos + 1].len
         let fnsym int = table.sym_lookup(fname_start, fname_len)
         if (fnsym < 0 || (table.ms().syms[fnsym].flags & table.F_COMPTIME) == 0
-            || comptime.ct_pub_agg_fn_add(fnsym) != 0) { return -1 }
+            || check.ct_pub_agg_fn_add(fnsym) != 0) { return -1 }
     }
     let status int = parse_global_comptime_aggregate(idx, tid)
     if (status != 0) { return -1 }
@@ -438,17 +437,13 @@ fn parse_global_comptime_aggregate(idx int, tid int) int {
     }
     if (check.sem_can_assign(tid, result.type_id, result.is_lit,
             result.ival, result.lit_big) != 0) { return -1 }
-    let value comptime.CtValue
-    value.type_id = tid
-    value.value = result.ival
-    value.is_lit = result.is_lit
-    value.lit_big = result.lit_big
-    if (comptime.ct_ir_data_emit_global(idx, tid, &value) != 0) { return -1 }
+    if (check.ct_agg_emit_global(idx, tid, result.ival, result.is_lit,
+            result.lit_big) != 0) { return -1 }
     // 顶层 CT 结果本身就是受支持的 CtAggregate 对象：登记成编译期模型，
     // 同一编译单元内再引用该常量时可直接读元素/字段，不必重跑 CT 调用。
     let ck int = table.ms().types[tid].kind
     if (ck == types.TY_ARRAY || ck == types.TY_STRUCT) {
-        if (comptime.ct_global_agg_register(idx, result.ival) != 0) {
+        if (check.ct_agg_register(idx, result.ival) != 0) {
             return -1
         }
     }
@@ -467,7 +462,7 @@ fn parse_global_ct_const_probe(idx int, tid int) int {
         || (table.ms().syms[sym].flags & table.F_COMPTIME) == 0
         // 只在目标编译期函数已捕获 typed IR 时才提前折叠：pass1 期间一律让位给
         // pass2a 之后的 typed 布局常量依赖调度，避免使用第二套 token 解释器。
-        || comptime.ct_is_prepared(sym) == 0) { return 0 }
+        || check.ct_is_prepared(sym) == 0) { return 0 }
     support.fc().c_fold += 1
     let value support.Res
     let status int = parse_expr_iso(&value)
@@ -619,15 +614,15 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
     if (support.session().ast_capture != 0) {
         let root int = ast.ast_expr_add(ast.AST_EXPR_ARRAY, token.TK_LBRACKET,
             first, token.ctx().pos, tid, list, -1, -1)
-        if (root < 0) { return -1 }
+        if (root < 0 || ast.ast_expr_set_expect(root, tid) != 0) { return -1 }
         ast_out[0] = root
     }
     // 切片常量没有类型内建长度：解析完字面量才知元素个数，模型在这里创建
     // （数组的模型已在 parse_global_init 按类型长度创建）。
     if (fk == types.TY_SLICE && ct_obj[0] == 0
         && table.ms().syms[idx].kind == table.SYM_CONST
-        && comptime.ct_global_agg_modelable(elem, 0) != 0) {
-        ct_obj[0] = comptime.ct_global_agg_new(elem, count)
+        && check.ct_agg_modelable(elem) != 0) {
+        ct_obj[0] = check.ct_agg_new(elem, count)
         if (ct_obj[0] == 0) { return -1 }
     }
     // 编译期模型：按源码顺序填入元素值（整数值或 f64 位模式）。
@@ -637,7 +632,7 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
             if (kinds[mi] != 0) {
                 return token.err_tok("内部错误：指针元素不应进入全局聚合常量模型")
             }
-            if (comptime.ct_global_agg_set(ct_obj[0], mi, elem, vals[mi]) != 0) {
+            if (check.ct_agg_set(ct_obj[0], mi, elem, vals[mi]) != 0) {
                 return -1
             }
             mi += 1
@@ -719,7 +714,7 @@ fn parse_global_struct_init(idx int, tid int, ct_obj i64, ast_out *int) int {
     if (support.session().ast_capture != 0) {
         let root int = ast.ast_expr_add(ast.AST_EXPR_STRUCT_INIT, token.TK_LBRACE,
             first, token.ctx().pos, tid, fields, -1, -1)
-        if (root < 0) { return -1 }
+        if (root < 0 || ast.ast_expr_set_expect(root, tid) != 0) { return -1 }
         ast_out[0] = root
     }
     return 0
@@ -746,7 +741,7 @@ fn parse_global_struct_body(tid int, base int, cur *int, ct_obj i64,
             }
             let fs int = token.ctx().tokens[token.ctx().pos].start
             let fl int = token.ctx().tokens[token.ctx().pos].len
-            fidx = check.sem_lit_field_lookup(tid, fs, fl)
+            fidx = table.ty_field_lookup(tid, fs, fl)
             if (fidx < 0) {
                 return token.err_tok("结构体没有该字段")
             }
@@ -819,7 +814,7 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
         // 嵌套结构体的编译期模型：先建子对象，填完再挂到父对象字段上。
         let ct_child i64 = 0
         if (ct_obj != 0) {
-            ct_child = comptime.ct_global_agg_new(ftid, table.ms().types[ftid].len)
+            ct_child = check.ct_agg_new(ftid, table.ms().types[ftid].len)
             if (ct_child == 0) { return -1 }
         }
         let nested_fields int = -1
@@ -833,13 +828,13 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
         if (support.session().ast_capture != 0) {
             let nested_root int = ast.ast_expr_add(ast.AST_EXPR_STRUCT_INIT,
                 token.TK_LBRACE, nested_first, token.ctx().pos, ftid, nested_fields, -1, -1)
-            if (nested_root < 0) { return -1 }
+            if (nested_root < 0 || ast.ast_expr_set_expect(nested_root, ftid) != 0) { return -1 }
             ast_out[0] = nested_root
         }
 
         cur[0] = foff + table.ms().types[ftid].size
         if (ct_obj != 0
-            && comptime.ct_global_agg_set_obj(ct_obj, ct_index, ftid,
+            && check.ct_agg_set_obj(ct_obj, ct_index, ftid,
                 ct_child) != 0) {
             return -1
         }
@@ -914,7 +909,7 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
         r = 0
         if (support.session().ast_capture != 0) { ast_out[0] = fv2.ast_id }
         if (r == 0 && ct_obj != 0
-            && comptime.ct_global_agg_set(ct_obj, ct_index, ftid,
+            && check.ct_agg_set(ct_obj, ct_index, ftid,
                 fv2.fval_bits) != 0) {
             return -1
         }
@@ -936,7 +931,7 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
         if (parse_global_static_scalar(static_row, foff, ftid, v.ival) != 0) { return -1 }
         r = 0
         if (r == 0 && ct_obj != 0
-            && comptime.ct_global_agg_set(ct_obj, ct_index, ftid,
+            && check.ct_agg_set(ct_obj, ct_index, ftid,
                 v.ival) != 0) {
             return -1
         }

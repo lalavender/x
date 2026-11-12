@@ -4,7 +4,6 @@ import check
 import types
 import support
 import table
-import comptime
 import ast
 import proj
 
@@ -487,7 +486,7 @@ fn parse_fn_decl() int {
                         return token.err_tok("类型化变参至多一个且在末尾")
                     }
                     is_variadic_seen = 1
-                    ptid = check.ty_slice(ptid)
+                    ptid = table.ty_slice(ptid)
                 }
             } else {
                 ptid = parse_type_ref()
@@ -522,16 +521,17 @@ fn parse_fn_decl() int {
         ret = rt
     }
     if (support.session().compile != 0 && (support.fc().c_decl_attrs & token.ATTR_COMPTIME) != 0) {
-        if (vararg != 0 || is_variadic_seen != 0
-            || comptime.ct_ir_return_supported(ret) == 0) {
+        if (vararg != 0 || is_variadic_seen != 0) {
             return token.err_tok("comptime 函数要求固定参数，且返回值须为标量、受支持定长数组/结构体/联合体或受支持元素切片")
         }
-        let ci_ct int = 0
-        for ci_ct < np {
-            if (comptime.ct_ir_param_supported(ptypes[ci_ct]) == 0) {
-                return token.err_tok("comptime 函数形参只支持整数、浮点、当前帧标量指针、标量叶定长数组、受支持结构体/联合体、标量元素切片或受支持结构体元素切片")
-            }
-            ci_ct += 1
+        // 签名可解释性判定（返回/形参类型）吸收进 check 语义动作；
+        // 两档诊断消息保持不变。
+        let sig_status int = check.sem_comptime_sig(ret, &ptypes[0], np)
+        if (sig_status == -1) {
+            return token.err_tok("comptime 函数要求固定参数，且返回值须为标量、受支持定长数组/结构体/联合体或受支持元素切片")
+        }
+        if (sig_status != 0) {
+            return token.err_tok("comptime 函数形参只支持整数、浮点、当前帧标量指针、标量叶定长数组、受支持结构体/联合体、标量元素切片或受支持结构体元素切片")
         }
     }
     ctx().type_abi = saved_type_abi
@@ -601,7 +601,7 @@ fn parse_fn_decl() int {
         let first int = table.ms().sigparam_n
         let i int = 0
         for i < np {
-            check.ty_sig_param(ptypes[i])
+            table.ty_sig_param(ptypes[i])
             i += 1
         }
         let sig_np int = np
@@ -662,7 +662,7 @@ fn parse_fn_decl() int {
     }
     let compile_only int = ((table.ms().syms[fidx].flags & table.F_COMPTIME) != 0).to_type(int)
     if (compile_only != 0 && support.fc().c_ct_prepare_active == 0) {
-        if (comptime.ct_is_prepared(fidx) != 0) {
+        if (check.ct_is_prepared(fidx) != 0) {
             if (ast.store().file_indexed != 0 && ast.store().file_decl_i >= 0) {
                 token.ctx().pos = ast.store().file_decls[ast.store().file_decl_i].end
             } else if (skip_to_decl_end() != 0) {
@@ -819,8 +819,8 @@ fn parse_struct_decl() int {
     }
     ctx().type_abi = saved_type_abi
     if (support.session().compile != 0 && support.session().pass == 1) {
-        if (comptime.ct_layout_struct_pending(table.ms().cur_struct) != 0) {
-            if (comptime.ct_layout_defer_struct(table.ms().cur_struct, is_union,
+        if (check.ct_struct_layout_pending(table.ms().cur_struct) != 0) {
+            if (check.ct_struct_layout_defer(table.ms().cur_struct, is_union,
                     struct_line, struct_col) != 0) { return -1 }
         } else {
             if (table.sem_struct_finish(table.ms().cur_struct, is_union) != 0) {
@@ -828,7 +828,7 @@ fn parse_struct_decl() int {
             }
         }
         if ((support.fc().c_decl_attrs & token.ATTR_EXTERN) != 0 && table.ms().types[table.ms().cur_struct].len == 0) {
-            return check.ty_add_name_attrs(table.ms().cur_struct, token.ATTR_OPAQUE)
+            return table.ty_add_name_attrs(table.ms().cur_struct, token.ATTR_OPAQUE)
         }
         return 0
     }
@@ -985,7 +985,7 @@ fn ct_register_source_path(sym_id int, names *int, name_lens *int, types *int,
         let n int = proj.file_locs_path(support.session().active_file, &loc_path[0], 1024)
         if (n > 0 && n < 1024) { loc_len = n }
     }
-    return comptime.ct_register(sym_id, names, name_lens, types,
+    return check.ct_register(sym_id, names, name_lens, types,
         param_n, ret_type, body_first, body_after,
         support.arr_cstr(loc_path), loc_len)
 }

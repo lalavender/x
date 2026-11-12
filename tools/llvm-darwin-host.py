@@ -23,7 +23,6 @@ HOST = "darwin-aarch64"
 SDK_BUILDER = ROOT / "tools/llvm-darwin-sdk.py"
 SDK_PREFIX = WORK / "darwin-sdk/sdk-darwin-aarch64"
 SDK_RECORD = SDK_PREFIX / "host.json"
-MANIFEST = ROOT / "vendor/llvm/sdk.lock.json"
 BRIDGE = ROOT / "compiler/llvm/bridge.c"
 BRIDGE_HEADER = ROOT / "compiler/llvm/bridge.h"
 LLD_BRIDGE = ROOT / "compiler/llvm/lld_bridge.cpp"
@@ -196,8 +195,8 @@ def load_sdk_record():
         record = json.loads(SDK_RECORD.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         raise NotReady(f"Darwin LLVM SDK 尚未构建：{error}") from error
-    if record.get("host") != HOST or record.get("manifest_sha256") != digest(MANIFEST):
-        raise NotReady("Darwin LLVM SDK host 或锁文件身份已变化")
+    if record.get("host") != HOST:
+        raise NotReady("Darwin LLVM SDK host 身份已变化")
     if record.get("builder_sha256") != sdk_recipe_digest():
         raise NotReady("Darwin LLVM SDK 构建器已变化")
     for name, expected in record.get("archives", {}).items():
@@ -441,7 +440,7 @@ def build_host(jobs):
     bridge_probe = probe_bridge(archive, flags, sdk_record)
     record = {
         "host": HOST, "llvm_version": "21.1.8", "bridge_abi": 2,
-        "sdk_host_sha256": digest(SDK_RECORD), "manifest_sha256": digest(MANIFEST),
+        "sdk_host_sha256": digest(SDK_RECORD),
         "host_builder_sha256": host_recipe_digest(),
         "sdk_builder_sha256": sdk_recipe_digest(),
         "bridge_source_sha256": digest(BRIDGE), "bridge_header_sha256": digest(BRIDGE_HEADER),
@@ -476,8 +475,8 @@ def check(full=True):
     except (OSError, ValueError) as error:
         return [f"Darwin LLVM host 身份记录不可读：{error}"]
     problems = []
-    if record.get("host") != HOST or record.get("manifest_sha256") != digest(MANIFEST):
-        problems.append("host 键或 SDK 锁文件已变化")
+    if record.get("host") != HOST:
+        problems.append("host 键已变化")
     if record.get("host_builder_sha256") != host_recipe_digest():
         problems.append("Darwin LLVM host 构建器已变化")
     if record.get("sdk_builder_sha256") != sdk_recipe_digest():
@@ -524,11 +523,24 @@ def check(full=True):
     return problems
 
 
+def closure_archives(record):
+    """闭包里会被原地重建的归档：桥、LLVM 组件静态库与 lld。
+
+    标记只 stat 这些文件的大小与修改时间；路径改名或来源变化由配方键兜底。
+    """
+    names = [*record.get("llvm_archives", {}), *record.get("lld_archives", {})]
+    archive = record.get("bridge_archive")
+    bridge = ROOT / archive if archive else workdir() / "libyh-llvm-bridge.a"
+    return [bridge, *(SDK_PREFIX / "lib" / name for name in names)]
+
+
 def ensure(mode):
     """准备 host；auto 仅复用本地固定源码包，不会触发网络下载。
 
     第一步只读 `.sealed-<host>.json` 标记：命中就直接返回记录，不再校验归档、
-    也不改写缓存（构建一次之后其余构建都是只读快路径）。
+    也不改写缓存（构建一次之后其余构建都是只读快路径）。标记里带闭包归档的
+    size/mtime 指纹；归档被原地重建时标记失效，这里改做一次全量摘要校验，
+    避免复用与当前归档不一致的旧记录。
     """
     record_path = workdir() / "host.json"
     sealed = closure_stamp_ok(HOST, record_path,
@@ -536,16 +548,16 @@ def ensure(mode):
                               selfhost_runtime_path()])
     if sealed is not None:
         return sealed
-    problems = check(full=False)
+    problems = check(full=True)
     if not problems:
         record = json.loads(record_path.read_text(encoding="utf-8"))
-        closure_stamp_write(HOST, record_path)
+        closure_stamp_write(HOST, record_path, closure_archives(record))
         return record
     source = runpy.run_path(str(SDK_BUILDER))["source_archive_path"]()
     if mode == "auto" and not Path(source).is_file():
         raise NotReady("；".join(problems) + "；本地缺少固定源码包，auto 模式不联网下载")
     record = build_host(int(os.environ.get("LLVM_JOBS", "2")))
-    closure_stamp_write(HOST, record_path)
+    closure_stamp_write(HOST, record_path, closure_archives(record))
     return record
 
 
@@ -636,15 +648,15 @@ def main(argv):
             return 0
         problems = check(full=True)
         if not problems:
-            closure_stamp_write(HOST, record_path)
             record = json.loads(record_path.read_text(encoding="utf-8"))
+            closure_stamp_write(HOST, record_path, closure_archives(record))
             print(json.dumps({"host": HOST, "reused": True,
                               "bridge_sha256": record["bridge_sha256"],
                               "sdk_host_sha256": record["sdk_host_sha256"],
                               "probe": record["bridge_probe"]}, ensure_ascii=False))
             return 0
         record = build_host(args.jobs)
-        closure_stamp_write(HOST, record_path)
+        closure_stamp_write(HOST, record_path, closure_archives(record))
         print(json.dumps({"host": HOST, "bridge_sha256": record["bridge_sha256"],
                           "sdk_host_sha256": record["sdk_host_sha256"],
                           "probe": record["bridge_probe"]}, ensure_ascii=False))

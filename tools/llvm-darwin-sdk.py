@@ -277,6 +277,19 @@ def verify_artifacts(record, prefix):
     return True
 
 
+def recipe_matches(record, sdk_root, toolchain):
+    """判定已有 SDK 与当前配方是否一致：只认真正决定产物的三项。
+
+    刻意不含 `vendor/llvm/sdk.lock.json` 的整文件摘要：同一份锁文件同时钉住
+    Windows 闭包，那边加段或重排格式就会让整文件摘要变化，从而把完好的 Darwin
+    SDK 判成过期、每次构建重编整棵 LLVM（实测约 30 分钟）。产物真正的输入是
+    `darwin_build` 构建规格（`build_spec()`）、Apple SDK 设置与工具链。
+    """
+    return (record.get("build_configuration") == build_spec()
+            and record.get("sdk_settings_sha256") == digest(Path(sdk_root) / "SDKSettings.json")
+            and record.get("toolchain") == toolchain)
+
+
 def build_sdk(min_os, jobs):
     """从固定完整源码构建 X86/AArch64 LLVM、clang oracle 与 ELF/Mach-O/COFF lld。"""
     host = select_host()
@@ -306,11 +319,9 @@ def build_sdk(min_os, jobs):
                 or record.get("sdk_root") != str(sdk_root)
                 or record.get("sdk_version") != sdk_version):
             raise RuntimeError(f"已有 Darwin SDK 的源码/目标/Apple SDK 不同，保留现场：{prefix}")
-        # 配方（怎么编译）与产物（编译结果）分开校验：recipe 覆盖 sdk.lock 清单、
+        # 配方（怎么编译）与产物（编译结果）分开校验：recipe 覆盖 Darwin 构建规格、
         # Apple SDK 设置和工具链；builder_sha256 只是构建器源码摘要。
-        recipe = (record.get("manifest_sha256") == digest(MANIFEST)
-                  and record.get("sdk_settings_sha256") == digest(sdk_root / "SDKSettings.json")
-                  and record.get("toolchain") == toolchain)
+        recipe = recipe_matches(record, sdk_root, toolchain)
         artifacts_ok = recipe and verify_artifacts(record, prefix)
         if artifacts_ok and record.get("builder_sha256") == sdk_recipe_digest():
             return prefix
@@ -465,7 +476,6 @@ def write_host_record(host, min_os, sdk_root, sdk_version, toolchain, package, p
               "build_configuration": build_spec(),
               "tool_versions": tool_versions,
               "tools": {name: digest(prefix / "bin" / name) for name in required_tools},
-              "manifest_sha256": digest(MANIFEST),
               "archives": {path.name: digest(path) for path in libraries},
               "license_files": ["share/LICENSE-LLVM", "share/LICENSE-Clang", "share/LICENSE-lld"]}
     share = prefix / "share"
