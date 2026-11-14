@@ -491,8 +491,10 @@ sync_repeat := env("SYNC_REPEAT", "10")
 
 # test-sync-stress：重复执行 sync 模块的并发用例，抓偶发死锁/丢失唤醒。
 # 未实现线程后端的平台（Windows 占位）上用例自身跳过，不失败。
+# `libs/sync` 暂缓发布（0.0.15 先不发该库）：目录不存在时直接跳过，保留目标
+# 以便恢复时无需改 CI 侧引用。
 test-sync-stress: stage-yh
-    @cd "{{ root }}/libs" && for i in $(seq 1 {{ sync_repeat }}); do YH_CACHE=off "{{ yh_run }}" test --filter sync --timeout 60; done
+    @if [ ! -d "{{ root }}/libs/sync" ]; then echo "跳过 test-sync-stress（libs/sync 暂缓发布）"; else cd "{{ root }}/libs" && for i in $(seq 1 {{ sync_repeat }}); do YH_CACHE=off "{{ yh_run }}" test --filter sync --timeout 60; done; fi
 
 # test-stdlib-unix：标准库专项门（.github/workflows/stdlib.yml 的 Linux/Darwin 端）。
 [unix]

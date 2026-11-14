@@ -1,21 +1,22 @@
-# 0.0.15 — 多线程标准库 sync、模块拆分、前端 S4 收口
+# 0.0.15 — 模块拆分、前端 S4 收口（`libs/sync` 暂缓）
 
-正式版。本版在 0.0.14 基础上加入多线程标准库 `libs/sync`（Darwin/Linux）、
-`errors` 叶子模块与 `types`/`table` 拆分、`support` 收缩为单文件，并把前端
-S4 切片做完：类型语法/长度语义外置、影子门、CT 展开下沉（`parse→comptime = 0`）、
-表达式语义外置（表达式内联 47 → 0）、语句语义外置（`parse_stmt` 直调内核 9 → 0）。
+正式版。本版在 0.0.14 基础上完成 `errors` 叶子模块与 `types`/`table` 拆分、
+`support` 收缩为单文件，并把前端 S4 切片做完：类型语法/长度语义外置、影子门、
+CT 展开下沉（`parse→comptime = 0`）、表达式语义外置（表达式内联 47 → 0）、
+语句语义外置（`parse_stmt` 直调内核 9 → 0）。另修两处后端缺陷（见 §5）。
 种子链：0.0.14 → 0.0.15（由 0.0.14 正式版种子构建）。
 
 ## 主要内容
 
-**1. 多线程标准库 `libs/sync`**
+**1. `libs/sync` 暂缓发布**
 
-- 纯标准库实现，不改语言/语法/检查器/IR；线程入口固定 `fn(*void) void`。
-- Darwin（pthread）与 Linux（libc pthread）已交付：`Thread`/`Mutex`/`Cond`/
-  `WaitGroup`/`Once` + 库内测试（O0/O2、重复并发压力 0 失败）。
-- 新增标准库专项 CI `stdlib.yml`（四端跑 `test-stdlib-*`），justfile 增加
-  `test-sync-stress`、`test-stdlib-unix`、`test-stdlib-windows`。
-- 未做：Windows（`CreateThread`/SRW）、`Chan`、`RwLock`/原子/TSan——见 `docs/todo.md`。
+- 多线程标准库（Darwin pthread / Linux libc pthread）已在 `libs` 分支完成实现与
+  库内测试，但**本版不发布**：用 0.0.14 种子构建非 Darwin 端时，
+  `ld.lld` 对 `yh_libs-sys.o` 报 `duplicate symbol`（种子侧链接问题，新代码不参与
+  该阶段）。已从本版移除 `libs/sync`；`just test-sync-stress` 在目录不存在时跳过。
+- 恢复条件：先发出不含 sync 的种子，下一版再并入 sync。
+
+**2. 模块拆分：`errors` 叶子、`types`/`table` 从 `support` 拆出**
 
 **2. 模块拆分：`errors` 叶子、`types`/`table` 从 `support` 拆出**
 
@@ -50,9 +51,15 @@ S4 切片做完：类型语法/长度语义外置、影子门、CT 展开下沉�
 
 **5. 修复**
 
+- Windows 零 CRT 入口重复 `declare`：`cmd/yh/argv.windows.yh` 的 `@[extern]` 与入口桩
+  各声明一次 `GetCommandLineW` / `WideCharToMultiByte`，Windows 目标上 LLVM 报
+  `invalid redefinition of function`。入口桩改为按符号表判断是否已有声明。
+- ELF 函数 section 名加 `yh.` 前缀：`.text.<符号名>` 的 sanitize 结果可能与符号名
+  重合，避免与非 Darwin 链接器判重。
 - 函数/检查切片缓存键未包含数据标签布局，导致字符串标签重排后复用旧切片
   （`fix(cache): 函数/检查切片按数据标签布局失效`）。
 - 构建侧移除误带入的 `libs.list` 未使用导入。
+- 新增 `YH_LINK_TRACE=1`：链接失败时自动把最终参数逐条写 stderr，供非本机平台排障。
 
 ## 守卫与门禁
 

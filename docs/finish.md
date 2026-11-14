@@ -8,6 +8,30 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-13：0.0.15 发布前——移除 `libs/sync`、修两处后端缺陷
+
+**结果**：0.0.15 改为**不含 `libs/sync`** 发布；同时修掉两处后端缺陷，恢复本机构建。
+- 移除 `libs/sync`（`git rm -r`）：0.0.15 首次发布尝试三端红，根因是「种子 0.0.14
+  编译 + 链接」这一环对 `yh_libs-sys.o` 报 `duplicate symbol`；新代码不参与该阶段，
+  编译器侧修复对本次发布无效。`just test-sync-stress` 改为目录不存在时跳过。
+- Windows：`argv.windows.yh` 的 `@[extern]` 与零 CRT 入口桩重复 `declare`
+  `GetCommandLineW`/`WideCharToMultiByte`，Windows 目标上报
+  `invalid redefinition of function`。入口桩改为按符号表（`llvm_runtime_declared`）
+  决定是否声明。
+- ELF：函数 section 名加 `yh.` 前缀，避免 sanitize 后与符号名重合。
+- 新增 `YH_LINK_TRACE=1`：链接失败时自动打印最终链接参数（非本机平台排障用）。
+- 本机环境：`tmp/llvm-migration` 闭包丢失后重建失败（默认 SDK 27.0 的 `libSystem.tbd`
+  含 `arm64e.x1`，固定 lld 21 无法解析）；用
+  `SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk` 直接调
+  `tools/llvm-darwin-host.py prepare` 重建成功（`just` 不透传该变量）。
+
+**验证**：`just dev` 0；`just test` 0（389/391 跳 2）；`just selfhost-native` 0
+（两代固定点、project cases 125/125）；`x86_64-pc-windows-msvc` 目标构建不再报
+`invalid redefinition`（推进到缺 Windows 导入库的环境错误）。
+
+**遗留**：非 Darwin 端的 `duplicate symbol` 未定位（需在有 0.0.15 种子的环境复现）；
+sync 恢复条件见 `docs/todo.md`。
+
 
 ## 2026-11-11：S4 收尾——驱动入口拆出 `check/eval.yh`；S4-2 严格形态关闭
 
