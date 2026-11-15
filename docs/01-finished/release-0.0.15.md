@@ -12,8 +12,11 @@ CT 展开下沉（`parse→comptime = 0`）、表达式语义外置（表达式�
 
 - 多线程标准库（Darwin pthread / Linux libc pthread）已在 `libs` 分支完成实现与
   库内测试，但**本版不发布**：用 0.0.14 种子构建非 Darwin 端时，
-  `ld.lld` 对 `yh_libs-sys.o` 报 `duplicate symbol`（种子侧链接问题，新代码不参与
-  该阶段）。已从本版移除 `libs/sync`；`just test-sync-stress` 在目录不存在时跳过。
+  `ld.lld` 对 `yh_libs-sys.o` 报 `duplicate symbol`。发布前已定位到根因（同一个
+  `libs` 被「标准库自动发现」的绝对路径与清单依赖的相对路径各装载一次 → 两个同名
+  `yh_libs` 项目 → 同一个 `.o` 进链接两次），并以构建脚本补丁修掉，见
+  [yh_libs 重复装载修复](yh-libs-重复装载修复-2026-11-15.md)；按约定本版仍不含
+  sync，`just test-sync-stress` 在目录不存在时跳过。
 - 恢复条件：先发出不含 sync 的种子，下一版再并入 sync。
 
 **2. 模块拆分：`errors` 叶子、`types`/`table` 从 `support` 拆出**
@@ -82,5 +85,18 @@ CT 展开下沉（`parse→comptime = 0`）、表达式语义外置（表达式�
 
 ## 发布验收
 
-待填：四端 CI 结果、资产清单、用发布二进制跑的 `just`/`just test`/
-`just selfhost-native` 结果。
+`release.yml` run `43711895347`（tag `0.0.15` → 提交 `e439ff2`）：prepare / 四端 /
+publish **全成功**，Release 为正式版（`prerelease=false`），8 个资产
+（四端 `yh-0.0.15-<平台>.tar.gz` + 同名 `.sha256`）。
+
+用发布出去的二进制验收（`rm -rf bin && just fetch-seed` 取到 `yh-darwin-arm64`
+sha256 `78153ca7…`）：
+
+- `just` 冷编成功；`./yh --version` = `yh 0.0.15`；
+- `just test`：通过 389/391（2 跳过），「总计：全部通过」；
+- `just selfhost-native`：cc4 固定点探针 OK、`project cases` 125/125。
+
+发布前四次 tag 尝试的失败与修复（`duplicate symbol` → `invalid redefinition` →
+种子无判重逻辑的结构性规避）记录在
+[yh_libs 重复装载修复](yh-libs-重复装载修复-2026-11-15.md)。
+本版`libs/sync` 仍按约定不含；其恢复条件见上文 §1。
