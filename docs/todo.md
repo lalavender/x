@@ -11,6 +11,27 @@
 - 添加接口功能
 - project.toml 添加[env]
 
+## 2026-11-15 项目装载身份与链接对象去重（P0，进行中）
+
+调研与证据：[yh_libs 重复装载修复](01-finished/yh-libs-重复装载修复-2026-11-15.md)。
+已用 `justfile` 的 `YH_STDLIB=../libs` 让本次发布不在 Linux/Windows 上重复装载；
+下面四条是**编译器自身**的结构性修复，新种子生效后逐条落地并删除该构建脚本补丁。
+
+- [ ] **项目身份规范化（P0）**：`load_project` / `find_project_root` 在判重前把 root
+  规范成绝对路径（canon + 绝对化），消除「同一目录两种拼写 = 两个项目」。现状见
+  `compiler/build/api.yh:1369`、`compiler/build/proj/api.yh:1494`。
+- [ ] **模块产物键加项目身份校验（P0）**：两个同名项目会产出同 tag、同符号后缀、
+  同 `.o` 路径。落地 `proj.mod_tag`/`pj_mod_suffix` 之前加「同 tag 不同项目」的诊断，
+  让这类结构错误在装载期就报出来，而不是留给链接器。
+- [ ] **链接参数对象去重（P1）**：`mb_link_args` 按解析后的对象路径去重（`p.paths`
+  行内已有完整路径，可直接比对），重复时给一条 `YH_LINK_TRACE` 可见的说明。
+- [ ] **Linux 目录枚举对 `DT_UNKNOWN` 兜底（P1）**：`project_dir.linux.x64.yh` /
+  `project_dir.linux.arm64.yh` 只用 `d_type == 4` 判目录，`DT_UNKNOWN`（部分 overlayfs）
+  会把目录当文件跳过；补 `openat(O_DIRECTORY|O_NOFOLLOW)` 探测，与 darwin 的
+  `getattrlistbulk` 语义对齐（x64 `O_DIRECTORY|O_NOFOLLOW = 0x30000`，
+  arm64 `0xC000`）。
+- [ ] **删除 `YH_STDLIB` 构建脚本补丁（P0，依赖上面第一条）**：`justfile` 的
+  `build`/`dev` 恢复原形态（见该文件 `build` 注释）。
 ## 2026-11-12 内存安全加固（P0/P1，分析已交付）
 
 分析：[yh 内存安全分析](03-design/yh-内存安全分析.md)（2026-11-12，已验证 S1–S8）。

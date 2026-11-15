@@ -8,6 +8,27 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-15：定位并修掉「`libs` 重复装载」——Linux/Windows 种子构建恢复
+
+**结果**：`duplicate symbol: is_error__yh_libs__sys_$yhllvmv1` 的根因找到并修掉，
+修法在本次发布即可生效（改构建脚本，改编译器自身逻辑对本次无效）。
+- 症状：四端里只 Linux/Windows 红，`just ci-gate` 第一步（种子 0.0.14 构建
+  `compiler/`）里 `[编译] sys` 出现两次，同一个 `yh_libs-sys.o` 进链接两次；
+  Darwin 绿只因 ld64 容忍重复对象。
+- 本地排查已排除：darwin / linux / windows 三种 target、相对与绝对 `argv[0]`、
+  纯净副本冷缓存——本地一律只装载一次。
+- 临时诊断作业（三轮，已删分支）：`strace` 显示 Linux 上 `libs` 树被**两套拼写**
+  各扫一次——绝对 `/home/runner/work/x/x/libs/**`（标准库自动发现）与相对
+  `../libs/**`（`[dependencies]`）。`load_project` 按 root 路径字节判重 → 两个同名
+  `yh_libs` 项目 → 同一对象名、无目录指纹 → 同 `.o` 两次。
+- 修法：`justfile` 的 `build`/`dev` 给种子构建设 `YH_STDLIB=../libs`，让标准库根与
+  依赖用同一相对拼写（基准是 `seed-build.py` 的 cwd `<root>/compiler`），两个来源
+  合并成一个项目。CI 等价调用实测：加变量前 30 模块行 / `sys` 2 次，加后 29 / 1 次。
+- 本地三门：`just dev`、`just test`（389/391，2 跳过）、`just selfhost-native`
+  （project cases 125/125）全绿。
+- 长期项（已进 `docs/todo.md`）：root 规范化后判重、链接参数对象去重、Linux 目录枚举
+  对 `DT_UNKNOWN` 兜底、编译器修好后删除 `YH_STDLIB` 补丁。
+- 详见 [yh-libs-重复装载修复](01-finished/yh-libs-重复装载修复-2026-11-15.md)。
 ## 2026-11-13：0.0.15 发布前——移除 `libs/sync`、修两处后端缺陷
 
 **结果**：0.0.15 改为**不含 `libs/sync`** 发布；同时修掉两处后端缺陷，恢复本机构建。
