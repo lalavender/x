@@ -33,6 +33,10 @@
 - [ ] **删除 `YH_STDLIB` 过渡补丁（P0，依赖上面第一条）**：`justfile` 的
   `build`/`dev` 与 `tests/selfhost/bootstrap/native-selfhost.py` 的 `run()`
   恢复原形态（见两处注释）。
+- [ ] **回退 `argv` 模块拆分（P1，依赖上一条同批种子）**：`compiler/argvimpl/`
+  的 `argv.<平台>.yh` 并回 `compiler/cmd/yh/`、模块名恢复 `main`、实现去掉 `pub`，
+  `cmd/yh/argv.yh` 去掉 `import yh_argv_impl` 与限定名。拆分只为绕开 0.0.14 种子
+  「入口桩无条件 declare」的缺陷，新种子带上判重修复后不再需要。
 
 ## 2026-11-12 内存安全加固（P0/P1，分析已交付）
 
