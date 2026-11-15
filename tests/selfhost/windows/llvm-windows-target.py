@@ -151,6 +151,21 @@ def project_toml(libraries: list[str]) -> str:
 # 负例：不支持的 Windows 架构（首版只有 x64）。
 REJECT_SOURCE = "fn main() int { return 0 }\n"
 
+# 回归用例：`cmd/yh/argv.windows.yh` 用 `@[extern]` 声明 GetCommandLineW，零 CRT
+# 入口桩也声明它；桩若重复 declare，LLVM 判 `invalid redefinition of function`
+# （0.0.15 的 windows-x64 发布构建就红在这里）。判据必须是「模块里已有同名符号」，
+# 不能只看 `defined == 0`——`@[extern]` 声明的 defined 位不保证为 0。
+ENTRY_EXTERN_SOURCE = """module entry_extern
+
+@[extern] fn GetCommandLineW() *i16
+
+fn main() int {
+    let line *i16 = GetCommandLineW()
+    if (line == 0) { return 1 }
+    return 0
+}
+"""
+
 
 class GateError(RuntimeError):
     """门禁失败；message 必须能直接指出下一步。"""
@@ -212,6 +227,21 @@ def check_assembly(compiler: str, source: Path) -> None:
         if forbidden in asm:
             raise GateError(f"汇编里混入了 {forbidden}：Windows 目标不得使用 Linux syscall 路径")
 
+
+def check_entry_extern(compiler: str, work: Path) -> None:
+    """源码 `@[extern]` 已声明的 Win32 函数，零 CRT 入口桩不得重复 declare。
+
+    重复 declare 发生在后端把模块 IR 交给 LLVM 时，比汇编发射更早失败，所以只跑
+    `--emit-asm` 就能守住（不需要 Windows 导入库，本机无 SDK 也能跑）。
+    """
+    source = work / "entry-extern.yh"
+    source.write_text(ENTRY_EXTERN_SOURCE, encoding="utf-8")
+    result = run([compiler, "--target", "x86_64-pc-windows-msvc", "--emit-asm",
+                  str(source)], ROOT)
+    require(result, "源码 @[extern] 声明 GetCommandLineW 时交叉发射")
+    if "invalid redefinition" in result.stderr:
+        raise GateError("零 CRT 入口桩重复 declare 源码已声明的 "
+                        "GetCommandLineW：" + NL + result.stderr[-400:])
 
 def check_reject(compiler: str, source: Path) -> None:
     """不支持的 Windows 架构必须被拒（退出码 2 + 诊断），不能静默回退到 x64。"""
@@ -280,6 +310,8 @@ def main() -> int:
     first = work / "asm-probe.yh"
     first.write_text(ASM_PROBE_SOURCE, encoding="utf-8")
     check_assembly(compiler, first)
+    # 入口桩与源码 `@[extern]` 同名函数：不得重复 declare（0.0.15 回归点）。
+    check_entry_extern(compiler, work)
 
     # 清单里的 Windows 库输入：.lib（ar 归档，kind=1）必须被接受，
     # .dll 必须是 x86_64 PE（否则给出目标级诊断）。用一个临时项目验证

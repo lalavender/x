@@ -28,6 +28,14 @@
   （project cases 125/125）全绿。
 - 长期项（已进 `docs/todo.md`）：root 规范化后判重、链接参数对象去重、Linux 目录枚举
   对 `DT_UNKNOWN` 兜底、编译器修好后删除 `YH_STDLIB` 补丁。
+- 同一链路暴露的第二处（0.0.15 windows-x64 原生与交叉都红）：零 CRT 入口桩与
+  源码 `@[extern]` 重复 declare `GetCommandLineW`。`503ab17` 的判据
+  `defined == 0` 漏检（声明位不保证为 0），改为「模块内已有同名符号」后消失；
+  本地 `--emit-asm` 对照：种子 rc=255 报错、新编译器 rc=0。回归用例见
+  `tests/selfhost/windows/llvm-windows-target.py` 的 `check_entry_extern`。
+- 自举链路（`selfhost-native` 里 cc1/cc2 反复构 `compiler/`）不经过 justfile，
+  故 `tests/selfhost/bootstrap/native-selfhost.py` 的 `run()` 同样注入
+  `YH_STDLIB=../libs`；两处都是过渡补丁，随编译器判重修复一并删除。
 - 详见 [yh-libs-重复装载修复](01-finished/yh-libs-重复装载修复-2026-11-15.md)。
 ## 2026-11-13：0.0.15 发布前——移除 `libs/sync`、修两处后端缺陷
 

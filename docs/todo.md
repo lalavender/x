@@ -30,8 +30,10 @@
   会把目录当文件跳过；补 `openat(O_DIRECTORY|O_NOFOLLOW)` 探测，与 darwin 的
   `getattrlistbulk` 语义对齐（x64 `O_DIRECTORY|O_NOFOLLOW = 0x30000`，
   arm64 `0xC000`）。
-- [ ] **删除 `YH_STDLIB` 构建脚本补丁（P0，依赖上面第一条）**：`justfile` 的
-  `build`/`dev` 恢复原形态（见该文件 `build` 注释）。
+- [ ] **删除 `YH_STDLIB` 过渡补丁（P0，依赖上面第一条）**：`justfile` 的
+  `build`/`dev` 与 `tests/selfhost/bootstrap/native-selfhost.py` 的 `run()`
+  恢复原形态（见两处注释）。
+
 ## 2026-11-12 内存安全加固（P0/P1，分析已交付）
 
 分析：[yh 内存安全分析](03-design/yh-内存安全分析.md)（2026-11-12，已验证 S1–S8）。
