@@ -76,6 +76,17 @@
 | `just test` | 通过（三层语料 + libs + 工具门 + C4/C6 缓存门） |
 | `just selfhost-native` | 通过；`project cases 127/127` |
 
+## 发布验收（用发布出去的二进制）
+
+- **四端**（`release.yml` run `44116167597`）：`linux-x64` / `linux-arm64` /
+  `darwin-arm64` / `windows-x64` 全部 success，`publish` 成功；Release 为正式版
+  （非 prerelease），8 个资产（四端 `yh-0.0.16-<平台>.tar.gz` 与对应 `.sha256`），
+  GitHub 标记为 Latest。
+- **发布二进制验收**（本机 darwin-arm64）：`rm -rf bin && just fetch-seed` 取到
+  `0.0.16`（sha256 `bf952c2c…`，`--version` = `yh 0.0.16`）；随后 `just`（dev）/
+  `just test` / `just selfhost-native`（两代固定点）三门全绿，
+  `project cases 127/127`。
+
 ## 已知限制
 
 - Linux `DT_UNKNOWN` 分支只在 CI 的 Linux runner 上真实执行（开发机为 Darwin）。
