@@ -4,7 +4,7 @@ module errors
 // render.yh —— 诊断消息的私有渲染辅助
 //
 // 与 support 的通用缓冲函数同形，但本模块不 import support（叶子基座），
-// 故自带一份最小私有实现：只服务 api.yh 的四个诊断入口，不做通用工具。
+// 故自带一份最小私有实现：只服务 api.yh 的诊断入口，不做通用工具。
 // 所有函数不分配；容量由调用方的栈缓冲保证。
 // ============================================================================
 
@@ -102,4 +102,389 @@ fn append_ct_expand_trace(buf *u8, n int, limit int) int {
         i += 1
     }
     return append_str_limit(buf, n, limit, "]")
+}
+
+// ============================================================================
+// D1：V 风格源码片段渲染
+//
+// 只在错误路径（格式化一条诊断时）执行；编译成功路径不触碰源码槽位，
+// 因此成功构建没有额外开销。所有函数不分配：输出写调用方栈缓冲，源字节只
+// 读 g_src_data_slot 指向的只读源码，不做任何复制。
+// 宽度规则（与 V 0.5 实测一致，见 docs/03-design/yh-编译诊断规范.md）：
+// tab 记 4 列（固定，非 tab stop）、CJK/全角记 2 列、组合字符记 0 列、
+// 非法字节记 1 列；行号栏宽最小 5，超过 5 位自动加宽。
+// ============================================================================
+
+// digits：十进制位数（0 记 1 位，负数按绝对值）。
+fn digits(v int) int {
+    if (v < 0) { v = -v }
+    let k int = 1
+    for v >= 10 {
+        v = v / 10
+        k += 1
+    }
+    return k
+}
+
+// append_pad：追加 k 个空格（k<=0 不写、受 limit 限制），返回新位置。
+fn append_pad(buf *u8, n int, limit int, k int) int {
+    let i int = 0
+    for i < k && n < limit {
+        buf[n] = ' '
+        n += 1
+        i += 1
+    }
+    return n
+}
+
+// utf8_seq_len：UTF-8 首字节给出的序列字节数（1..4）；非法首字节按 1 处理。
+fn utf8_seq_len(b u8) int {
+    if (b < 0x80) { return 1 }
+    if (b >= 0xC2 && b <= 0xDF) { return 2 }
+    if (b >= 0xE0 && b <= 0xEF) { return 3 }
+    if (b >= 0xF0 && b <= 0xF4) { return 4 }
+    return 1
+}
+
+// cp_cols：一个码点的显示宽度（组合字符 0、CJK/全角 2、其余 1）。
+fn cp_cols(cp int) int {
+    if (cp >= 0x0300 && cp <= 0x036F) { return 0 }
+    if (cp >= 0x200B && cp <= 0x200F) { return 0 }
+    if (cp >= 0xFE00 && cp <= 0xFE0F) { return 0 }
+    if (cp >= 0x1100 && cp <= 0x115F) { return 2 }
+    if (cp >= 0x2E80 && cp <= 0xA4CF) { return 2 }
+    if (cp >= 0xAC00 && cp <= 0xD7A3) { return 2 }
+    if (cp >= 0xF900 && cp <= 0xFAFF) { return 2 }
+    if (cp >= 0xFE30 && cp <= 0xFE6F) { return 2 }
+    if (cp >= 0xFF00 && cp <= 0xFF60) { return 2 }
+    if (cp >= 0xFFE0 && cp <= 0xFFE6) { return 2 }
+    if (cp >= 0x20000 && cp <= 0x3FFFD) { return 2 }
+    return 1
+}
+
+// utf8_cols：从 src[at] 起 n 字节（一个完整序列）的显示宽度。
+// n<=1 或首字节非法时按单字节码点宽度处理（兜底为 1 列）。
+fn utf8_cols(src *u8, at int, n int) int {
+    let b0 int = src[at].to_type(int)
+    if (n <= 1) { return cp_cols(b0) }
+    if (n == 2) {
+        let cp2 int = ((b0 & 0x1F) << 6) | (src[at + 1].to_type(int) & 0x3F)
+        return cp_cols(cp2)
+    }
+    if (n == 3) {
+        let cp3 int = ((b0 & 0x0F) << 12) | ((src[at + 1].to_type(int) & 0x3F) << 6)
+        cp3 = cp3 | (src[at + 2].to_type(int) & 0x3F)
+        return cp_cols(cp3)
+    }
+    let cp4 int = ((b0 & 0x07) << 18) | ((src[at + 1].to_type(int) & 0x3F) << 12)
+    cp4 = cp4 | ((src[at + 2].to_type(int) & 0x3F) << 6)
+    cp4 = cp4 | (src[at + 3].to_type(int) & 0x3F)
+    return cp_cols(cp4)
+}
+
+// text_width：src[from,to) 的显示宽度（tab=4、跳过 CR、按 UTF-8 计列）。
+fn text_width(src *u8, from int, to int) int {
+    let w int = 0
+    let i int = from
+    for i < to {
+        let b u8 = src[i]
+        if (b == '\t') {
+            w += 4
+            i += 1
+        } else if (b == '\r') {
+            i += 1
+        } else {
+            let step int = utf8_seq_len(b)
+            if (i + step > to) { step = 1 }
+            w += utf8_cols(src, i, step)
+            i += step
+        }
+    }
+    return w
+}
+
+// line_start_of：第 line 行（1 基）的起始字节偏移；行号越界返回 -1。
+// 文件以换行结尾时，末尾不构成可定位的额外空行（与 count_lines 一致）。
+fn line_start_of(src *u8, slen int, line int) int {
+    if (line < 1) { return -1 }
+    let i int = 0
+    let cur int = 1
+    for cur < line {
+        for i < slen && src[i] != '\n' {
+            i += 1
+        }
+        if (i >= slen) { return -1 }
+        i += 1
+        cur += 1
+    }
+    if (i > slen) { return -1 }
+    if (i == slen && slen > 0 && src[slen - 1] == '\n') { return -1 }
+    return i
+}
+
+// line_end_of：从 start 起的行尾偏移（指向 '\n' 或源尾）。
+fn line_end_of(src *u8, slen int, start int) int {
+    let i int = start
+    for i < slen && src[i] != '\n' {
+        i += 1
+    }
+    return i
+}
+
+// count_lines：可定位的行数（末尾换行不额外计一行）。
+fn count_lines(src *u8, slen int) int {
+    if (slen <= 0) { return 0 }
+    let k int = 1
+    let i int = 0
+    for i < slen {
+        if (src[i] == '\n') { k += 1 }
+        i += 1
+    }
+    if (src[slen - 1] == '\n') { k -= 1 }
+    return k
+}
+
+// byte_at_col：返回 [start,end) 内「显示列首次达到 want 的字节偏移」，
+// 用于把长行的显示窗口换成字节边界；列不足时返回 end。
+fn byte_at_col(src *u8, start int, end int, want int) int {
+    if (want <= 0) { return start }
+    let w int = 0
+    let i int = start
+    for i < end {
+        let b u8 = src[i]
+        let step int = 1
+        let wd int = 1
+        if (b == '\t') {
+            wd = 4
+        } else if (b == '\r') {
+            wd = 0
+        } else {
+            step = utf8_seq_len(b)
+            if (i + step > end) { step = 1 }
+            wd = utf8_cols(src, i, step)
+        }
+        if (w + wd > want) { return i }
+        w += wd
+        i += step
+    }
+    return end
+}
+
+// append_line_text：追加 [from,to) 这段源文本，tab 展开为 4 空格、跳过 CR；
+// ell_head/ell_tail 非 0 时在首/尾补 UTF-8 省略号「…」。
+fn append_line_text(buf *u8, n int, limit int, src *u8, start int, end int,
+    from int, to int, ell_head int, ell_tail int) int {
+    if (ell_head != 0) { n = append_str_limit(buf, n, limit, "…") }
+    let i int = from
+    if (i < start) { i = start }
+    if (to > end) { to = end }
+    for i < to && n < limit {
+        let b u8 = src[i]
+        if (b == '\t') {
+            n = append_pad(buf, n, limit, 4)
+            i += 1
+        } else if (b == '\r') {
+            i += 1
+        } else {
+            let step int = utf8_seq_len(b)
+            if (i + step > to) { step = 1 }
+            let k int = 0
+            for k < step && n < limit {
+                buf[n] = src[i + k]
+                n += 1
+                k += 1
+            }
+            i += step
+        }
+    }
+    if (ell_tail != 0) { n = append_str_limit(buf, n, limit, "…") }
+    return n
+}
+
+// rich_allowed：本行诊断是否可以使用富格式（源码片段）。
+// 回退条件见回退矩阵：显式 plain、.s.ct 行号映射、源槽缺失/空、行号非法，
+// 以及「路径槽的当前值与源码归属路径不一致」（路径被单独切换过的窗口）。
+fn rich_allowed(line int) int {
+    if (diag().plain != 0) { return 0 }
+    if (diag().line_bias != 0) { return 0 }
+    if (source_path_matches() == 0) { return 0 }
+    if (g_src_data_slot == 0 || g_src_len_slot == 0) { return 0 }
+    let src *u8 = *g_src_data_slot
+    if (src == 0) { return 0 }
+    if (*g_src_len_slot <= 0) { return 0 }
+    if (line < 1) { return 0 }
+    if (line_start_of(src, *g_src_len_slot, line) < 0) { return 0 }
+    return 1
+}
+
+// fmt_snippet：追加「前 2 行 + 出错行 + caret + 后 2 行」到 buf，返回新位置。
+// 出错行的长行按 DIAG_LINE_COLS 显示列开窗（围绕 caret），首尾补「…」；
+// 上下文行只做尾部截断。caret 行的行号栏与源码行严格对齐。
+fn fmt_snippet(buf *u8, n int, limit int, line int, col int, width int) int {
+    let src *u8 = *g_src_data_slot
+    let slen int = *g_src_len_slot
+    let start int = line_start_of(src, slen, line)
+    let end int = line_end_of(src, slen, start)
+    let total int = count_lines(src, slen)
+    // 行号栏宽：最小 5，末行号 5 位以上自动加宽
+    let shown_last int = line + 2
+    if (shown_last > total) { shown_last = total }
+    let gutter int = digits(shown_last)
+    if (gutter < 5) { gutter = 5 }
+    // caret 目标字节：列号是 1 基字节列，越界夹到行尾
+    let caret_at int = start + col - 1
+    if (caret_at < start) { caret_at = start }
+    if (caret_at > end) { caret_at = end }
+    // 长行开窗：围绕 caret 保留 DIAG_LINE_COLS 显示列
+    let win_start int = start
+    let win_end int = end
+    let head_ell int = 0
+    let tail_ell int = 0
+    if (text_width(src, start, end) > DIAG_LINE_COLS) {
+        let caret_col int = text_width(src, start, caret_at)
+        let open_from int = 0
+        if (caret_col > DIAG_OPEN_BEFORE) { open_from = caret_col - DIAG_OPEN_BEFORE }
+        if (open_from > 0) { head_ell = 1 }
+        win_start = byte_at_col(src, start, end, open_from)
+        win_end = byte_at_col(src, start, end, open_from + DIAG_LINE_COLS - 2)
+        if (win_end < end) { tail_ell = 1 }
+    }
+    let first int = line - 2
+    if (first < 1) { first = 1 }
+    let cur int = first
+    let cur_start int = line_start_of(src, slen, first)
+    for cur <= shown_last && n < limit - 16 {
+        let cur_end int = line_end_of(src, slen, cur_start)
+        n = append_pad(buf, n, limit, gutter - digits(cur))
+        n = append_int(buf, n, cur)
+        n = append_str_limit(buf, n, limit, " | ")
+        if (cur == line) {
+            n = append_line_text(buf, n, limit, src, cur_start, cur_end,
+                win_start, win_end, head_ell, tail_ell)
+            n = append_byte(buf, n, '\n')
+            if (n < limit - 16) {
+                n = append_pad(buf, n, limit, gutter)
+                n = append_str_limit(buf, n, limit, " | ")
+                let pad int = text_width(src, win_start, caret_at)
+                if (head_ell != 0) { pad += 1 }
+                n = append_pad(buf, n, limit, pad)
+                let under_to int = caret_at + width
+                if (width <= 0) { under_to = caret_at + 1 }
+                if (under_to > end) { under_to = end }
+                if (under_to > win_end) { under_to = win_end }
+                let cols int = text_width(src, caret_at, under_to)
+                // 着色只包住下划线本身：源码行与行号栏保持原色更易读
+                if (diag().color != 0) {
+                    n = append_sgr(buf, n, limit, "1;31")
+                }
+                if (cols <= 1) {
+                    n = append_byte(buf, n, '^')
+                } else {
+                    let k int = 0
+                    for k < cols && n < limit {
+                        n = append_byte(buf, n, '~')
+                        k += 1
+                    }
+                }
+                if (diag().color != 0) {
+                    n = append_sgr(buf, n, limit, "0")
+                }
+            }
+        } else {
+            let c_to int = cur_end
+            let c_tail int = 0
+            if (text_width(src, cur_start, cur_end) > DIAG_LINE_COLS) {
+                c_to = byte_at_col(src, cur_start, cur_end, DIAG_LINE_COLS - 1)
+                c_tail = 1
+            }
+            n = append_line_text(buf, n, limit, src, cur_start, cur_end,
+                cur_start, c_to, 0, c_tail)
+        }
+        n = append_byte(buf, n, '\n')
+        cur += 1
+        cur_start = cur_end + 1
+    }
+    return n
+}
+
+// append_sgr：追加一个 ANSI SGR 序列（ESC [ code m）。只在 color!=0 时用。
+// ESC 用字节 27 直接写，不依赖字符串转义支持。
+fn append_sgr(buf *u8, n int, limit int, code *char) int {
+    if (n >= limit - 8) { return n }
+    n = append_byte(buf, n, 27)
+    n = append_byte(buf, n, '[')
+    n = append_str_limit(buf, n, limit, code)
+    return append_byte(buf, n, 'm')
+}
+
+// append_kind：追加头行的「: 错误: 」/「: 警告: 」段。
+// 着色开启时只给「错误」「警告」两个字上色，冒号与空格保持无色，
+// 这样 stdout 被管道吞掉颜色时行文仍然通顺。
+fn append_kind(buf *u8, n int, limit int, is_warn int) int {
+    n = append_str_limit(buf, n, limit, ": ")
+    if (diag().color != 0) {
+        if (is_warn != 0) {
+            n = append_sgr(buf, n, limit, "1;33")
+        } else {
+            n = append_sgr(buf, n, limit, "1;31")
+        }
+    }
+    if (is_warn != 0) {
+        n = append_str_limit(buf, n, limit, "警告")
+    } else {
+        n = append_str_limit(buf, n, limit, "错误")
+    }
+    if (diag().color != 0) {
+        n = append_sgr(buf, n, limit, "0")
+    }
+    return append_str_limit(buf, n, limit, ": ")
+}
+
+// append_diag_note：追加「说明:」行（缩进 2 空格），note 为 0/空串时不写。
+fn append_diag_note(buf *u8, n int, limit int, note *char) int {
+    if (note == 0 || note[0] == 0) { return n }
+    if (n >= limit - 8) { return n }
+    n = append_str_limit(buf, n, limit, "  说明: ")
+    n = append_str_limit(buf, n, limit, note)
+    return append_byte(buf, n, '\n')
+}
+
+// fmt_diag：把一条带位置的诊断渲染到 buf（无说明行），返回写入字节数。
+// 兼容入口：测试与老调用点用它；有说明行时用 fmt_diag_note。
+fn fmt_diag(buf *u8, cap int, is_warn int, line int, col int, width int, msg *char) int {
+    return fmt_diag_note(buf, cap, is_warn, line, col, width, msg, 0)
+}
+
+// fmt_diag_note：把一条带位置的诊断渲染到 buf，返回写入字节数（含结尾换行）。
+// 结构：头行（path:line:col: 错误/警告: 文案 [+ 编译期展开轨迹]）→
+//       片段（rich_allowed 成立时）→ 可选的「说明:」行。
+// 头行拼装与 D1 之前逐字节相同（同一 2047 字节截断点），plain 回退与富格式
+// 共用同一段代码；颜色只在 diag().color!=0 时插入 SGR 序列。
+fn fmt_diag_note(buf *u8, cap int, is_warn int, line int, col int, width int,
+    msg *char, note *char) int {
+    let limit int = cap - 2
+    let head_limit int = 2047
+    if (head_limit > limit) { head_limit = limit }
+    let n int = 0
+    n = append_str_limit(buf, n, head_limit, *g_path_slot)
+    n = append_byte(buf, n, ':')
+    n = append_int(buf, n, line + diag().line_bias)
+    n = append_byte(buf, n, ':')
+    n = append_int(buf, n, col)
+    n = append_kind(buf, n, head_limit, is_warn)
+    n = append_str_limit(buf, n, head_limit, msg)
+    n = append_ct_expand_trace(buf, n, head_limit)
+    if (rich_allowed(line) == 0) {
+        // 单行回退：与 D1 之前完全一致的收尾（含超长截断的换行位置）
+        if (n < head_limit) {
+            n = append_byte(buf, n, '\n')
+        } else {
+            buf[head_limit] = '\n'
+            n = head_limit + 1
+        }
+        return append_diag_note(buf, n, limit, note)
+    }
+    n = append_byte(buf, n, '\n')
+    n = fmt_snippet(buf, n, limit, line, col, width)
+    return append_diag_note(buf, n, limit, note)
 }

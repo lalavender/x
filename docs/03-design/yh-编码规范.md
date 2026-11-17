@@ -125,8 +125,9 @@ int，如 `ir_type_ok`、`radix_ok`），`libs/` 与新写的库代码用 `bool`
 写 `0 = 成功`。
 
 **[强制] 错误配对名**：`xxx_result_ok` / `xxx_result_error`（libs 风格）、
-`xxx_result(value, status)`；编译器诊断统一走叶子模块 `errors`：`errors.fail` / `errors.err_lc`（token 侧包装为 `token.err_tok`）。
-同一模块内不要混用两套。
+`xxx_result(value, status)`；编译器诊断统一走叶子模块 `errors`：`errors.fail` /
+`errors.err_span`（带位置与跨度；`err_lc` 是 1 字节跨度的兼容层，token 侧包装为
+`token.err_tok` / `token.err_at` / `token.err_range`）。同一模块内不要混用两套。
 
 ### 2.2 变量与参数
 

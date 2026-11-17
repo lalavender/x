@@ -4,30 +4,65 @@ module errors
 // api.yh —— errors 模块公开面：编译器统一错误输出基座
 //
 // 本模块是编译器最底层（不 import 任何模块）：DiagCtx 状态、带位置的
-// err_lc/warn_lc 与不带位置的 fail/fail_path 统一收在这里，其他模块一律
-// import errors 报错。明确不做：不分配、不格式化语义错误码、不提供 Result
-// 风格错误值（编译器内部约定 int 返回码 + 就地诊断，见编码规范 §8）。
+// 诊断入口、不带位置的 fail/fail_path、ICE 与渲染开关都收在这里，其他模块
+// 一律 import errors 报错。明确不做：不分配、不格式化语义错误码、不提供
+// Result 风格错误值（编译器内部约定 int 返回码 + 就地诊断，见编码规范 §8）。
+//
+// 诊断形态（契约见 docs/03-design/yh-编译诊断规范.md）：
+//   * 带位置：`path:line:col: 错误: 文案` + 上下各 2 行源码 + caret + 可选说明行；
+//   * 只有路径：`path: 错误: 文案`（项目清单/导入解析等无行列的场景）；
+//   * 程序级：`yh: 文案`（IO/分配失败）与 `yh: 内部错误: …（版本 …，请提交 issue）`。
+// 源码经 support 登记的源槽读取（跟随 read_source/快照切换，不复制），渲染全在
+// render.yh；plain（YH_DIAG_PLAIN=1）回退单行格式，color 只在 TTY 打开。
 // ============================================================================
+
+// DIAG_LINE_COLS：单条源码行最多显示的终端列数（超长开窗，首尾补「…」）。
+const DIAG_LINE_COLS int = 160
+
+// DIAG_OPEN_BEFORE：长行开窗时 caret 左侧保留的列数。
+const DIAG_OPEN_BEFORE int = 60
+
+// SRC_PATH_MAX：源码归属路径快照容量（bytes；超长路径退回单行头）。
+const SRC_PATH_MAX int = 512
 
 // DiagCtx：诊断的进程级开关与计数。
 // spec>0 表示推测解析，诊断静默且不计数；errors 是已报告错误数；
-// line_bias 是 .s.ct 来源映射的行号偏移；ct_* 是编译期 for 展开轨迹。
+// line_bias 是 .s.ct 来源映射的行号偏移；ct_* 是编译期 for 展开轨迹；
+// plain!=0 关闭源码片段；color!=0 给头行与下划线着色（仅 TTY）。
 pub struct DiagCtx {
     spec int // 推测解析深度（>0 静默）
     errors int // 已报告错误数
     line_bias int // 诊断行号映射偏移
     ct_depth int // 当前编译期 for 展开深度
     ct_values [32]int // 外层到内层的展开值
+    plain int // 1 = 只输出单行头（不渲染源码片段）
+    color int // 1 = 允许 ANSI 颜色（由驱动按 TTY/环境变量决定）
 }
 
-// g_diag：进程内唯一诊断状态（零初始化即全部默认值）。
+// g_diag：进程内唯一诊断状态（零初始化即全部默认值：富格式、无颜色）。
 let g_diag DiagCtx
 
 // g_path_slot：当前源文件路径字段的地址（槽位，借用不拥有）。
-// 登记一次后，err_lc/warn_lc 在调用时刻读 *g_path_slot：无论持有方经
+// 登记一次后，带位置的诊断在调用时刻读 *g_path_slot：无论持有方经
 // set_source_path 还是直写路径字段（comptime 展开换源等），都自动可见，
 // 避免快照在字段改写/缓冲搬迁后过期或悬空。
 let g_path_slot **char
+
+// g_src_data_slot / g_src_len_slot：当前源码字节与长度的字段地址（槽位）。
+// 与 g_path_slot 同构：read_source 会整体换指针、模块 worker 的
+// mb_restore_front_file 会切文件快照，读槽位自动跟随，不会悬空。
+// 未登记（如内置/生成源码）时为 0，诊断退化为单行头。
+let g_src_data_slot **u8
+
+let g_src_len_slot *int
+
+// g_src_path / g_src_path_n：当前源码所属路径的副本与长度（bind_source_path 写）。
+let g_src_path [512]u8
+
+let g_src_path_n int
+
+// g_version：编译器版本文本（ICE 行用；0 = 未知）。由驱动入口登记一次。
+let g_version *char
 
 // diag：诊断上下文窄口；返回进程单例指针。
 pub fn diag() *DiagCtx {
@@ -41,6 +76,60 @@ pub fn set_path_slot(slot **char) void {
     g_path_slot = slot
 }
 
+// set_source_slot：登记当前源码字节与长度的字段地址（&src.data、&src.length）。
+// 与 set_path_slot 成对调用；槽位借用不拥有，源码换指针后自动跟随。
+pub fn set_source_slot(data **u8, len *int) void {
+    g_src_data_slot = data
+    g_src_len_slot = len
+}
+
+// bind_source_path：登记「当前源码属于哪个路径」，最多保存 511 字节。
+// 只在路径与源码**同时**切换的地方调用（read_source、模块 worker 的文件
+// 快照切换）。渲染片段前用路径槽的当前值与它逐字节比较：一旦路径被单独
+// 切换（CT 来源映射、只切 path 不留 source 的旧调用点），片段就退回单行
+// 头——宁可少显示，也不把那一个文件的源码挂在另一个文件的名字下面。
+pub fn bind_source_path(path *char) void {
+    let n int = 0
+    for n < SRC_PATH_MAX - 1 && path != 0 && path[n] != 0 {
+        g_src_path[n] = path[n].to_type(u8)
+        n += 1
+    }
+    g_src_path[n] = 0
+    g_src_path_n = n
+}
+
+// source_path_matches：路径槽的当前值是否与 bind_source_path 登记的一致。
+fn source_path_matches() int {
+    if (g_src_path_n <= 0 || g_path_slot == 0) { return 0 }
+    let path *char = *g_path_slot
+    if (path == 0) { return 0 }
+    let i int = 0
+    for i < g_src_path_n {
+        if (path[i] == 0) { return 0 }
+        if (path[i].to_type(u8) != g_src_path[i]) { return 0 }
+        i += 1
+    }
+    return (path[i] == 0).to_type(int)
+}
+
+// set_plain：开关源码片段渲染（1 = 只输出单行头）。
+// 由驱动入口按 YH_DIAG_PLAIN 环境变量设置一次，也可被 CT 来源映射
+// （path 与源码不同源）临时打开；0 恢复默认富格式。
+pub fn set_plain(on int) void {
+    g_diag.plain = on
+}
+
+// set_color：开关 ANSI 颜色（1 = 开）。判定在驱动入口完成（YH_DIAG_COLOR
+// 覆盖 > NO_COLOR > isatty(2)），errors 只负责按位着色。
+pub fn set_color(on int) void {
+    g_diag.color = on
+}
+
+// set_version：登记版本文本，供 ICE 行使用（不拷贝，借用调用方常量的存储）。
+pub fn set_version(text *char) void {
+    g_version = text
+}
+
 // fail：报告一条不带位置的编译器级错误（打开失败、内存不足等），返回 -1。
 // 写 stderr；不分配、不检查 msg 非空（调用方保证是静态/池内 NUL 串）。
 pub fn fail(msg *char) int {
@@ -51,6 +140,33 @@ pub fn fail(msg *char) int {
     n = append_byte_cap(buf, 512, n, '\n')
     write_all(2, buf, n)
     return -1
+}
+
+// ice：报告编译器内部错误（内部不变量被破坏、不支持的中间形态等），返回 -1。
+// 形式固定为 `yh: 内部错误: <文案>（版本 <编译器版本>，请提交 issue）`，与用户
+// 源码错误明确区分；版本未登记时写「未知」。推测解析期间静默。
+pub fn ice(msg *char) int {
+    if (diag().spec > 0) { return -1 }
+    let buf [768]u8
+    let n int = fmt_ice(buf, 768, msg)
+    write_all(2, buf, n)
+    return -1
+}
+
+// fmt_ice：ICE 行渲染（纯函数，供 ice 与内建测试共用），返回写入字节数。
+fn fmt_ice(buf *u8, cap int, msg *char) int {
+    let n int = 0
+    n = append_str_cap(buf, cap, n, "yh: 内部错误: ")
+    n = append_str_cap(buf, cap, n, msg)
+    n = append_str_cap(buf, cap, n, "（版本 ")
+    if (g_version != 0) {
+        n = append_str_cap(buf, cap, n, g_version)
+    } else {
+        n = append_str_cap(buf, cap, n, "未知")
+    }
+    n = append_str_cap(buf, cap, n, "，请提交 issue）")
+    n = append_byte_cap(buf, cap, n, '\n')
+    return n
 }
 
 // note：程序级说明输出（门禁统计等调试信息）：写 stderr，不加 "错误" 语义、
@@ -78,48 +194,87 @@ pub fn fail_path(msg *char, path *char) int {
     return -1
 }
 
-// err_lc：报告一条带位置的错误（1 基行列），计一次错误并返回 -1。
-// 推测解析期间静默：不打印、不计数，仅以返回值示意失败。
-// 路径取调用时刻的 *g_path_slot（须先经 set_path_slot 登记）；
-// 行号叠加 diag().line_bias。
-pub fn err_lc(line int, col int, msg *char) int {
-    if (diag().spec > 0) {
-        return -1
-    }
+// err_path_pos：报告一条「按路径定位、但没有可用源码」的错误，返回 -1。
+// 三种形态按可用信息退化（路径由调用方给出，不读路径槽）：
+//   col > 0 → `path:line:col: 错误: 文案`
+//   line > 0 → `path:line: 错误: 文案`（如 project.toml 只按行报告）
+//   其他     → `path: 错误: 文案`
+// 为什么不渲染片段：这些诊断的路径未必是当前源码槽里的文件（导入方/接口文件/
+// 清单），拿错源码画片段比不画更有害。计一次错误；推测解析期间静默。
+pub fn err_path_pos(path *char, line int, col int, msg *char) int {
+    if (diag().spec > 0) { return -1 }
     diag().errors += 1
-    let buf [2048]u8
-    let limit int = 2047
+    let buf [1024]u8
+    let limit int = 1022
     let n int = 0
-    n = append_str_limit(buf, n, limit, *g_path_slot)
-    n = append_byte(buf, n, ':')
-    n = append_int(buf, n, line + diag().line_bias)
-    n = append_byte(buf, n, ':')
-    n = append_int(buf, n, col)
-    n = append_str_limit(buf, n, limit, ": 错误: ")
+    n = append_str_limit(buf, n, limit, path)
+    if (line > 0) {
+        n = append_byte(buf, n, ':')
+        n = append_int(buf, n, line)
+        if (col > 0) {
+            n = append_byte(buf, n, ':')
+            n = append_int(buf, n, col)
+        }
+    }
+    n = append_kind(buf, n, limit, 0)
     n = append_str_limit(buf, n, limit, msg)
-    n = append_ct_expand_trace(buf, n, limit)
-    if (n < limit) { n = append_byte(buf, n, '\n') }
-    else { buf[limit] = '\n'; n = limit + 1 }
+    n = append_byte(buf, n, '\n')
     write_all(2, buf, n)
     return -1
 }
 
-// warn_lc：报告一条带位置的警告，不增加错误数；推测解析期间保持静默。
-// 返回 0 成功、-1 表示写 stderr 失败；路径取调用时刻的 *g_path_slot。
+// err_path：只有路径、没有行列的错误（项目清单根等），语义同 err_path_pos。
+pub fn err_path(path *char, msg *char) int {
+    return err_path_pos(path, 0, 0, msg)
+}
+
+// err_span：报告一条带位置与跨度的错误，计一次错误并返回 -1。
+// line/col 是 1 基行列（col 为字节列），width 是同一行内的源字节数
+// （<=0 视为 1）；片段下划线按 width 覆盖的显示宽度画出。
+// 推测解析期间静默：不打印、不计数，仅以返回值示意失败。
+pub fn err_span(line int, col int, width int, msg *char) int {
+    return err_emit(0, line, col, width, msg, 0)
+}
+
+// err_span_note：同 err_span，另带一条修复建议（渲染为「说明:」行，放在
+// 片段之后；无片段时紧跟头行）。note 为 0 时等价于 err_span。
+pub fn err_span_note(line int, col int, width int, msg *char, note *char) int {
+    return err_emit(0, line, col, width, msg, note)
+}
+
+// warn_span：报告一条带位置与跨度的警告，不增加错误数。
+// 推测解析期间静默并返回 0；返回 0 成功、-1 表示写 stderr 失败。
+pub fn warn_span(line int, col int, width int, msg *char) int {
+    return err_emit(1, line, col, width, msg, 0)
+}
+
+// warn_span_note：同 warn_span，另带一条说明行。
+pub fn warn_span_note(line int, col int, width int, msg *char, note *char) int {
+    return err_emit(1, line, col, width, msg, note)
+}
+
+// err_emit：错误/警告的统一出口：渲染整块并一次写完。
+// is_warn=0 计一次错误并返回 -1；is_warn=1 不计数，返回写入结果。
+fn err_emit(is_warn int, line int, col int, width int, msg *char, note *char) int {
+    if (diag().spec > 0) {
+        if (is_warn != 0) { return 0 }
+        return -1
+    }
+    if (is_warn == 0) { diag().errors += 1 }
+    let buf [4096]u8
+    let n int = fmt_diag_note(buf, 4096, is_warn, line, col, width, msg, note)
+    let status int = write_all(2, buf, n)
+    if (is_warn != 0) { return status }
+    return -1
+}
+
+// err_lc：报告一条带位置的错误（1 基行列，跨度按 1 字节）。
+// 兼容层：老调用点不改也立即获得源码片段，语义同 err_span。
+pub fn err_lc(line int, col int, msg *char) int {
+    return err_span(line, col, 1, msg)
+}
+
+// warn_lc：报告一条带位置的警告（跨度按 1 字节）；语义同 warn_span。
 pub fn warn_lc(line int, col int, msg *char) int {
-    if (diag().spec > 0) { return 0 }
-    let buf [2048]u8
-    let limit int = 2047
-    let n int = 0
-    n = append_str_limit(buf, n, limit, *g_path_slot)
-    n = append_byte(buf, n, ':')
-    n = append_int(buf, n, line + diag().line_bias)
-    n = append_byte(buf, n, ':')
-    n = append_int(buf, n, col)
-    n = append_str_limit(buf, n, limit, ": 警告: ")
-    n = append_str_limit(buf, n, limit, msg)
-    n = append_ct_expand_trace(buf, n, limit)
-    if (n < limit) { n = append_byte(buf, n, '\n') }
-    else { buf[limit] = '\n'; n = limit + 1 }
-    return write_all(2, &buf[0], n)
+    return warn_span(line, col, 1, msg)
 }

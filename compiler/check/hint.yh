@@ -1,0 +1,296 @@
+module check
+
+import support
+import table
+import types
+
+// ============================================================================
+// hint.yh —— 诊断「说明:」行的措辞与建议（D4）
+//
+// 只做文本拼装：类型显示、有界编辑距离建议、值内核建议的组合。所有函数写
+// 调用方栈缓冲（不分配），返回写入字节数；缓冲不够时截断并保持 NUL 结尾。
+// 说明行本身由 errors 渲染（`  说明: …`），这里只负责内容。
+// ============================================================================
+
+// HINT_NAME_MAX：参与建议匹配的名字长度上限（更长的一律不建议）。
+const HINT_NAME_MAX int = 32
+
+// HINT_DISTANCE_MAX：建议的编辑距离上限。
+const HINT_DISTANCE_MAX int = 2
+
+// hint_app：向 buf 追加 C 串，返回新长度（截断到 cap-1）。
+fn hint_app(buf *u8, cap int, n int, s *char) int {
+    let i int = 0
+    for s[i] != 0 && n < cap - 1 {
+        buf[n] = s[i].to_type(u8)
+        n += 1
+        i += 1
+    }
+    buf[n] = 0
+    return n
+}
+
+// hint_app_byte：向 buf 追加一个字节，返回新长度（截断到 cap-1）。
+fn hint_app_byte(buf *u8, cap int, n int, b u8) int {
+    if (n >= cap - 1) { return n }
+    buf[n] = b
+    n += 1
+    buf[n] = 0
+    return n
+}
+
+// hint_app_int：向 buf 追加十进制整数，返回新长度。
+fn hint_app_int(buf *u8, cap int, n int, v int) int {
+    if (v < 0) {
+        n = hint_app_byte(buf, cap, n, '-')
+        v = -v
+    }
+    let tmp [12]u8
+    let k int = 0
+    if (v == 0) {
+        tmp[0] = '0'
+        k = 1
+    }
+    for v > 0 {
+        tmp[k] = ((v % 10) + 48).to_type(u8)
+        k += 1
+        v = v / 10
+    }
+    for k > 0 {
+        k -= 1
+        n = hint_app_byte(buf, cap, n, tmp[k])
+    }
+    return n
+}
+
+// ty_display：把类型编号渲染成源码风格的类型名（指针 `*T`、数组 `[N]T`、
+// 切片 `[]T`、具名聚合用类型名），返回写入字节数。
+pub fn ty_display(tid int, buf *u8, cap int) int {
+    buf[0] = 0
+    return ty_display_into(tid, buf, cap, 0, 0)
+}
+
+// ty_display_into：递归实现；depth 用来防御异常深的自引用类型。
+fn ty_display_into(tid int, buf *u8, cap int, n int, depth int) int {
+    if (depth > 8) { return hint_app(buf, cap, n, "…") }
+    if (tid < 0 || tid >= table.ms().type_n) { return hint_app(buf, cap, n, "<无效类型>") }
+    let kind int = table.ms().types[tid].kind
+    if (kind == types.TY_VOID) { return hint_app(buf, cap, n, "void") }
+    if (kind == types.TY_BOOL) { return hint_app(buf, cap, n, "bool") }
+    if (kind == types.TY_CHAR) { return hint_app(buf, cap, n, "char") }
+    if (kind == types.TY_I8) { return hint_app(buf, cap, n, "i8") }
+    if (kind == types.TY_I16) { return hint_app(buf, cap, n, "i16") }
+    if (kind == types.TY_I32) { return hint_app(buf, cap, n, "int") }
+    if (kind == types.TY_I64) { return hint_app(buf, cap, n, "i64") }
+    if (kind == types.TY_U8) { return hint_app(buf, cap, n, "u8") }
+    if (kind == types.TY_U16) { return hint_app(buf, cap, n, "u16") }
+    if (kind == types.TY_U32) { return hint_app(buf, cap, n, "u32") }
+    if (kind == types.TY_U64) { return hint_app(buf, cap, n, "u64") }
+    if (kind == types.TY_F32) { return hint_app(buf, cap, n, "f32") }
+    if (kind == types.TY_F64) { return hint_app(buf, cap, n, "f64") }
+    if (kind == types.TY_PTR) {
+        n = hint_app_byte(buf, cap, n, '*')
+        return ty_display_into(table.ms().types[tid].elem, buf, cap, n, depth + 1)
+    }
+    if (kind == types.TY_ARRAY) {
+        n = hint_app_byte(buf, cap, n, '[')
+        n = hint_app_int(buf, cap, n, table.ms().types[tid].len)
+        n = hint_app_byte(buf, cap, n, ']')
+        return ty_display_into(table.ms().types[tid].elem, buf, cap, n, depth + 1)
+    }
+    if (kind == types.TY_SLICE) {
+        n = hint_app(buf, cap, n, "[]")
+        return ty_display_into(table.ms().types[tid].elem, buf, cap, n, depth + 1)
+    }
+    if (kind == types.TY_FN) { return hint_app(buf, cap, n, "fn") }
+    if (kind == types.TY_STRUCT || kind == types.TY_UNION || kind == types.TY_ENUM) {
+        let name_off int = ty_name_of(tid)
+        if (name_off >= 0) {
+            return hint_app_np(buf, cap, n, name_off, ty_name_len_of(tid))
+        }
+        if (kind == types.TY_STRUCT) { return hint_app(buf, cap, n, "struct") }
+        if (kind == types.TY_UNION) { return hint_app(buf, cap, n, "union") }
+        return hint_app(buf, cap, n, "enum")
+    }
+    return hint_app(buf, cap, n, "<type>")
+}
+
+// hint_app_np：从名字池按 (off,len) 追加字节。
+fn hint_app_np(buf *u8, cap int, n int, off int, len int) int {
+    let i int = 0
+    for i < len && n < cap - 1 {
+        buf[n] = support.pool_ctx().data[off + i]
+        n += 1
+        i += 1
+    }
+    buf[n] = 0
+    return n
+}
+
+// ty_name_of：在类型名字空间里反查类型编号对应的名字池偏移；没有返回 -1。
+fn ty_name_of(tid int) int {
+    let i int = 0
+    for i < table.ms().name_n {
+        if (table.ms().names[i].type_id == tid) {
+            return table.ms().names[i].name_off
+        }
+        i += 1
+    }
+    return -1
+}
+
+// ty_name_len_of：与 ty_name_of 配合取名字长度。
+fn ty_name_len_of(tid int) int {
+    let i int = 0
+    for i < table.ms().name_n {
+        if (table.ms().names[i].type_id == tid) {
+            return table.ms().names[i].name_len
+        }
+        i += 1
+    }
+    return 0
+}
+
+// hint_distance：有界编辑距离；超过 cap 时提前返回 cap（只用于建议，不求精确）。
+fn hint_distance(a *u8, an int, b *u8, bn int, cap int) int {
+    let diff int = an - bn
+    if (diff < 0) { diff = -diff }
+    if (diff > cap) { return cap }
+    if (an > HINT_NAME_MAX || bn > HINT_NAME_MAX) { return cap }
+    let prev [40]int
+    let cur [40]int
+    let j int = 0
+    for j <= bn {
+        prev[j] = j
+        j += 1
+    }
+    let i int = 1
+    for i <= an {
+        cur[0] = i
+        j = 1
+        for j <= bn {
+            let cost int = 1
+            if (a[i - 1] == b[j - 1]) { cost = 0 }
+            let del int = prev[j] + 1
+            let ins int = cur[j - 1] + 1
+            let sub int = prev[j - 1] + cost
+            let best int = del
+            if (ins < best) { best = ins }
+            if (sub < best) { best = sub }
+            cur[j] = best
+            j += 1
+        }
+        j = 0
+        for j <= bn {
+            prev[j] = cur[j]
+            j += 1
+        }
+        i += 1
+    }
+    let d int = prev[bn]
+    if (d > cap) { return cap }
+    return d
+}
+
+// hint_suggest_ident：在符号表里找与目标名字编辑距离 ≤ HINT_DISTANCE_MAX 的
+// 候选，命中时把「是否想用 `名称`？」写入 buf；返回长度（0 = 无建议）。
+pub fn hint_suggest_ident(start int, n int, buf *u8, cap int) int {
+    buf[0] = 0
+    // 太短的名字（1–2 字节）区分度不足，任何相邻名字的距离都是 1，不猜。
+    if (n < 3 || n > HINT_NAME_MAX) { return 0 }
+    let best int = -1
+    let best_d int = HINT_DISTANCE_MAX + 1
+    let i int = 0
+    for i < table.ms().sym_n {
+        let len int = table.ms().syms[i].name_len
+        if (len > 0 && len <= HINT_NAME_MAX && table.ms().syms[i].name_off >= 0) {
+            let d int = hint_distance(support.src_ctx().data + start, n,
+                support.pool_ctx().data + table.ms().syms[i].name_off, len,
+                HINT_DISTANCE_MAX)
+            if (d < best_d) {
+                best_d = d
+                best = i
+            }
+        }
+        i += 1
+    }
+    if (best < 0 || best_d > HINT_DISTANCE_MAX) { return 0 }
+    return hint_suggest_text(buf, cap,
+        table.ms().syms[best].name_off, table.ms().syms[best].name_len)
+}
+
+// hint_suggest_type：在类型名字空间里找候选，命中时写「是否想用 `类型名`？」。
+pub fn hint_suggest_type(name_off int, name_len int, buf *u8, cap int) int {
+    buf[0] = 0
+    if (name_len < 3 || name_len > HINT_NAME_MAX) { return 0 }
+    let best int = -1
+    let best_d int = HINT_DISTANCE_MAX + 1
+    let i int = 0
+    for i < table.ms().name_n {
+        let len int = table.ms().names[i].name_len
+        if (len > 0 && len <= HINT_NAME_MAX) {
+            let d int = hint_distance(support.pool_ctx().data + name_off, name_len,
+                support.pool_ctx().data + table.ms().names[i].name_off, len,
+                HINT_DISTANCE_MAX)
+            if (d < best_d) {
+                best_d = d
+                best = i
+            }
+        }
+        i += 1
+    }
+    if (best < 0 || best_d > HINT_DISTANCE_MAX) { return 0 }
+    return hint_suggest_text(buf, cap,
+        table.ms().names[best].name_off, table.ms().names[best].name_len)
+}
+
+// hint_suggest_text：把「是否想用 `名字`？」写进 buf，返回长度。
+fn hint_suggest_text(buf *u8, cap int, off int, len int) int {
+    let n int = 0
+    n = hint_app(buf, cap, n, "是否想用 `")
+    n = hint_app_np(buf, cap, n, off, len)
+    n = hint_app(buf, cap, n, "`？")
+    return n
+}
+
+// sem_assign_note：值内核赋值/转换类错误码的说明行内容：
+// 「期望 `X`，得到 `Y`（+ 建议）」。返回写入长度（0 = 无说明）。
+pub fn sem_assign_note(dst int, src int, code int, buf *u8, cap int) int {
+    buf[0] = 0
+    let n int = 0
+    if (vk_is_assign_code(code) != 0) {
+        n = hint_app(buf, cap, n, "期望 `")
+        n = ty_display_into(dst, buf, cap, n, 0)
+        n = hint_app(buf, cap, n, "`，得到 `")
+        n = ty_display_into(src, buf, cap, n, 0)
+        n = hint_app(buf, cap, n, "`")
+        let help *char = table.vk_help(code)
+        if (help != 0) {
+            n = hint_app(buf, cap, n, "；")
+            n = hint_app(buf, cap, n, help)
+        }
+        return n
+    }
+    let help2 *char = table.vk_help(code)
+    if (help2 != 0) { return hint_app(buf, cap, n, help2) }
+    return 0
+}
+
+// vk_is_assign_code：该错误码是否属于「赋值/转换不兼容」一族（可以用
+// 「期望 X，得到 Y」描述）。
+fn vk_is_assign_code(code int) int {
+    if (code == table.VK_AGG_MISMATCH) { return 1 }
+    if (code == table.VK_PTR_MISMATCH) { return 1 }
+    if (code == table.VK_NON_PTR_TO_PTR) { return 1 }
+    if (code == table.VK_PTR_TO_NON_PTR) { return 1 }
+    if (code == table.VK_FN_SIG_MISMATCH) { return 1 }
+    if (code == table.VK_FN_VALUE_MISMATCH) { return 1 }
+    if (code == table.VK_FP_NEEDS_CAST) { return 1 }
+    if (code == table.VK_INT_TO_BOOL) { return 1 }
+    if (code == table.VK_BOOL_TO_TYPE) { return 1 }
+    if (code == table.VK_TYPE_MISMATCH) { return 1 }
+    if (code == table.VK_SAME_WIDTH_NEEDS_CAST) { return 1 }
+    if (code == table.VK_IMPLICIT_NARROW) { return 1 }
+    if (code == table.VK_LIT_OUT_OF_RANGE) { return 1 }
+    return 0
+}

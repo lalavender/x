@@ -1312,9 +1312,8 @@ pub fn convert_returns(view *ast.AstView) int {
                         let code int = table.vk_can_assign(ret_tid, value.type_id,
                             value.is_lit, value.const_bits, value.lit_big)
                         if (code != 0) {
-                            return diag_file_at(value.file_id,
-                                tok_line_at(value.file_id, value.after),
-                                tok_col_at(value.file_id, value.after), code)
+                            return file_span_code(value.file_id, value.first,
+                                value.after, code)
                         }
                     }
                 }
@@ -1328,7 +1327,8 @@ pub fn convert_returns(view *ast.AstView) int {
 
 // convert_assigns：校验单目标赋值 `lhs op= rhs` 的 rhs 能否赋给 lhs 类型。
 // AST 的 ASSIGN 语句按顺序挂两条表达式边（先左值、后右值），因此直接取链上
-// 第 1、2 条；位置同样用 rhs 的 `after`（= 解析结束游标）复现 parse 期诊断。
+// 第 1、2 条；位置取 rhs 的 `first`（表达式起点）到 `after`（解析结束游标）
+// 的 token 区间，让 caret 落在出错表达式上而不是行尾。
 pub fn convert_assigns(view *ast.AstView) int {
     let s int = 0
     for s < view.stmt_count {
@@ -1346,9 +1346,8 @@ pub fn convert_assigns(view *ast.AstView) int {
                         let code int = table.vk_can_assign(lhs.type_id, rhs.type_id,
                             rhs.is_lit, rhs.const_bits, rhs.lit_big)
                         if (code != 0) {
-                            return diag_file_at(rhs.file_id,
-                                tok_line_at(rhs.file_id, rhs.after),
-                                tok_col_at(rhs.file_id, rhs.after), code)
+                            return file_span_code(rhs.file_id, rhs.first,
+                                rhs.after, code)
                         }
                     }
                 }
@@ -1811,10 +1810,11 @@ pub fn iface_head_prefix_len_at(src *u8, n int) int {
 }
 
 // iface_head_bad：头行不兼容的统一诊断（计一次错误并返回 -1）。
+// 这是接口发/收两端协议不一致，属编译器内部一致性问题，走 ICE 形式。
 pub fn iface_head_bad(path *char) int {
     let buf [360]u8
     let n int = 0
-    n = support.append_str_cap(buf, 360, n, "yh: 接口不兼容（头行须为 // yh-iface v")
+    n = support.append_str_cap(buf, 360, n, "接口不兼容（头行须为 // yh-iface v")
     n = support.append_int_cap(buf, 360, n, IFACE_VERSION_MIN)
     n = support.append_str_cap(buf, 360, n, "..v")
     n = support.append_int_cap(buf, 360, n, IFACE_VERSION_MAX)
@@ -1822,10 +1822,7 @@ pub fn iface_head_bad(path *char) int {
     n = support.append_str_cap(buf, 360, n, support.target_arch_token())
     n = support.append_str_cap(buf, 360, n, " suffix=）: ")
     n = support.append_str_cap(buf, 360, n, path)
-    n = support.append_byte_cap(buf, 360, n, '\n')
-    support.write_all(2, buf, n)
-    errors.diag().errors += 1
-    return -1
+    return errors.ice(support.arr_cstr(buf))
 }
 
 // iface_header_suffix：校验头行并提取 suffix 到出参（入名字池）。
@@ -1841,14 +1838,11 @@ pub fn iface_header_suffix(path *char, off *int, olen *int) int {
         e += 1
     }
     if (e == s) {
-        errors.diag().errors += 1
         let out2 [340]u8
         let on2 int = 0
-        on2 = support.append_str(out2, on2, "yh: 接口头缺少 suffix: ")
+        on2 = support.append_str(out2, on2, "接口头缺少 suffix: ")
         on2 = support.append_str(out2, on2, path)
-        on2 = support.append_byte(out2, on2, '\n')
-        support.write_all(2, out2, on2)
-        return -1
+        return errors.ice(support.arr_cstr(out2))
     }
     let o int = support.tml_intern_str(support.src_ctx().data, s, e - s)
     if (o < 0) {
@@ -2515,15 +2509,18 @@ pub fn sem_fn_end() int {
 // sem_add_field：为 struct/union 登记一个字段（pass 1）。
 // pub struct 一等化后字段一律公开，is_pub 恒 1（.s.i 接口按此发射）。
 pub fn sem_add_field(stid int, start int, n int, ftid int) int {
+    // 字段级诊断一律落在字段名 token 上：游标此时已越过该字段声明（常在 `}` 或行尾），
+    // 直接 err_tok 会把 caret 指到相邻构造。
+    let name_tok int = token.index_at_offset(start)
     if (table.ty_has_opaque_value(ftid) != 0) {
-        return token.err_tok("不透明 C 类型只能通过指针使用")
+        return token.err_at(name_tok, "不透明 C 类型只能通过指针使用")
     }
     let fk int = table.ms().types[ftid].kind
     if ((table.ty_name_attrs(stid) & token.ATTR_EXTERN) != 0 && ty_c_layout(ftid) == 0) {
-        return token.err_tok("extern struct/union 字段不是 C 兼容布局类型")
+        return token.err_at(name_tok, "extern struct/union 字段不是 C 兼容布局类型")
     }
     if ((fk == types.TY_STRUCT || fk == types.TY_UNION) && table.ms().types[ftid].size == 0) {
-        return token.err_tok("字段使用了不完整的类型")
+        return token.err_at(name_tok, "字段使用了不完整的类型")
     }
     if (table.ms().field_n == table.ms().field_cap) {
         let ncap int = table.ms().field_cap * 2
@@ -2925,10 +2922,10 @@ pub fn sem_member(base *support.Res, name_start int, name_len int) int {
             if (support.cfg().module_mode != 0) {
                 return token.err_tok("模块模式下编译期正文里直接引用枚举成员暂不支持；请在同模块顶层用 `pub const X int = 枚举名.成员;` 中转后再引用")
             }
-            return token.err_tok("枚举没有这个成员")
+            return token.err_at(token.index_at_offset(name_start), "枚举没有这个成员")
         }
         if (table.ms().syms[msym].const_ready == 0) {
-            return token.err_tok("编译期常量尚未就绪")
+            return token.err_at(token.index_at_offset(name_start), "编译期常量尚未就绪")
         }
         let value i64 = table.ms().syms[msym].cval
         support.sem_res_const(base, base.type_id, value)
@@ -2975,7 +2972,7 @@ pub fn sem_member(base *support.Res, name_start int, name_len int) int {
         i += 1
     }
     if (found < 0) {
-        return token.err_tok("结构体没有该字段")
+        return token.err_at(token.index_at_offset(name_start), "结构体没有该字段")
     }
     // pub struct 一等化：字段一律公开，跨模块访问不再有字段级限制
     // （类型的跨模块可见性仍由类型自身的 pub 决定）。
@@ -3012,12 +3009,17 @@ pub fn sem_member(base *support.Res, name_start int, name_len int) int {
     return 0
 }
 
-pub fn sem_sizeof(tid int, r *support.Res) int {
+// sem_sizeof_at：`sizeof(T)` 语义（只依赖类型表）。
+// first_tok >= 0 时诊断落在该 token（`sizeof` 关键字）上；< 0 回退游标。
+pub fn sem_sizeof_at(first_tok int, tid int, r *support.Res) int {
     sem_res_reset(r, types.TY_I32)
     if (support.session().compile == 0) {
         return 0
     }
     if (table.ty_is_opaque(tid) != 0) {
+        if (first_tok >= 0) {
+            return token.err_at(first_tok, "不透明 C 类型不能用于 sizeof")
+        }
         return token.err_tok("不透明 C 类型不能用于 sizeof")
     }
     if (table.ms().types[tid].size < 0) {
@@ -3026,12 +3028,20 @@ pub fn sem_sizeof(tid int, r *support.Res) int {
             r.layout_type_id = tid
             return 0
         }
+        if (first_tok >= 0) {
+            return token.err_at(first_tok, "sizeof 的类型布局尚未就绪")
+        }
         return token.err_tok("sizeof 的类型布局尚未就绪")
     }
     r.is_const = 1
     r.is_lit = 0
     r.ival = table.ms().types[tid].size.to_type(i64)
     return 0
+}
+
+// sem_sizeof：不指定构造 token 的兼容入口（诊断落当前游标）。
+pub fn sem_sizeof(tid int, r *support.Res) int {
+    return sem_sizeof_at(-1, tid, r)
 }
 
 pub fn sem_cast(operand *support.Res, tid int) int {
@@ -3498,12 +3508,19 @@ pub fn sem_ident(start int, n int, r *support.Res) int {
     }
     let idx int = table.sym_lookup(start, n)
     if (idx < 0) {
-        return token.err_tok("引用了未声明的名字")
+        // 位置用名字的源区间回推 token；另有「是否想用」建议（不猜时为空）
+        let note [192]u8
+        let nn int = hint_suggest_ident(start, n, note, 192)
+        let note_ptr *char = 0.to_type(*char)
+        if (nn > 0) { note_ptr = support.arr_cstr(note) }
+        return token.err_at_note(token.index_at_offset(start), "引用了未声明的名字", note_ptr)
     }
-    return sem_ident_val(idx, r)
+    return sem_ident_val(idx, r, token.index_at_offset(start))
 }
 
-pub fn sem_ident_val(idx int, r *support.Res) int {
+// ident_tok：该名字的 token 下标（-1 = 未知）；编译期常量相关诊断落在它上面，
+// 避免游标已越过名字时报到行尾或右括号。
+pub fn sem_ident_val(idx int, r *support.Res, ident_tok int) int {
     r.ast_id = -1
     r.sym = idx
     r.type_id = table.ms().syms[idx].type_id
@@ -3558,6 +3575,9 @@ pub fn sem_ident_val(idx int, r *support.Res) int {
     }
     if (kind == table.SYM_FN) {
         if (support.fc().c_fold != 0) {
+            if (ident_tok >= 0) {
+                return token.err_at(ident_tok, "函数引用不是编译期常量")
+            }
             return token.err_tok("函数引用不是编译期常量")
         }
         support.fc().c_res_is_addr = 1
@@ -3565,6 +3585,9 @@ pub fn sem_ident_val(idx int, r *support.Res) int {
     }
     // 变量
     if (support.fc().c_fold != 0) {
+        if (ident_tok >= 0) {
+            return token.err_at(ident_tok, "变量不是编译期常量")
+        }
         return token.err_tok("变量不是编译期常量")
     }
     let tid int = table.ms().syms[idx].type_id
@@ -3686,6 +3709,10 @@ pub fn ty_register_builtins() int {
 // 与方案 §4 一致：保留 512 的聚合类型登记上限，超限必须干净报错，
 // 不能越界（对应 tests/yh-run/fail/12-wraps-too-many.yh）。
 pub fn ty_push_agg(kind int, size int, align int, elem int, n int, sub int) int {
+    // 上限到顶时在 check 层给带位置的诊断：`yh:` 无位置输出无法定位到源码
+    if (table.ms().aggtype_n >= table.AGGTYPE_LIMIT) {
+        return token.err_tok("聚合类型登记过多（上限 512）")
+    }
     return table.model_type_push_agg(kind, size, align, elem, n, sub)
 }
 
@@ -4062,7 +4089,20 @@ pub fn prelude_add(name *char, ret int, np int, vararg int) int {
 // sem_can_assign：检查 src 能否赋给 dst（隐式转换规则见 table.vk_can_assign）。
 // 通过返回 0；拒绝返回 -1 并已报错。
 pub fn sem_can_assign(dst int, src int, is_lit int, ival i64, big int) int {
-    return sem_report(table.vk_can_assign(dst, src, is_lit, ival, big))
+    let code int = table.vk_can_assign(dst, src, is_lit, ival, big)
+    if (code == 0) { return 0 }
+    // 说明行拼「期望 `X`，得到 `Y`」+ 内核建议；没有内容时不写说明行
+    let note [384]u8
+    let nn int = sem_assign_note(dst, src, code, note, 384)
+    let note_ptr *char = 0.to_type(*char)
+    if (nn > 0) { note_ptr = support.arr_cstr(note) }
+    let first int = support.fc().c_expr_first
+    if (first >= 0 && first < token.ctx().count) {
+        token.err_at_note(first, table.vk_msg(code), note_ptr)
+    } else {
+        token.err_tok_note(table.vk_msg(code), note_ptr)
+    }
+    return -1
 }
 
 // sem_fold_const_binop：常量二元折叠；成功写 result 并返回 0，失败返回 -1 并已报错。

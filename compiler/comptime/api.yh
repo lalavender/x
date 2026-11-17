@@ -644,15 +644,43 @@ pub fn ct_res_is_addr_set(v int) void {
     slot[0] = v
 }
 
-// ct_err：编译期诊断（带当前 token 位置），返回 -1 便于链式返回。
-// 与 gen.sem_err 同语义：位置取 token 游标；token 表缺失时退化为无位置诊断。
-// 放在 ct_facts 是为了让执行器不再依赖 gen 的诊断入口（F4-4）。
+// ct_pos：编译期求值的诊断落点（编码值；0 = 未登记）。
+// 显式 `$f(...)` 调用由调用方在进入 CT 求值前登记（ct_pos_enter），之后 CT
+// 引擎内部任何 ct_err 都指向该构造，而不是「解析已走到行尾」的游标。
+// 零初始化即「未登记」，因此登记值编码为 token 下标 + 1；嵌套调用用
+// ct_pos_save / ct_pos_restore 保存恢复。
+let g_ct_pos int
+
+// ct_pos_save：取出当前编码值（用于稍后恢复）。
+pub fn ct_pos_save() int {
+    return g_ct_pos
+}
+
+// ct_pos_enter：登记诊断落点 token 下标（-1 表示清除登记）。
+pub fn ct_pos_enter(index int) void {
+    g_ct_pos = index + 1
+}
+
+// ct_pos_restore：恢复到 ct_pos_save 取出的编码值。
+pub fn ct_pos_restore(saved int) void {
+    g_ct_pos = saved
+}
+
+// ct_err：编译期诊断（带位置），返回 -1 便于链式返回。
+// 位置优先用 ct_pos 登记的构造 token；未登记时退回 token 游标；
+// token 表缺失时退化为无位置诊断。放在 ct_facts 是为了让执行器不再依赖
+// gen 的诊断入口（F4-4）。
 pub fn ct_err(msg *char) int {
     let tk *token.TokenCtx = token.ctx()
-    if (tk.tokens == 0 || tk.pos < 0 || tk.pos >= tk.count) {
+    if (tk.tokens == 0 || tk.count <= 0) {
         return errors.fail(msg)
     }
-    return errors.err_lc(tk.tokens[tk.pos].line, tk.tokens[tk.pos].col, msg)
+    let i int = g_ct_pos - 1
+    if (i < 0 || i >= tk.count) { i = tk.pos }
+    if (i < 0 || i >= tk.count) {
+        return errors.fail(msg)
+    }
+    return token.err_at(i, msg)
 }
 
 // ct_tables_bind：绑定字符串标签、枚举成员、静态数据目录的槽。

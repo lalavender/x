@@ -188,7 +188,11 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     if (cache.key_mix_text(&ckey, proj.pool_str(sfx_off)) != 0) { return -1 }
     // 模块目录：同名不同目录的两个模块必须得到不同 ActionID（产物名已用目录
     // 指纹区分，键里也显式混入，避免改命名规则时误命中）。
-    if (cache.key_mix_text(&ckey, proj.pool_str(proj.mod_at(m).dir_off)) != 0) { return -1 }
+    // 混入的是**项目相对**目录（proj.mod_dir_rel）：绝对路径进键会让 C4 的
+    // 「同内容跨目录命中」永久失效（把 fixture 复制到别处后 ActionID 就变了）。
+    let rel_dir [1024]u8
+    if (proj.mod_dir_rel(m, &rel_dir[0], 1024) < 0) { return -1 }
+    if (cache.key_mix_text(&ckey, support.arr_cstr(&rel_dir[0])) != 0) { return -1 }
     if (cache.key_mix_int(&ckey, is_entry) != 0) { return -1 }
     if (cache.key_mix_int(&ckey, support.session().legacy_system) != 0) { return -1 }
     // yh test：测试对象还取决于「本轮选中了哪些测试」，把选择摘要与协议版本
@@ -600,27 +604,19 @@ fn mb_check_binding_clash(m int) int {
             let idx int = table.sym_lookup_off(proj.import_at(ii).off, proj.import_at(ii).len)
             if (idx >= 0 && (table.ms().syms[idx].flags & table.F_GLOBAL) != 0
                 && (table.ms().syms[idx].flags & table.F_EXTERN) == 0) {
+                // 冲突位置取顶层声明的 def_line/def_col，路径取当前文件的池快照
                 let buf [192]u8
                 let n int = 0
-                n = support.append_int_cap(buf, 192, n, table.ms().syms[idx].def_line)
-                n = support.append_byte_cap(buf, 192, n, ':')
-                n = support.append_int_cap(buf, 192, n, table.ms().syms[idx].def_col)
-                n = support.append_str_cap(buf, 192, n, ": 顶层声明与导入名冲突（导入名 ")
+                n = support.append_str_cap(buf, 192, n, "顶层声明与导入名冲突（导入名 ")
                 n = support.append_np_cap(buf, 192, n, proj.import_at(ii).off, proj.import_at(ii).len)
                 n = support.append_str_cap(buf, 192, n, "）")
                 let mo int = support.tml_intern_str(buf, 0, n)
                 if (mo < 0) {
                     return -1
                 }
-                errors.diag().errors += 1
-                let out [256]u8
-                let on int = 0
-                on = support.append_str(out, on, proj.pool_str(proj.file(f).path_off))
-                on = support.append_byte(out, on, ':')
-                on = support.append_np(out, on, mo, n)
-                on = support.append_byte(out, on, '\n')
-                support.write_all(2, out, on)
-                return -1
+                return errors.err_path_pos(proj.pool_str(proj.file(f).path_off),
+                    table.ms().syms[idx].def_line, table.ms().syms[idx].def_col,
+                    support.np_cstr(mo))
             }
             ii += 1
         }

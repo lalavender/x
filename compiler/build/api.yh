@@ -990,8 +990,7 @@ pub fn cmd_build(out_path *char, module_arg *char, has_module int, links []*char
         return 1
     }
     let root_off int = root
-    proj.set_root_project(root_off, root_len)
-    let pj int = load_project(root_off, root_len)
+    let pj int = pj_load_root(root_off, root_len)
     if (pj < 0) {
         return 1
     }
@@ -1106,8 +1105,7 @@ pub fn cmd_run(links []*char) int {
         return 1
     }
     let root_off int = root
-    proj.set_root_project(root_off, root_len)
-    let pj int = load_project(root_off, root_len)
+    let pj int = pj_load_root(root_off, root_len)
     if (pj < 0) {
         return 1
     }
@@ -1286,6 +1284,8 @@ pub fn mb_restore_front_file(path *char, fi int) int {
     if (support.set_source_path(path) != 0) {
         return -1
     }
+    // 源码与路径成对登记：片段渲染前核对路径槽是否仍是同一条路径
+    errors.bind_source_path(path)
     errors.diag().spec = 0
     parse.ctx().ctx_block = 0
     return 0
@@ -1366,7 +1366,31 @@ pub fn mb_emit_module(mod_off int, mod_len int, prov_off int, prov_len int,
 // mb_worker_parent_set：子进程入口记录父 pid（fork 后、开始编译前调用一次）。
 pub fn mb_worker_parent_set() void { mb_worker_parent = getppid() }
 
-pub fn load_project(root_off int, root_len int) int {
+// pj_load_root：装载**命令根项目**——根身份先规范化，再登记 + 装载。
+// 两步必须用同一份规范身份：`proj.is_root_project` 按字节比较，若 set_root_project
+// 记的是原始拼写、load_project 存的是规范路径，根项目会被当成依赖项目，
+// 优化级（module_opt_level）与 [link] 组（pl_load_link_config 的 is_root）都会选错。
+pub fn pj_load_root(root_off int, root_len int) int {
+    let k_off int = root_off
+    let k_len int = root_len
+    if (proj.root_canon(root_off, root_len, &k_off, &k_len) != 0) {
+        return -1
+    }
+    proj.set_root_project(k_off, k_len)
+    return load_project(k_off, k_len)
+}
+
+// load_project：装载项目（含其依赖），返回项目下标；失败返回 -1。
+// 入口先做一次**身份规范化**：root 可能是相对拼写（cwd 派生）或绝对拼写
+// （标准库自动发现给的是 `<bin>/../libs`）。`find_project_root` 按字节判重，
+// 两种拼写会被当成两个项目——模块产物标签与符号后缀完全一样，同一个 `.o`
+// 进链接两次（见 proj.root_canon 的注释）。此后函数体内一律用规范路径。
+pub fn load_project(raw_off int, raw_len int) int {
+    let root_off int = raw_off
+    let root_len int = raw_len
+    if (proj.root_canon(raw_off, raw_len, &root_off, &root_len) != 0) {
+        return -1
+    }
     let c_off int = 0
     let c_len int = 0
     // 依赖环 / 重复装载
@@ -1601,14 +1625,9 @@ pub fn pj_index_file(path *char, pj int) int {
         if (pj_synth_module_name(path) != 0) { return -1 }
     }
     if (proj.fs().has_module == 0) {
-        // 源码根内的文件必须声明模块（旧单文件形态不属于项目源码根）
-        errors.diag().errors += 1
-        let buf [256]u8
-        let n int = 0
-        n = support.append_str(buf, n, support.src_ctx().path)
-        n = support.append_str(buf, n, ":1:1: 错误: 项目源码内的文件必须以 module 声明开头\n")
-        support.write_all(2, buf, n)
-        return -1
+        // 源码根内的文件必须声明模块（旧单文件形态不属于项目源码根）。
+        // 位置固定 1:1：文件里没有 module 声明，指向文件开头最不误导。
+        return errors.err_span(1, 1, 1, "项目源码内的文件必须以 module 声明开头")
     }
     // 路径先 intern：模块身份键要目录（(项目, 名字, 目录) 三元组）。
     let plen int = 0
@@ -1684,13 +1703,7 @@ pub fn pj_index_file(path *char, pj int) int {
             if (mo < 0) {
                 return -1
             }
-            errors.diag().errors += 1
-            let out [600]u8
-            let on int = 0
-            on = support.append_str(out, on, support.np_cstr(mo))
-            on = support.append_byte(out, on, '\n')
-            support.write_all(2, out, on)
-            return -1
+            return errors.err_path_pos(proj.pool_str(poff), 0, 0, support.np_cstr(mo))
         }
         di += 1
     }
@@ -1890,14 +1903,9 @@ pub fn pj_dfs(m int) int {
         if (mo < 0) {
             return -1
         }
-        errors.diag().errors += 1
-        let out [600]u8
-        let on int = 0
-        on = support.append_str(out, on, "yh: ")
-        on = support.append_np(out, on, mo, n)
-        on = support.append_byte(out, on, '\n')
-        support.write_all(2, out, on)
-        return -1
+        // 环没有单一行列可指：落点取当前模块目录（仍是可定位的路径级诊断）
+        return errors.err_path_pos(proj.pool_str(proj.mod_at(m).dir_off), 0, 0,
+            support.np_cstr(mo))
     }
     proj.mark_set(m, 1)
     pj_pathstk[pj_pathstk_n] = m
@@ -1921,7 +1929,45 @@ pub fn pj_dfs(m int) int {
     return 0
 }
 
+// pj_check_mod_tags：全模块扫描「同产物标签、不同项目」。
+// 必须跑在**任何 tag 被用于缓存键、对象路径或符号名之前**（pj_topo 的第一行）：
+// 两个同名项目会让 `<tag>.o` 与 `__pj__mod` 符号后缀相同，链接器只报
+// duplicate symbol（ld64 甚至静默通过、运行期串符号）。这里在装载期就把它变成
+// 一条带位置的结构诊断，指出两个项目根，让用户改 project.name 或去掉重复依赖。
+fn pj_check_mod_tags() int {
+    let m int = 0
+    for m < proj.mod_count() {
+        let other int = proj.mod_tag_conflict(m)
+        if (other >= 0) {
+            let t_off int = 0
+            let t_len int = 0
+            if (proj.mod_tag(m, &t_off, &t_len) != 0) { return -1 }
+            let buf [1024]u8
+            let n int = 0
+            n = support.append_str(buf, n, "模块产物标签冲突: ")
+            n = support.append_np(buf, n, t_off, t_len)
+            n = support.append_str(buf, n, "（两个同名项目 → 改 project.name 或去掉重复依赖：")
+            n = support.append_str(buf, n,
+                proj.pool_str(proj.proj_at(proj.mod_at(m).proj).root_off))
+            n = support.append_str(buf, n, " / ")
+            n = support.append_str(buf, n,
+                proj.pool_str(proj.proj_at(proj.mod_at(other).proj).root_off))
+            n = support.append_str(buf, n, "）")
+            let mo int = support.tml_intern_str(buf, 0, n)
+            if (mo < 0) { return -1 }
+            return errors.err_path_pos(proj.pool_str(proj.mod_at(m).dir_off), 0, 0,
+                support.np_cstr(mo))
+        }
+        m += 1
+    }
+    return 0
+}
+
 pub fn pj_topo(root int) int {
+    // 产物标签冲突要在建序（进而缓存键/对象路径）之前拦下，见 pj_check_mod_tags。
+    if (pj_check_mod_tags() != 0) {
+        return -1
+    }
     // 标记表按模块数重建；路径栈按需扩容
     if (proj.mod_count() > 0) {
         if (proj.mark_reset(proj.mod_count()) != 0) {

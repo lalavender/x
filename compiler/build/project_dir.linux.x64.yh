@@ -2,6 +2,24 @@ module build
 import errors
 import libs.list
 
+// pj_os_dir_probe：d_type 缺失（DT_UNKNOWN = 0）时用 openat 探测是否为目录。
+// 部分 overlayfs / 网络文件系统不填 d_type；只看 `d_type == 4` 会把目录当文件
+// 跳过，目录里的模块就此「消失」。openat(O_DIRECTORY|O_NOFOLLOW) 成功 → 目录。
+// x86_64（asm-generic）：openat = 257，close = 3，
+// O_DIRECTORY = 0x10000，O_NOFOLLOW = 0x20000 → 合计 0x30000。
+// dirfd 是同一目录已打开的 fd，name 是 getdents64 记录里的 NUL 结尾名字。
+fn pj_os_dir_probe(dirfd i64, name *u8) int {
+    let fd i64 = linux_syscall6(257.to_type(u64), dirfd.to_type(u64),
+        name.to_type(u64), 0x30000.to_type(u64), 0.to_type(u64),
+        0.to_type(u64), 0.to_type(u64))
+    if (fd < 0) {
+        return 0
+    }
+    linux_syscall6(3.to_type(u64), fd.to_type(u64), 0.to_type(u64),
+        0.to_type(u64), 0.to_type(u64), 0.to_type(u64), 0.to_type(u64))
+    return 1
+}
+
 // pj_os_dir_list：通过 Linux x86_64 openat/getdents64 枚举目录并复制目录项。
 // syscall 编号与 O_DIRECTORY 取值限定在 asm-generic x86_64 ABI，不可供 ARM64 复用。
 fn pj_os_dir_list(dir *char, entries *list.List) int {
@@ -42,8 +60,15 @@ fn pj_os_dir_list(dir *char, entries *list.List) int {
                 failed = 1
                 break
             }
-            if (pj_dir_add(entries, name, name_len,
-                (bufp[pos + 18] == 4).to_type(int)) != 0) {
+            // d_type：4 = DT_DIR；0 = DT_UNKNOWN 时按 openat 探测补判。
+            let dtype int = bufp[pos + 18].to_type(int)
+            let is_dir int = 0
+            if (dtype == 4) {
+                is_dir = 1
+            } else if (dtype == 0) {
+                is_dir = pj_os_dir_probe(fd, name)
+            }
+            if (pj_dir_add(entries, name, name_len, is_dir) != 0) {
                 failed = 1
                 break
             }

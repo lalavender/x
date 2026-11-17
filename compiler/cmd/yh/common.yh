@@ -4,6 +4,8 @@ import support
 import check
 import build
 import proj
+import errors
+import libs.os
 
 // ============================================================================
 // common.yh —— cmd 模块共享前奏（A3；P1 一命令一文件，2026-11-05）。
@@ -37,6 +39,52 @@ fn cmd_session_init(argv0 *char, envp **char) void {
     support.bind_cfg(proj.cfg())
     build.mb_set_argv0(argv0)
     proj.ctx().envp = envp
+    cmd_diag_setup()
+}
+
+// cmd_env_value：读环境变量的值（NUL 串）；不存在或为空返回 0。
+// 值由 proj.env_fetch 快照进名字池，这里只借用指针，不复制、不分配。
+fn cmd_env_value(name *char) *char {
+    let off int = 0
+    let len int = 0
+    if (proj.env_fetch(name, &off, &len) != 0 || len <= 0) { return 0 }
+    return proj.pool_str(off)
+}
+
+// cmd_env_is：环境变量存在且取值逐字节等于 want 时返回 1，否则 0。
+fn cmd_env_is(name *char, want *char) int {
+    let value *char = cmd_env_value(name)
+    if (value == 0) { return 0 }
+    let i int = 0
+    for want[i] != 0 {
+        if (value[i] != want[i]) { return 0 }
+        i += 1
+    }
+    return (value[i] == 0).to_type(int)
+}
+
+// cmd_diag_setup：诊断渲染开关，进程内一次。
+//   * plain：YH_DIAG_PLAIN 非空 → 只输出单行头（内部保险）；
+//   * 颜色：YH_DIAG_COLOR=always|never 覆盖 > NO_COLOR > isatty(2)；
+//   * 版本：登记给 ICE 行；worker 子进程走同一入口，自动继承。
+fn cmd_diag_setup() void {
+    errors.set_version(YH_VERSION_TEXT)
+    if (cmd_env_value("YH_DIAG_PLAIN") != 0) {
+        errors.set_plain(1)
+    }
+    let color int = -1
+    if (cmd_env_is("YH_DIAG_COLOR", "always") != 0) { color = 1 }
+    if (cmd_env_is("YH_DIAG_COLOR", "never") != 0) { color = 0 }
+    if (color < 0) {
+        if (cmd_env_value("NO_COLOR") != 0) {
+            color = 0
+        } else if (os.is_terminal(2) != 0) {
+            color = 1
+        } else {
+            color = 0
+        }
+    }
+    errors.set_color(color)
 }
 
 // api_open_source：单文件形态共用前奏——登记路径、读源、建语义表。

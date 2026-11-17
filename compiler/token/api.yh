@@ -308,9 +308,100 @@ pub fn push(kind int, start int, n int, line int, col int) int {
     return 0
 }
 
-// err_tok：以当前 token 的行列位置报错，返回 -1。
-// 调用方必须保证 pos 落在 [0,count)；pos 由解析器维护。
+// err_tok：以当前 token 的行列位置与字节宽度报错，返回 -1。
+// 调用方必须保证 pos 落在 [0,count)；pos 由解析器维护。宽度取 tok.len，
+// 让源码片段的下划线覆盖整个 token（EOF 的 len 为 0，按 1 字节渲染）。
 pub fn err_tok(msg *char) int {
+    return err_at(ctx().pos, msg)
+}
+
+// real_index：把 token 下标夹到有效范围，并跳过词法器合成为「长度 0」的
+// 隐式终结符与 EOF，回指最近的真实 token。
+// 换行补入的隐式 `;` 起点正好落在行尾之后，若诊断落在它上面，caret 会显示
+// 在「行尾 +1」；这些合成 token 不是源码里的真实构造，不该被指。
+pub fn real_index(index int) int {
     let tk *TokenCtx = ctx()
-    return errors.err_lc(tk.tokens[tk.pos].line, tk.tokens[tk.pos].col, msg)
+    let i int = index
+    if (i >= tk.count) { i = tk.count - 1 }
+    if (i < 0) { i = 0 }
+    for i > 0 && tk.tokens[i].len <= 0 {
+        i -= 1
+    }
+    return i
+}
+
+// err_at：以指定 token 的位置与宽度报错，返回 -1。
+// 用于「解析完一段构造、游标已前进」的调用点：传回构造的首 token，
+// 而不是让 err_tok 指向其后的 `)`/`{`/行尾。下标越界时回退到当前 token；
+// 合成 token 按 real_index 回指最近的真实 token。
+pub fn err_at(index int, msg *char) int {
+    let tk *TokenCtx = ctx()
+    if (tk.count <= 0) { return errors.err_span(0, 1, 1, msg) }
+    let i int = real_index(index)
+    let t *Tok = &tk.tokens[i]
+    return errors.err_span(t.line, t.col, t.len, msg)
+}
+
+// err_at_note：同 err_at，另带一条「说明:」行（修复建议）。
+pub fn err_at_note(index int, msg *char, note *char) int {
+    let tk *TokenCtx = ctx()
+    if (tk.count <= 0) { return errors.err_span_note(0, 1, 1, msg, note) }
+    let i int = real_index(index)
+    let t *Tok = &tk.tokens[i]
+    return errors.err_span_note(t.line, t.col, t.len, msg, note)
+}
+
+// err_tok_note：同 err_tok，另带一条「说明:」行（修复建议）。
+pub fn err_tok_note(msg *char, note *char) int {
+    return err_at_note(ctx().pos, msg, note)
+}
+
+// err_range：以 token 下标半开区间 [first, after) 作为出错构造报错，返回 -1。
+// 跨度取首个 token 起点到最后一个 token 终点，并夹到同一行内（跨行构造只
+// 下划线首行，见诊断规范 §4.2）。
+pub fn err_range(first int, after int, msg *char) int {
+    let tk *TokenCtx = ctx()
+    let f int = first
+    let a int = after
+    if (f < 0) { f = 0 }
+    if (f >= tk.count) { f = tk.count - 1 }
+    if (f < 0) { f = 0 }
+    if (a <= f) { return err_at(f, msg) }
+    if (a > tk.count) { a = tk.count }
+    // 尾端同样跳过合成 token（隐式 `;`/EOF），否则宽度会白吃到行尾之外
+    let j int = real_index(a - 1)
+    if (j < f) { j = f }
+    let t *Tok = &tk.tokens[f]
+    let last *Tok = &tk.tokens[j]
+    let width int = last.start + last.len - t.start
+    if (width <= 0) { width = t.len }
+    // 夹到行内：跨度不得越过首 token 所在行的行尾
+    let src *u8 = support.src_ctx().data
+    let slen int = support.src_ctx().length
+    let line_end int = t.start
+    for line_end < slen && src[line_end] != '\n' {
+        line_end += 1
+    }
+    if (t.start + width > line_end) { width = line_end - t.start }
+    return errors.err_span(t.line, t.col, width, msg)
+}
+
+// index_at_offset：按源字节偏移找 token 下标。
+// 优先返回覆盖该偏移的 token；没有覆盖时返回起点不晚于该偏移的最后一个
+// token（构造尾部/空白处）；都找不到返回 0。语义错误只拿到名字的
+// (start,len) 源区间时用它换回 token，从而得到真实行列与宽度。
+pub fn index_at_offset(off int) int {
+    let tk *TokenCtx = ctx()
+    if (tk.count <= 0) { return 0 }
+    let i int = 0
+    let best int = 0
+    for i < tk.count {
+        let t *Tok = &tk.tokens[i]
+        if (off >= t.start && off < t.start + t.len) {
+            return i
+        }
+        if (t.start <= off) { best = i }
+        i += 1
+    }
+    return best
 }

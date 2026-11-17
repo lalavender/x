@@ -1343,19 +1343,89 @@ pub fn canon(base_off int, base_len int, rel *char,
     return 0
 }
 
+// POSIX realpath 的 C ABI 声明：把路径解析成真实绝对路径。
+// 语义：相对路径按当前工作目录解析、消除符号链接、折叠 "."/".." 与多余斜杠；
+// 路径不存在时返回 0（调用方据此回退）。Windows 端由
+// compiler/llvm/windows_shim.c 提供等价实现（GetFullPathNameA）。
+@[extern] fn realpath(path *char, resolved *char) *char
+
+// root_canon：把项目根规范成**真实绝对路径**，作为项目身份。
+//
+// 背景（2026-11-15 的 libs 重复装载）：项目身份原先按根路径字节比较，于是
+// 「同一个目录的两种拼写」被登记成两个项目——标准库自动发现给的是绝对路径，
+// `[dependencies] libs = {path = "../libs"}` 给的是相对路径，同一棵 libs 树被
+// 完整扫描两次；两个项目又各自读到 `project.name = "yh_libs"`，模块产物标签与
+// 符号后缀完全相同，同一个 `.o` 被加入链接两次（ld.lld 报 duplicate symbol，
+// Darwin 的 ld64 只是容忍）。
+//
+// 做法：realpath（绝对化 + 消 symlink）→ canon（统一 '/'、折叠 "."/".."、合并
+// 多余斜杠）→ 入池。realpath 失败（路径不存在）时保留原始拼写，让后续
+// 「找不到 project.toml」照旧报错。成功返回 0；out_off/out_len 给池内规范路径。
+pub fn root_canon(off int, plen int, out_off *int, out_len *int) int {
+    let real [4096]u8
+    if (realpath(pool_str(off), (&real[0]).to_type(*char)) == 0) {
+        out_off[0] = off
+        out_len[0] = plen
+        return 0
+    }
+    let n int = 0
+    for n < 4095 && real[n] != 0 {
+        n += 1
+    }
+    if (n <= 0 || n >= 1023) {
+        out_off[0] = off
+        out_len[0] = plen
+        return 0
+    }
+    return canon(0, 0, (&real[0]).to_type(*char), out_off, out_len)
+}
+
+// np_eq：两段池内字节是否完全相同（长度 + 逐字节）。
+// 用于比较不保证 NUL 结尾的身份串（模块产物标签、项目根）。
+pub fn np_eq(a_off int, a_len int, b_off int, b_len int) int {
+    if (a_len != b_len) { return 0 }
+    let i int = 0
+    for i < a_len {
+        if (support.pool_ctx().data[a_off + i] != support.pool_ctx().data[b_off + i]) {
+            return 0
+        }
+        i += 1
+    }
+    return 1
+}
+
+// mod_tag_conflict：是否存在**另一个项目**的模块与本模块产出相同的产物标签。
+// 模块 tag 只由「项目名 + 模块名」派生（见 mod_tag）：两个同名项目（不同根目录）
+// 会落在同一个 `<tag>.o` 与同一套符号后缀上，链接器只能报 duplicate symbol，
+// 或者（ld64）静默接受后运行期串符号。这里让这种结构错误在装载期就报出来。
+// 找到冲突返回对方模块下标；无冲突（或 tag 计算失败）返回 -1。
+pub fn mod_tag_conflict(m int) int {
+    if (m < 0 || m >= mod_count()) { return -1 }
+    let off int = 0
+    let olen int = 0
+    if (mod_tag(m, &off, &olen) != 0) { return -1 }
+    let i int = 0
+    for i < mod_count() {
+        if (i != m && mod_at(i).proj != mod_at(m).proj) {
+            let o2 int = 0
+            let l2 int = 0
+            if (mod_tag(i, &o2, &l2) == 0 && np_eq(off, olen, o2, l2) != 0) {
+                return i
+            }
+        }
+        i += 1
+    }
+    return -1
+}
+
 // diag：项目清单诊断（project.toml 行号 + 消息），返回 -1 供调用方传播。
 pub fn diag(root_off int, line int, msg *char) int {
+    // 清单路径 = 项目根 + "/project.toml"；只有行号（TOML 按行定位够用）
     let buf [1024]u8
     let n int = 0
     n = support.append_str(buf, n, pool_str(root_off))
-    n = support.append_str(buf, n, "/project.toml:")
-    n = support.append_int(buf, n, line)
-    n = support.append_str(buf, n, ": 错误: ")
-    n = support.append_str(buf, n, msg)
-    n = support.append_byte(buf, n, '\n')
-    support.write_all(2, buf, n)
-    errors.diag().errors += 1
-    return -1
+    n = support.append_str(buf, n, "/project.toml")
+    return errors.err_path_pos(support.arr_cstr(buf), line, 0, msg)
 }
 
 // file：按文件下标取只读文件表项（前端窄口）。
@@ -1409,6 +1479,51 @@ pub fn file_rel_path(fi int, out *u8, capacity int) int {
     for i < row.path_len {
         if (n + 1 >= capacity) { return -1 }
         out[n] = support.pool_ctx().data[row.path_off + i]
+        n += 1
+        i += 1
+    }
+    out[n] = 0
+    return n
+}
+
+// mod_dir_rel：模块目录相对其项目根的路径（缓存键用）。返回字节长度，失败 -1。
+// 模块 ActionID 必须与**位置无关**：C4 的全局 store 要求同一项目换目录后仍按
+// ActionID 命中，混入绝对路径会让跨目录命中失效；而「同项目内同名不同目录」的
+// 两个模块仍要靠这份相对路径区分（见 module_emit 里的键注释）。
+pub fn mod_dir_rel(m int, out *u8, capacity int) int {
+    if (out == 0 || capacity <= 1 || m < 0 || m >= mod_count()) { return -1 }
+    let row PMod = mod_at(m)[0]
+    let start int = 0
+    if (row.proj >= 0 && row.proj < proj_count()) {
+        let root_off int = proj_at(row.proj).root_off
+        let root_len int = proj_at(row.proj).root_len
+        if (root_len > 0 && row.dir_len >= root_len) {
+            let same int = 1
+            let i int = 0
+            for i < root_len {
+                if (support.pool_ctx().data[row.dir_off + i]
+                    != support.pool_ctx().data[root_off + i]) {
+                    same = 0
+                    break
+                }
+                i += 1
+            }
+            if (same != 0) {
+                let root_slash int = (root_len > 0
+                    && support.pool_ctx().data[root_off + root_len - 1] == '/') ? 1 : 0
+                if (row.dir_len == root_len || root_slash != 0) {
+                    start = root_len
+                } else if (support.pool_ctx().data[row.dir_off + root_len] == '/') {
+                    start = root_len + 1
+                }
+            }
+        }
+    }
+    let n int = 0
+    let i int = start
+    for i < row.dir_len {
+        if (n + 1 >= capacity) { return -1 }
+        out[n] = support.pool_ctx().data[row.dir_off + i]
         n += 1
         i += 1
     }
@@ -1491,6 +1606,9 @@ pub fn add_project(root_off int, root_len int) int {
 }
 
 // find_project_root：按根路径查已登记项目，未找到返回 -1。
+// **调用方必须传规范身份**（`root_canon` 的结果）：本函数只做逐字节比较，
+// 已登记的项目根也都是规范身份（`load_project` 入口统一规范后 `add_project`）。
+// 直接传原始拼写会得到「同一目录两个项目」，正是 2026-11-15 重复装载的根因。
 pub fn find_project_root(root_off int, root_len int) int {
     let i int = 0
     for i < proj_count() {

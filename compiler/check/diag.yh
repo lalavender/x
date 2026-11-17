@@ -1,0 +1,92 @@
+module check
+
+import errors
+import proj
+import support
+import table
+import token
+
+// ============================================================================
+// diag.yh —— 跨文件诊断位置（D2）
+//
+// AST 节点的 token 区间可能属于**别的文件**（多文件模块、并行 worker 的
+// 文件快照），而 errors 的路径槽/源槽只指向「当前文件」。本文件提供
+// file_span：临时把路径与源码切到该文件、按 token 区间 [first, after) 取
+// 行列与宽度，报完诊断后原样恢复。
+//
+// 回退规则（绝不显示错文件/错行）：
+//   * 该文件快照带源码 → 切路径 + 源码，片段正确；
+//   * 快照只有 token、没有源码（父进程）→ 切路径但关闭片段（set_plain(1)）；
+//   * 没有快照 → 用当前 token 表；路径一致才保留片段，否则同样关闭。
+// ============================================================================
+
+// diag_tok_table：取某文件的 token 表；没有快照时回退当前 token 上下文。
+fn diag_tok_table(file_id int) *token.Tok {
+    if (file_id >= 0 && file_id < proj.file_count()) {
+        let t *token.Tok = proj.file(file_id).tokens
+        if (t != 0) { return t }
+    }
+    return token.ctx().tokens
+}
+
+// diag_tok_n：该文件可用的 token 数（回退当前上下文）；0 表示不可用。
+fn diag_tok_n(file_id int) int {
+    if (file_id >= 0 && file_id < proj.file_count()) {
+        if (proj.file(file_id).tokens != 0) {
+            return proj.file(file_id).token_n
+        }
+    }
+    return token.ctx().count
+}
+
+// file_span_code：把值内核错误码翻成消息后按 token 区间报错；0 原样返回 0。
+pub fn file_span_code(file_id int, first int, after int, code int) int {
+    if (code == 0) { return 0 }
+    return file_span(file_id, first, after, table.vk_msg(code))
+}
+
+// file_span：在指定文件的 token 半开区间 [first, after) 上报错，返回 -1。
+// 行列取首个 token（出错构造的起点），宽度取整个区间的源字节数（渲染时
+// 自动夹到该行行尾）。切换出去的现场（路径/源码/plain）无论成功失败都恢复。
+pub fn file_span(file_id int, first int, after int, msg *char) int {
+    let tab *token.Tok = diag_tok_table(file_id)
+    let n int = diag_tok_n(file_id)
+    if (tab == 0 || n <= 0) {
+        // 没有任何 token 可用：退化为不带位置的错误（与迁移前一致）
+        return errors.err_lc(0, 0, msg)
+    }
+    let saved_path *char = support.src_ctx().path
+    let saved_data *u8 = support.src_ctx().data
+    let saved_len int = support.src_ctx().length
+    let saved_plain int = errors.diag().plain
+    let path_moved int = 0
+    let src_ok int = 0
+    if (file_id >= 0 && file_id < proj.file_count()) {
+        let path *char = proj.pool_str(proj.file(file_id).path_off)
+        if (path != 0 && path != saved_path) {
+            support.src_ctx().path = path
+            path_moved = 1
+        }
+        if (proj.file(file_id).source != 0 && proj.file(file_id).source_len > 0) {
+            support.src_ctx().data = proj.file(file_id).source
+            support.src_ctx().length = proj.file(file_id).source_len
+            src_ok = 1
+        }
+    }
+    // 源码与路径不同源时关闭片段：宁可只给头行，也不显示别的文件的内容
+    if (src_ok == 0 && path_moved != 0) { errors.set_plain(1) }
+    let i int = first
+    if (i < 0) { i = 0 }
+    if (i >= n) { i = n - 1 }
+    let j int = after - 1
+    if (j < i) { j = i }
+    if (j >= n) { j = n - 1 }
+    let width int = tab[j].start + tab[j].len - tab[i].start
+    if (width <= 0) { width = tab[i].len }
+    let status int = errors.err_span(tab[i].line, tab[i].col, width, msg)
+    support.src_ctx().path = saved_path
+    support.src_ctx().data = saved_data
+    support.src_ctx().length = saved_len
+    errors.set_plain(saved_plain)
+    return status
+}

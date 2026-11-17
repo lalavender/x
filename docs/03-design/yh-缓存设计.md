@@ -159,6 +159,8 @@ LLVM 路径下对象是**模块级** `<tag>.o`；`module_obj_row` 的按文件�
 - LLVM 桥版本与桥 ABI；
 - Darwin 部署目标/PIC；
 - 模块符号后缀、入口标记、`legacy_system`；
+- 模块的**项目相对**目录（同项目内同名不同目录仍能区分；绝对路径不入键，
+  这样把同一项目复制到别的目录仍按 ActionID 全局命中）；
 - `yh test` 的测试选择摘要（仅测试模式）。
 
 编译器身份由 `mb_mix_compiler_fingerprint` 计算：C2 起每进程只对编译器二进制

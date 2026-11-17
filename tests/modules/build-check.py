@@ -241,6 +241,8 @@ WINDOWS_SKIP = {
     "u3-c-paths-with-spaces-use-argv": "C 互操作桩依赖宿主 libc/libm（W1-2b-2）",
     "u8-dup-module-path-import": "同名模块+路径导入的 Windows 对象缓存提交仍有遗留"
                                   "（rc.2 记录，见 docs/todo.md）",
+    "u8-dep-same-dir-two-spellings": "fixture 用符号链接表达「同一目录的两种拼写」；"
+                                    "Windows 检出默认不物化 symlink（需开发者模式/管理员）",
 }
 WINDOWS_SKIP_PREFIX = {
     "u3-c-": "C 源/对象互操作依赖宿主 libc/libm（W1-2b-2）",
@@ -398,6 +400,13 @@ case("u7-module-name-too-long", "fail", "longname", ".", msg="模块名过长")
 case("u8-dup-module-path-import", "run", "dupmodseg", "app", 30)
 case("u8-dup-module-bare-ambiguous", "fail", "dupbarenames", "app", msg="模块名歧义")
 case("u8-dup-module-dir-mismatch", "fail", "dupmisname", "app", msg="路径导入与目录不匹配")
+# —— 项目装载身份与产物标签（2026-11-17）：身份 = 真实绝对路径 ——
+# 同一目录的两种拼写（`../lib` 与符号链接 `../liblink`）只能装载一次：
+# 两条依赖键共享同一个项目的 core 模块，运行结果 7 + 7 = 14。
+# Windows 端符号链接需开发者模式/管理员，且检出可能不支持 → 由 WINDOWS_SKIP 跳过。
+case("u8-dep-same-dir-two-spellings", "run", "depspell", "app", 14)
+# 两个同名项目各有一个 core：模块 tag 相同 → 装载期报「模块产物标签冲突」。
+case("u8-dup-project-tag", "fail", "duptag", "app", msg="模块产物标签冲突")
 # —— MOD-U3：模块语义 ——
 # 2026-10-02 pub struct 一等化：字段一律公开，跨模块字段访问与位置式构造
 # 由 fail 用例转为 run 正向用例；符号级可见性（非 pub fn）仍被拒绝。
@@ -489,7 +498,9 @@ if sys.platform.startswith("win"):
 def copy_proj(src, dst):
     if dst.exists():
         shutil.rmtree(dst)
-    shutil.copytree(src, dst)
+    # symlinks=True：depspell 夹具用符号链接表达「同一目录的两种拼写」，
+    # 解引用会把链接变成真实副本，身份去重就测不到了（Windows 侧该用例跳过）。
+    shutil.copytree(src, dst, symlinks=True)
     if src.name == "cinterop" and not sys.platform.startswith("win"):
         # fixture 只提交 prebuilt.c（*.o 不入库），而清单引用 vendor/prebuilt.o；
         # 在把 fixture 交给编译器前按需编译，保证干净 checkout 上也能构建。

@@ -1,7 +1,80 @@
 module errors
 
 // errors 模块内测试：诊断状态机、推测解析静默与返回码。
-// 诊断文本格式由 tests/yh-run 的 fail 语料端到端覆盖，这里不断言文本。
+// D1 起还覆盖 V 风格片段渲染器（fmt_diag）：格式、宽度换算与回退矩阵。
+// 端到端位置质量由 tests/diagnostics 的夹具与语料扫描负责，这里只钉住
+// 「给定源码与行列，渲染出的块必须逐字节等于什么」。
+
+// slen：C 串字节长度（不含结尾 NUL）。
+fn slen(s *char) int {
+    let n int = 0
+    for s[n] != 0 {
+        n += 1
+    }
+    return n
+}
+
+// text_eq：buf[0,n) 与 want 逐字节相同返回 1，否则 0。
+fn text_eq(buf *u8, n int, want *char) int {
+    let i int = 0
+    for i < n && want[i] != 0 {
+        if (buf[i] != want[i].to_type(u8)) { return 0 }
+        i += 1
+    }
+    if (i != n) { return 0 }
+    return (want[i] == 0).to_type(int)
+}
+
+// caret_pad：返回 caret 行里 `| ` 之后到第一个 `^`/`~` 的空格数；没有 caret 行返回 -1。
+fn caret_pad(buf *u8, n int) int {
+    let i int = 0
+    let line_start int = 0
+    let seen_pipe int = 0
+    let pad int = 0
+    for i < n {
+        if (buf[i] == '\n') {
+            line_start = i + 1
+            seen_pipe = 0
+            pad = 0
+        } else if (seen_pipe != 0) {
+            if (buf[i] == ' ') { pad += 1 }
+            else if (buf[i] == '^' || buf[i] == '~') { return pad }
+            else { seen_pipe = 0 }
+        } else if (buf[i] == '|' && i > line_start && buf[i - 1] == ' ') {
+            seen_pipe = 1
+            pad = 0
+            // `| ` 后的一个空格属于分隔符
+            if (i + 1 < n && buf[i + 1] == ' ') { i += 1 }
+        }
+        i += 1
+    }
+    return -1
+}
+
+// newline_n：buf[0,n) 中的换行数（用于断言块的行数）。
+fn newline_n(buf *u8, n int) int {
+    let k int = 0
+    let i int = 0
+    for i < n {
+        if (buf[i] == '\n') { k += 1 }
+        i += 1
+    }
+    return k
+}
+
+// bind_src：登记测试用源码槽（传入局部变量地址）、把源码归属路径绑到当前
+// 路径槽，并复位渲染状态。真实运行时这两步分别由 support.read_source 与
+// 模块 worker 的文件快照切换完成；渲染器只在这个绑定匹配时才画片段。
+fn bind_src(src **u8, len_slot *int) void {
+    set_source_slot(src, len_slot)
+    if (g_path_slot != 0 && *g_path_slot != 0) {
+        bind_source_path(*g_path_slot)
+    }
+    diag().plain = 0
+    diag().line_bias = 0
+    diag().ct_depth = 0
+    diag().spec = 0
+}
 
 test "diag 单例与字段读写" {
     $assert(diag() == diag())
@@ -40,4 +113,219 @@ test "warn_lc 不计数且推测解析静默" {
     $assert(warn_lc(1, 1, "静默警告") == 0)
     $assert(diag().errors == 0)
     diag().spec = 0
+}
+
+test "片段：单字符 caret 对齐在行尾之前的 token 上" {
+    let path *char = "t.yh"
+    set_path_slot(&path)
+    let text *char = "fn main() int {\n    let y int = z\n}\n"
+    let src *u8 = text.to_type(*u8)
+    let src_len int = slen(text)
+    bind_src(&src, &src_len)
+    let buf [4096]u8
+    let n int = fmt_diag(buf, 4096, 0, 2, 17, 1, "引用了未声明的名字")
+    let want *char = "t.yh:2:17: 错误: 引用了未声明的名字\n    1 | fn main() int {\n    2 |     let y int = z\n      |                 ^\n    3 | }\n"
+    $assert(text_eq(buf, n, want) == 1, "片段格式不符（单字符 caret）")
+}
+
+test "片段：多字节 token 画波浪线" {
+    let path *char = "t.yh"
+    set_path_slot(&path)
+    let text *char = "fn main() int {\n    let x int = \"s\"\n}\n"
+    let src *u8 = text.to_type(*u8)
+    let src_len int = slen(text)
+    bind_src(&src, &src_len)
+    let buf [4096]u8
+    let n int = fmt_diag(buf, 4096, 0, 2, 17, 3, "不能把指针赋给非指针（用 .to_type）")
+    let want *char = "t.yh:2:17: 错误: 不能把指针赋给非指针（用 .to_type）\n    1 | fn main() int {\n    2 |     let x int = \"s\"\n      |                 ~~~\n    3 | }\n"
+    $assert(text_eq(buf, n, want) == 1, "片段格式不符（波浪线）")
+}
+
+test "片段：tab 展开为 4 空格且 caret 不错位" {
+    let path *char = "t.yh"
+    set_path_slot(&path)
+    let text *char = "fn f() int {\n\tlet y int = z\n}\n"
+    let src *u8 = text.to_type(*u8)
+    let src_len int = slen(text)
+    bind_src(&src, &src_len)
+    let buf [4096]u8
+    // 源行 "\tlet y int = z"：tab 后 13 字节到 z，字节列 15；显示列 3+13=16
+    let n int = fmt_diag(buf, 4096, 0, 2, 15, 1, "文案")
+    let want *char = "t.yh:2:15: 错误: 文案\n    1 | fn f() int {\n    2 |     let y int = z\n      |                  ^\n    3 | }\n"
+    $assert(text_eq(buf, n, want) == 1, "片段格式不符（tab 展开）")
+}
+
+test "片段：CJK 按显示宽 2 对齐" {
+    let path *char = "t.yh"
+    set_path_slot(&path)
+    let text *char = "fn main() int {\n    let s *char = \"中文\"\n}\n"
+    let src *u8 = text.to_type(*u8)
+    let src_len int = slen(text)
+    bind_src(&src, &src_len)
+    let buf [4096]u8
+    // 字符串字面量起于字节列 19，宽 8 字节（引号 2 + 中文 6），显示宽 6
+    let n int = fmt_diag(buf, 4096, 0, 2, 19, 8, "文案")
+    let want *char = "t.yh:2:19: 错误: 文案\n    1 | fn main() int {\n    2 |     let s *char = \"中文\"\n      |                   ~~~~~~\n    3 | }\n"
+    $assert(text_eq(buf, n, want) == 1, "片段格式不符（CJK 显示宽）")
+}
+
+test "片段：CRLF 不显示回车符" {
+    let path *char = "t.yh"
+    set_path_slot(&path)
+    let text *char = "fn f() int {\r\n    let y int = z\r\n}\r\n"
+    let src *u8 = text.to_type(*u8)
+    let src_len int = slen(text)
+    bind_src(&src, &src_len)
+    let buf [4096]u8
+    let n int = fmt_diag(buf, 4096, 0, 2, 17, 1, "文案")
+    let want *char = "t.yh:2:17: 错误: 文案\n    1 | fn f() int {\n    2 |     let y int = z\n      |                 ^\n    3 | }\n"
+    $assert(text_eq(buf, n, want) == 1, "片段格式不符（CRLF）")
+}
+
+test "回退：无源码时只输出头行" {
+    let path *char = "t.yh"
+    set_path_slot(&path)
+    let empty *u8 = 0.to_type(*u8)
+    let empty_len int = 0
+    bind_src(&empty, &empty_len)
+    let buf [4096]u8
+    let n int = fmt_diag(buf, 4096, 0, 2, 3, 1, "文案")
+    $assert(text_eq(buf, n, "t.yh:2:3: 错误: 文案\n") == 1, "无源码应退化为单行头")
+}
+
+test "回退：plain 与 line_bias 都只输出头行" {
+    let path *char = "t.yh"
+    set_path_slot(&path)
+    let text *char = "fn f() int {\n    let y int = z\n}\n"
+    let src *u8 = text.to_type(*u8)
+    let src_len int = slen(text)
+    bind_src(&src, &src_len)
+    let buf [4096]u8
+    diag().plain = 1
+    let n1 int = fmt_diag(buf, 4096, 0, 2, 17, 1, "文案")
+    $assert(text_eq(buf, n1, "t.yh:2:17: 错误: 文案\n") == 1, "plain 应只输出头行")
+    diag().plain = 0
+    diag().line_bias = 30
+    let n2 int = fmt_diag(buf, 4096, 0, 2, 17, 1, "文案")
+    $assert(text_eq(buf, n2, "t.yh:32:17: 错误: 文案\n") == 1, "line_bias 应只输出头行（行号已加偏移）")
+    diag().line_bias = 0
+}
+
+test "回退：行号越界只输出头行" {
+    let path *char = "t.yh"
+    set_path_slot(&path)
+    let text *char = "fn f() int {\n}\n"
+    let src *u8 = text.to_type(*u8)
+    let src_len int = slen(text)
+    bind_src(&src, &src_len)
+    let buf [4096]u8
+    let n int = fmt_diag(buf, 4096, 0, 99, 1, 1, "文案")
+    $assert(text_eq(buf, n, "t.yh:99:1: 错误: 文案\n") == 1, "行号越界应退化为单行头")
+}
+
+test "警告头用「警告」且不计错误数" {
+    let path *char = "t.yh"
+    set_path_slot(&path)
+    let text *char = "fn f() int {\n    let y int = z\n}\n"
+    let src *u8 = text.to_type(*u8)
+    let src_len int = slen(text)
+    bind_src(&src, &src_len)
+    diag().errors = 0
+    let buf [4096]u8
+    let n int = fmt_diag(buf, 4096, 1, 2, 17, 1, "文案")
+    let want *char = "t.yh:2:17: 警告: 文案\n    1 | fn f() int {\n    2 |     let y int = z\n      |                 ^\n    3 | }\n"
+    $assert(text_eq(buf, n, want) == 1, "警告片段格式不符")
+    $assert(diag().errors == 0, "警告不应增加错误数")
+}
+
+test "长行开窗：首部省略号且 caret 落在窗口内的相对列" {
+    let path *char = "t.yh"
+    set_path_slot(&path)
+    // 200 个 'a' 的一行；第 150 列的 'a' 出错
+    let text *char = "fn f() int {\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n}\n"
+    let src *u8 = text.to_type(*u8)
+    let src_len int = slen(text)
+    bind_src(&src, &src_len)
+    let buf [4096]u8
+    let n int = fmt_diag(buf, 4096, 0, 2, 150, 1, "文案")
+    // 窗口从第 90 个字符起（caret 左留 60 列），因此 caret 前有 60 个实字符 + 省略号
+    $assert(caret_pad(buf, n) == 61, "长行 caret 相对列应含省略号补偿")
+    $assert(newline_n(buf, n) == 5, "长行片段应为 5 行")
+}
+
+test "跨度越过行尾时夹到行尾" {
+    let path *char = "t.yh"
+    set_path_slot(&path)
+    let text *char = "fn f() int {\n    let y = z\n}\n"
+    let src *u8 = text.to_type(*u8)
+    let src_len int = slen(text)
+    bind_src(&src, &src_len)
+    let buf [4096]u8
+    // 从 z（第 13 列）起声明 99 字节宽，实际只剩 1 字节
+    let n int = fmt_diag(buf, 4096, 0, 2, 13, 99, "文案")
+    let want *char = "t.yh:2:13: 错误: 文案\n    1 | fn f() int {\n    2 |     let y = z\n      |             ^\n    3 | }\n"
+    $assert(text_eq(buf, n, want) == 1, "跨度应夹到行尾")
+}
+
+test "缓冲写满时仍以换行结束" {
+    let path *char = "t.yh"
+    set_path_slot(&path)
+    let text *char = "fn f() int {\n    let y int = z\n}\n"
+    let src *u8 = text.to_type(*u8)
+    let src_len int = slen(text)
+    bind_src(&src, &src_len)
+    let buf [40]u8
+    let n int = fmt_diag(buf, 40, 0, 2, 17, 1, "文案")
+    $assert(n <= 39, "不得写出缓冲容量")
+    $assert(buf[n - 1] == '\n', "截断后仍须以换行结束")
+}
+
+test "说明行：有片段时排在片段之后" {
+    let path *char = "t.yh"
+    set_path_slot(&path)
+    let text *char = "fn f() int {\n    let y int = z\n}\n"
+    let src *u8 = text.to_type(*u8)
+    let src_len int = slen(text)
+    bind_src(&src, &src_len)
+    let buf [4096]u8
+    let n int = fmt_diag_note(buf, 4096, 0, 2, 17, 1, "文案", "是否想用 `yoy`？")
+    let want *char = "t.yh:2:17: 错误: 文案\n    1 | fn f() int {\n    2 |     let y int = z\n      |                 ^\n    3 | }\n  说明: 是否想用 `yoy`？\n"
+    $assert(text_eq(buf, n, want) == 1, "说明行应在片段之后")
+}
+
+test "说明行：无片段时紧跟头行" {
+    let path *char = "t.yh"
+    set_path_slot(&path)
+    let text *char = "fn f() int {\n    let y int = z\n}\n"
+    let src *u8 = text.to_type(*u8)
+    let src_len int = slen(text)
+    bind_src(&src, &src_len)
+    diag().plain = 1
+    let buf [4096]u8
+    let n int = fmt_diag_note(buf, 4096, 0, 2, 17, 1, "文案", "期望 `int`，得到 `*char`")
+    let want *char = "t.yh:2:17: 错误: 文案\n  说明: 期望 `int`，得到 `*char`\n"
+    $assert(text_eq(buf, n, want) == 1, "无片段时说明行紧跟头行")
+    diag().plain = 0
+}
+
+test "说明行：空说明不输出" {
+    let path *char = "t.yh"
+    set_path_slot(&path)
+    let text *char = "fn f() int {\n    let y int = z\n}\n"
+    let src *u8 = text.to_type(*u8)
+    let src_len int = slen(text)
+    bind_src(&src, &src_len)
+    let buf [4096]u8
+    let n int = fmt_diag_note(buf, 4096, 0, 2, 17, 1, "文案", "")
+    $assert(text_eq(buf, n, "t.yh:2:17: 错误: 文案\n    1 | fn f() int {\n    2 |     let y int = z\n      |                 ^\n    3 | }\n") == 1, "空说明不应多出一行")
+}
+
+test "ICE 形式：版本已登记与未登记" {
+    let buf [768]u8
+    set_version("yh 9.9.9")
+    let n int = fmt_ice(buf, 768, "结构损坏")
+    $assert(text_eq(buf, n, "yh: 内部错误: 结构损坏（版本 yh 9.9.9，请提交 issue）\n") == 1, "ICE 行格式不符")
+    set_version(0.to_type(*char))
+    let n2 int = fmt_ice(buf, 768, "结构损坏")
+    $assert(text_eq(buf, n2, "yh: 内部错误: 结构损坏（版本 未知，请提交 issue）\n") == 1, "未登记版本时应写「未知」")
 }
