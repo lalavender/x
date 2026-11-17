@@ -4,6 +4,11 @@ rc 候选（prerelease）。种子链：0.0.15 → 0.0.16-rc.1（用 0.0.15 正�
 本版在 0.0.15 基础上合并三块工作：编译诊断全面 V 风格化（D0–D5 收尾）、
 「项目装载身份与链接对象去重」的四条结构性修复，以及仓库记录清理。
 
+> **未发布**：本 tag 的四端构建里 Windows 门红（`gen3-split-narrow-ports` /
+> `f4-ct-facts-mirror` 链接失败：`proj` 引用 libc `realpath`，而这两个夹具拷真实
+> 模块子集、不链接 yh 的 Windows shim），`publish` 被跳过、未产生 Release。
+> 修复后以 [0.0.16-rc.2](release-0.0.16-rc.2.md) 重新发布。
+
 ## 主要内容
 
 **1. 编译诊断 V 风格化（D0–D2 起于 2026-11-15，D3–D5 收尾于 2026-11-17）**
@@ -25,7 +30,7 @@ rc 候选（prerelease）。种子链：0.0.15 → 0.0.16-rc.1（用 0.0.15 正�
 
 **2. 项目装载身份与链接对象去重（四条结构性修复）**
 
-- **项目身份 = 真实绝对路径**：`proj.root_canon`（`realpath` → `canon`）+ `pj_load_root`，
+- **项目身份 = 真实绝对路径**：`build.pj_root_key`（`link.realpath` → `canon`）+ `pj_load_root`，
   `load_project` 入口与 `yh test` 的设根处统一规范化。「同一目录两种拼写 = 两个项目」
   消失——这正是 0.0.15 里 `ld.lld` 报 `duplicate symbol` 的根因。
 - **产物标签冲突诊断**：`proj.mod_tag_conflict` + `build.pj_check_mod_tags`，在
