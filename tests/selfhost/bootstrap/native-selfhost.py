@@ -215,18 +215,8 @@ def run(cmd, cwd=None, shim=False, seed_link=False):
     if seed_link and SHIM_DIR is not None and not SELFHOST_MANIFEST:
         linker = "clang" if sys.platform == "darwin" else "gcc"
         environment["YH_CC"] = str(SHIM_DIR / linker)
-    # 构建 compiler/ 时固定 YH_STDLIB：编译器按「项目根路径字节」判断项目是否
-    # 已装载——标准库自动发现给的是绝对路径（<bin>/../libs），而清单里的
-    # `[dependencies] libs = {path = "../libs"}` 是相对路径，同一个 libs 会被
-    # 登记成两个同名 yh_libs 项目，sys 模块的 .o 于是进链接两次（ld.lld 报
-    # duplicate symbol，Darwin 的 ld64 只是容忍）。用相对拼写让两条来源合并成
-    # 一个项目；基准是 cwd=<root>/compiler（与 justfile 的 build/dev 一致）。
-    # 编译器自身修好「root 规范化后判重」后应删除本项（见 docs/todo.md）。
-    if "build" in cmd and Path(cwd or ROOT).resolve() == COMPILER.resolve():
-        environment["YH_STDLIB"] = "../libs"
     return subprocess.run(cmd, cwd=cwd or ROOT, capture_output=True,
                           text=True, timeout=1800, env=environment)
-
 
 def build(cc, out, generation, expected, allowed=(), compatible=(),
           llvm_mode=False, seed_link=False):

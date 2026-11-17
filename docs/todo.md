@@ -19,15 +19,8 @@
 顺带修掉模块 ActionID 混入绝对路径（跨目录全局命中恢复）。`just test` 与
 `just selfhost-native` 绿（项目用例 127/127）。
 
-下列两条的前置条件已满足（0.0.16 正式版种子带本轮修复），可在下一轮落地：
-
-- [ ] **删除 `YH_STDLIB` 过渡补丁（P0，前置已满足：0.0.16 种子）**：`justfile` 的
-  `build`/`dev` 与 `tests/selfhost/bootstrap/native-selfhost.py` 的 `run()`
-  恢复原形态（见两处注释）；恢复前需在 Linux/Windows 上实测不再重复装载。
-- [ ] **回退 `argv` 模块拆分（P1，前置同上）**：`compiler/argvimpl/`
-  的 `argv.<平台>.yh` 并回 `compiler/cmd/yh/`、模块名恢复 `main`、实现去掉 `pub`，
-  `cmd/yh/argv.yh` 去掉 `import yh_argv_impl` 与限定名。拆分只为绕开 0.0.14 种子
-  「入口桩无条件 declare」的缺陷，新种子带上判重修复后不再需要。
+两条后续项（删 `YH_STDLIB` 过渡补丁、回退 `argv` 模块拆分）已于 2026-11-17
+随 0.0.16 种子落地，见 [finish.md](finish.md) 同日条目。
 
 ## 2026-11-12 内存安全加固（P0/P1，分析已交付）
 

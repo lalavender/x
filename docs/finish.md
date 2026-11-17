@@ -8,6 +8,23 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-17：随 0.0.16 种子落地两条收尾（删 `YH_STDLIB` 补丁、回退 argv 拆分）
+
+**结果**：`docs/todo.md` 装载身份节余下两条完成——构建脚本的 `YH_STDLIB=../libs`
+过渡补丁删除，`compiler/argvimpl/` 的 `yh_argv_impl` 拆分回退。两条都以 0.0.16
+正式版种子为前提（该种子带项目身份规范化与入口桩 declare 判重）。
+- 补丁删除：`justfile` 的 `build`/`dev` 与 `native-selfhost.py` 的 `run()` 恢复原形态。
+  验证：`rm -rf compiler/.build && YH_CACHE=off just build` 冷编 29 个模块通过、
+  `sys` 只出现一次、无 `duplicate symbol`——身份规范化让标准库自动发现的绝对路径与
+  清单里的 `../libs` 合并成同一个项目，补丁不再需要。
+- argv 回退：`compiler/cmd/yh/argv.{darwin,linux,windows}.yh` 恢复为 `module main`
+  （实现去掉 `pub`），`cmd/yh/argv.yh` 去掉 `import yh_argv_impl` 与限定名，
+  `compiler/argvimpl/` 删除。依据：入口桩按 `llvm_runtime_declared(unit, …)` 判重
+  （`backend/api.yh:406`），`GetCommandLineW`/`WideCharToMultiByte` 与 `main` 同模块
+  不再报 `invalid redefinition of function`；Windows 侧由 CI 四端门覆盖。
+- 门禁：`just build`（冷编）、`just test`、`just selfhost-native`（`project cases
+  127/127`）全绿。
+
 ## 2026-11-17：项目装载身份与链接对象去重——四条编译器修复落地
 
 **结果**：`docs/todo.md` 该节四条（身份规范化、产物标签冲突诊断、链接对象去重、

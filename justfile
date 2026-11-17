@@ -274,27 +274,16 @@ _prepare_windows_sdk:
 _prepare_windows_sdk:
 
 # build：强制冷编（清除 compiler/.build 与 BUILD_CACHE，从种子完整重编）。
-#
-# YH_STDLIB=../libs：让种子装载标准库时用的根路径，与清单里的
-# `[dependencies] libs = {path = "../libs"}` 保持**同一种拼写**。项目身份是
-# 「根路径字节」：标准库自动发现给的是绝对路径（<bin>/../libs），依赖给的是
-# 相对路径，于是同一个 libs 被登记成两个同名 yh_libs 项目，各自的 sys 模块
-# 落进同一个 yh_libs-sys.o，链接时该对象被加入两次——ld.lld 报
-# duplicate symbol，Darwin 的 ld64 只是容忍（所以只有 Linux/Windows 红）。
-# 相对路径的基准是 seed-build.py 的工作目录（<root>/compiler），故写 ../libs。
 build: _prepare_windows_sdk
     rm -rf "{{ root }}/compiler/.build"
     @if [ -n "{{ build_cache }}" ]; then rm -rf "{{ build_cache }}"; fi
-    YH_STDLIB=../libs YH_BUILD_CACHE="{{ build_cache }}" {{ py }} "{{ root }}/tools/seed-build.py" --compiler "{{ seed_abs }}" --project "{{ root }}/compiler" --output "{{ yh }}" {{ llvm_host_flags }}
+    YH_BUILD_CACHE="{{ build_cache }}" {{ py }} "{{ root }}/tools/seed-build.py" --compiler "{{ seed_abs }}" --project "{{ root }}/compiler" --output "{{ yh }}" {{ llvm_host_flags }}
 
 # dev：开发迭代用增量构建。与 build 的差别是不删除 .build / BUILD_CACHE，
 # 让编译器自己的对象/IR 缓存命中未变模块；只用于本地迭代，
 # 不用于种子候选与固定点验收（那些必须冷编）。
-# dev：开发迭代用增量构建。与 build 的差别是不删除 .build / BUILD_CACHE，
-# 让编译器自己的对象/IR 缓存命中未变模块；只用于本地迭代，
-# 不用于种子候选与固定点验收（那些必须冷编）。YH_STDLIB 的来由见 build 注释。
 dev: _prepare_windows_sdk
-    YH_STDLIB=../libs YH_BUILD_CACHE="{{ build_cache }}" {{ py }} "{{ root }}/tools/seed-build.py" --compiler "{{ seed_abs }}" --project "{{ root }}/compiler" --output "{{ yh }}" {{ llvm_host_flags }}
+    YH_BUILD_CACHE="{{ build_cache }}" {{ py }} "{{ root }}/tools/seed-build.py" --compiler "{{ seed_abs }}" --project "{{ root }}/compiler" --output "{{ yh }}" {{ llvm_host_flags }}
 
 # fetch-seed：从最新 GitHub Release 下载当前平台种子（写入 bin/...）。
 # 私有仓库需要 GITHUB_REPOSITORY 与 GH_TOKEN/GITHUB_TOKEN；
