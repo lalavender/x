@@ -9,30 +9,21 @@
 
 - 添加string类型
 - 添加接口功能
-- project.toml 添加[env]
 
-## 2026-11-15 项目装载身份与链接对象去重（P0，进行中）
+## 2026-11-15 项目装载身份与链接对象去重（四条结构性修复已交付）
 
-调研与证据：[yh_libs 重复装载修复](01-finished/yh-libs-重复装载修复-2026-11-15.md)。
-已用 `justfile` 的 `YH_STDLIB=../libs` 让本次发布不在 Linux/Windows 上重复装载；
-下面四条是**编译器自身**的结构性修复，新种子生效后逐条落地并删除该构建脚本补丁。
+交付记录：[项目装载身份与链接对象去重](01-finished/yh-项目装载身份与链接对象去重-2026-11-17.md)。
+已落地：项目身份规范化（`realpath` + `canon`，`pj_load_root`/`load_project` 统一身份）、
+「同 tag 不同项目」的装载期诊断（`pj_check_mod_tags`）、链接对象行去重
+（`mb_row_dup` + `YH_LINK_TRACE` 说明）、Linux 目录枚举 `DT_UNKNOWN` 兜底；
+顺带修掉模块 ActionID 混入绝对路径（跨目录全局命中恢复）。`just test` 与
+`just selfhost-native` 绿（项目用例 127/127）。
 
-- [ ] **项目身份规范化（P0）**：`load_project` / `find_project_root` 在判重前把 root
-  规范成绝对路径（canon + 绝对化），消除「同一目录两种拼写 = 两个项目」。现状见
-  `compiler/build/api.yh:1369`、`compiler/build/proj/api.yh:1494`。
-- [ ] **模块产物键加项目身份校验（P0）**：两个同名项目会产出同 tag、同符号后缀、
-  同 `.o` 路径。落地 `proj.mod_tag`/`pj_mod_suffix` 之前加「同 tag 不同项目」的诊断，
-  让这类结构错误在装载期就报出来，而不是留给链接器。
-- [ ] **链接参数对象去重（P1）**：`mb_link_args` 按解析后的对象路径去重（`p.paths`
-  行内已有完整路径，可直接比对），重复时给一条 `YH_LINK_TRACE` 可见的说明。
-- [ ] **Linux 目录枚举对 `DT_UNKNOWN` 兜底（P1）**：`project_dir.linux.x64.yh` /
-  `project_dir.linux.arm64.yh` 只用 `d_type == 4` 判目录，`DT_UNKNOWN`（部分 overlayfs）
-  会把目录当文件跳过；补 `openat(O_DIRECTORY|O_NOFOLLOW)` 探测，与 darwin 的
-  `getattrlistbulk` 语义对齐（x64 `O_DIRECTORY|O_NOFOLLOW = 0x30000`，
-  arm64 `0xC000`）。
-- [ ] **删除 `YH_STDLIB` 过渡补丁（P0，依赖上面第一条）**：`justfile` 的
+下列两条**依赖带本轮修复的新种子**，本轮不动：
+
+- [ ] **删除 `YH_STDLIB` 过渡补丁（P0，依赖新种子）**：`justfile` 的
   `build`/`dev` 与 `tests/selfhost/bootstrap/native-selfhost.py` 的 `run()`
-  恢复原形态（见两处注释）。
+  恢复原形态（见两处注释）；恢复前需在 Linux/Windows 上实测不再重复装载。
 - [ ] **回退 `argv` 模块拆分（P1，依赖上一条同批种子）**：`compiler/argvimpl/`
   的 `argv.<平台>.yh` 并回 `compiler/cmd/yh/`、模块名恢复 `main`、实现去掉 `pub`，
   `cmd/yh/argv.yh` 去掉 `import yh_argv_impl` 与限定名。拆分只为绕开 0.0.14 种子
@@ -81,21 +72,19 @@
 - [ ] L3：`Chan`（有/无缓冲、close、try_*）+ 库内压力测试。
 - [ ] L4（可选）：RwLock/Semaphore/Pool/原子/TSan。
 
-## 2026-11-11 编译诊断 V 风格源片段（P0，规划）
+## 2026-11-11 编译诊断 V 风格源片段（D0–D5 已交付，剩两项余工）
 
-方案：[yh-V风格编译诊断实施方案](02-plan/yh-V风格编译诊断实施方案-2026-11-11.md)。
-目标：`path:line:col: 错误:` 后输出上下各 2 行源码 + `~~~` 精确下划线 +
-可选 `说明:`；同时修正当前 142 个带位置失败用例中 65 例列号落在行尾的问题。
+规范：[yh-编译诊断规范](03-design/yh-编译诊断规范.md)；交付记录见
+[D0–D2](01-finished/yh-V风格诊断-D0-D2-2026-11-15.md) 与
+[D3–D5](01-finished/yh-V风格诊断-D3-D4-D5-2026-11-17.md)。
+现状：头行 + 上下各 2 行源码 + `~~~`/`^` 精确下划线 + 可选 `说明:` 行；147 例
+失败语料全部带片段与 caret（列号越界 0、无位置头 0）；ICE 与路径级诊断统一走
+`errors`，仅链接器原始输出保留直写；颜色只在 TTY（默认无）。
 
-- [ ] D0：`tests/diagnostics` 骨架 + 失败语料基线（片段/caret/行尾列号统计）。
-- [ ] D1：`errors` 源槽 + `err_span`/`fmt_diag` 渲染器；`err_tok` 带 token 宽度；
-      UTF-8/tab/CRLF/长行/无源码回退单测。
-- [ ] D2：位置审计（`token.err_range`/`index_at_offset` + `check/diag.file_span`），
-      行尾列号降到 ≤5/142；跨文件模块片段测试。
-- [ ] D3：旁路收编（含原条目「诊断直写 stderr 约 20 处」）；`yh test`/构建诊断
-      统一走 `errors`，补 ICE 形式。
-- [ ] D4：`说明:` 行、期望/实际类型名、未声明名字/类型的「是否想用」建议。
-- [ ] D5（待定）：TTY 颜色、多错误恢复、多行跨度；不阻塞 D1–D4。
+- [ ] D5 剩余（另立方案）：错误恢复后的多错误上报（需 parse/check 错误恢复与上限）、
+      多行跨度逐行下划线。
+- [ ] 余项：`列号 = 行宽` 的 6 例中 2 例仍落在调用右括号 `)`（`28` C ABI 回调实参、
+      `88` 编译期实参数量）：需在各自站点把构造首 token 传进去。
 
 ## 2026-11-11 编译期符号依赖解析（P0，规划）
 
@@ -379,7 +368,7 @@ rc tag 发 prerelease 并带四端种子，正式 tag 必须落在 `llvm` 上。
 两处（`compiler/README.md`、`tools/compiler-performance.py`）已改为读清单。
 
 - [ ] **V2 版本号单一真源（P2）**：`compiler/project.toml` 与
-  `compiler/cmd/yh/cmd_base.yh` 的 `YH_VERSION_TEXT` 仍是两处手写（发布前由 CI 校验
+  `compiler/cmd/yh/api.yh` 的 `YH_VERSION_TEXT` 仍是两处手写（发布前由 CI 校验
   一致）。可选：构建期从 project.toml 生成常量，或反过来让 `--version` 读清单。
 - [ ] **V4 分支与保护（P1）**：`<ver>-rc`/`<ver>-release` 已删除（2026-11-06），远端
   仍留遗留分支 `arm64`、`main`、`ci/github-actions`（都不是主线，推送仍触发分支门）；
@@ -724,18 +713,12 @@ prelude `printf`（H.I3 的按需扩展仍独立）。
     实参 token（使用例的位置看起来像 printf 不支持）。原因：
     `checked_lower_function` 在 `status == 1 && (ret != ir.IR_TY_VOID ||
     aggregate_return != 0)` 时返回 -2，但返回前没有设置 `l.reason` 与
-    `l.last_token`（`compiler/ast/module_snapshot_lower.yh` 约 3698 行），
-    沿用默认文案。复现：`examples/ex1.yh`（缺 `return 0`；补上即通过）。
+    `l.last_token`（`compiler/lower/module_snapshot_lower.yh:485`，旧记的
+    `ast/module_snapshot_lower.yh` 约 3698 行已随模块拆分失效），
+    沿用默认文案。复现：`fn main() int { printf("hi\n") }`（缺 `return 0`；补上即通过）。
     期望：报「非 void 函数末尾缺少 return」并把位置指到函数体收尾；先加
     `tests/yh-run/fail/` 用例（用 `// fail-contains:` 锁新文案），再改文案，
-    跑 `make test` + `make selfhost-native`。**附**：`examples/ex1.yh` 是照搬
-    C 的 hello world，已补 `return 0`（已提交）。
-  - [ ] **I4-2 极端十进制浮点字面量不精确**（2026-10-23 math 探针）：
-    `1e300`、`1e-300`、`1.7976931348623157e308` 与正确位型不等，
-    `2.2250738585072014e-308` 是 DBL_MIN+2 ULP，`5e-324` 直接变 0；
-    π、0.1、1.5 精确。影响所有数值代码，纯 yh math 只能用位模式构造常量。
-    修复：前端十进制→f64 改为正确舍入（Eisel-Lemire/strtod 路线），补
-    `tests/yh-run/` 极端指数字面量用例，先红后绿。
+    跑 `make test` + `make selfhost-native`。
   - [ ] **I4-3 `pub const f64` 跨模块导出损坏**：`.s.i` 把浮点位型当整数写出，
     导入侧报「浮点与整数之间需要 .to_type 显式转换」。修复：
     `parse_global_init` 保存浮点初始化式文本，`iface_emit_const_value` 增加
@@ -745,13 +728,13 @@ prelude `printf`（H.I3 的按需扩展仍独立）。
     return !b }` 报「整数不能隐式转为 bool」；条件位置正常。修复：
     `sem_unary` 对 bool 保留 `TY_BOOL`（或写进语义边界），补 run/fail 用例。
   - [ ] **I4-5 `@[inline]` 无后端效果、IR 内联器未接线**：`F_INLINE` 只在
-    parse/iface 使用，`compiler/ir/ssa_inline.yh` 没有调用点，跨模块也无 LTO。
+    parse/iface 使用；IR 内联器（`ir/ssa_inline.yh`）已随 NP1/NP2 删除，跨模块也无 LTO。
     影响纯 yh math 的小函数与 O0 性能。修复：把 `@[inline]` 降为 LLVM
     `alwaysinline`，或让模块接口携带可内联体；再决定是否启用 IR 内联器。
-  - [ ] **I4-6 能力文档漂移**：`compiler/README.md` 的浮点参数边界与
-    `compiler/gen/target.yh` 的 emit_arm64 说明仍指旧后端；`libs/libc/README.md`
-    称函数指针不支持（LLVM ABI 已支持）；`AGENTS.md` 的 x64 种子说明与
-    Makefile 现状不一致。按实际行为刷新或标为历史。
+  - [ ] **I4-6 能力文档漂移**：`compiler/README.md` 的浮点参数边界（d0–d7 超 8 个未实现）
+    仍按旧 ARM64 后端描述；`libs/libc/README.md` 称函数指针不支持（LLVM ABI 已支持）。
+    按实际行为刷新或标为历史。（旧记另两处已随文件删除失效：`compiler/gen/target.yh`
+    的 emit_arm64 说明、`Makefile` 与 AGENTS.md 的 x64 种子说明。）
 
 ## 后续任务：线程池与性能（LA5）
 

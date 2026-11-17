@@ -8,7 +8,119 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-17：项目装载身份与链接对象去重——四条编译器修复落地
+
+**结果**：`docs/todo.md` 该节四条（身份规范化、产物标签冲突诊断、链接对象去重、
+Linux `DT_UNKNOWN` 兜底）全部交付，只剩两条依赖新种子的后续项。记录：
+[01-finished/yh-项目装载身份与链接对象去重-2026-11-17.md](01-finished/yh-项目装载身份与链接对象去重-2026-11-17.md)。
+- 身份 = 真实绝对路径：`proj.root_canon`（`realpath` → 既有 `canon`）+
+  `build.pj_load_root`；`load_project` 入口与 `yh test` 的设根处统一走它，
+  「同一目录两种拼写 = 两个项目」消失。实测：`depspell` 夹具（`../lib` 与符号链接
+  `../liblink`）新编译器 `[编译] core` 1 次、`yh run` 退出 14；旧编译器同一配置下
+  报 `内部错误：表达式 AST 绑定或常量事实无效`（另一拼写先出现 2 次 `core` 再链接失败）。
+- 产物标签冲突：`proj.mod_tag_conflict` + `build.pj_check_mod_tags`（`pj_topo` 首行，
+  早于任何 tag 进缓存键/对象路径）。`duptag` 夹具报
+  `模块产物标签冲突: dupproj-core（…lib / …app）`；旧编译器在 Darwin 上静默通过。
+- 链接对象去重：`link.mb_row_dup` 在两处 argv 装配点跳过重复路径，
+  `YH_LINK_TRACE` 非空时给「重复链接对象已去重」说明（注意 `env_fetch` 缺失时
+  也返回 0，门判 `len == 0`）。
+- Linux 目录枚举：两个平台文件在 `d_type == 0` 时用
+  `openat(O_DIRECTORY|O_NOFOLLOW)` 探测（x64 `0x30000`、arm64 `0xC000`）。
+- 顺带修掉：模块 ActionID 混入模块目录的**绝对**路径，导致 C4「同项目换目录仍命中」
+  失效（`llvm-global-cache.py` 红）；改混 `proj.mod_dir_rel` 的项目相对目录后恢复。
+- 门禁：`just dev`、`just test`、`just selfhost-native` 全绿（`project cases 127/127`，
+  含新增 `u8-dep-same-dir-two-spellings`、`u8-dup-project-tag`）；`../yh test link` 6 例、
+  `../yh test proj` 6 例（新增 `root_canon`/`mod_tag_conflict`/`mb_row_dup` 用例）；
+  两个 Linux 目标各编到 30 个模块（仅本机缺 Linux 闭包时停在链接）；`--emit-asm`
+  抽样 5 例与改动前逐字节相同。
+- 文档同步：模块与项目管理设计（§5 目录枚举 `DT_UNKNOWN`、§7 身份与冲突诊断）、
+  缓存设计 §4.2（模块键混**项目相对**目录）、编译流程 §3（装载步骤含 `pj_load_root`
+  与 `root_canon`）；`find_project_root` 注释写明调用方必须传规范身份。
+
+## 2026-11-17：记录清理——`todo` 已交付项与已完成方案文档下线
+
+**结果**：`docs/todo.md` 删掉 3 处已交付记录（1 条散项、1 条 I4 子项、1 处过期路径），
+`docs/02-plan/` 下线 7 份「自述已完成 + 有 `01-finished/` 交付记录 + 全仓库零引用」
+的方案文档；删除前逐条取证，删除后按文件名 `rg` 复扫 0 命中（无死链）。
+
+- `project.toml` 的 `[env]`：清单侧 `PEnv`/`pproj_env_*` 在 `build/proj/api.yh`，
+  由 `build/project_index.yh` 解析、`link/link_inputs.yh` 消费 `[link]` 里的 `${NAME}`；
+  契约见 `03-design/yh-project.toml-清单设计.md` §10，单测 `build/proj/api.test.yh`。
+- I4-2「极端十进制浮点字面量不精确」：前端十进制 → binary64 已走宿主 `strtod`
+  （`check/sem_value.yh` 的 `sem_parse_float_bits`：去 `_`、补 NUL、交 strtod 后取位型），
+  回归 `tests/yh-run/run/float-literal-rounding.yh` 钉住 `1.5e300`/`1e300`/`1e-300`/
+  `DBL_MAX`/`5e-324`/`1e309`/`1e-400`/`2.2250738585072014e-308` 的位型（实测 13 行全等）。
+- 方案文档下线：`yh-编译期typed-函数内if实施方案`、`yh-编译期typed聚合形参实施方案`、
+  `yh-编译期typed聚合返回实施方案`、`yh-编译期临时聚合下标读取实施方案`、
+  `yh-编译期枚举values首片方案`、`yh-编译期结构体数组for-in值语义实施方案`、
+  `yh-标准库首期实施方案`；对应交付记录见 `01-finished/` 同主题 2026-10-05/06 条目
+  与 `yh-标准库首期IO-2026-10-02.md`。
+- 复核后**保留**（任务仍开）：`添加string类型`（无 `TY_STRING`）、`添加接口功能`
+  （IF1–IF5 全开）、类型推导 P0（`let a i32 = 2147483648` 仍静默截断为
+  `-2147483648`，根因仍是 `vk_can_assign` 的 `dst == src` 短路先于字面量范围检查；
+  `?:` 两支仍未合流）、`yh-gen职责拆分实施方案`（F2/F4 待做）。
+- 范围说明：另有 40 余份已完成方案文档仍被 `01-finished/` 的历史交付记录引用，
+  删文档需同步改写那些记录里的链接，本轮不动，留作清理的下一批。
+
 ## 2026-11-15：定位并修掉「`libs` 重复装载」——Linux/Windows 种子构建恢复
+
+**结果**：`yh_libs` 在同一构建里被装载两次（`sys` 出现两遍）导致 Linux/Windows
+`duplicate symbol`、四端只有 darwin 绿；已给出判重修复与 `justfile` 的
+`YH_STDLIB=../libs` 过渡补丁，发布不再复现。记录：
+[01-finished/yh-libs-重复装载修复-2026-11-15.md](01-finished/yh-libs-重复装载修复-2026-11-15.md)；
+编译器自身的结构性修复（身份规范化、产物键校验、对象去重）留在 `todo.md` 同节。
+
+## 2026-11-17：编译诊断收尾（D3–D5）——旁路收编、说明行、TTY 颜色
+
+**结果**：所有用户可见诊断统一走 `errors`；片段之后可带一条 `说明:` 建议；颜色只在
+TTY 打开。147 例失败语料 **全部**带片段与 caret（无位置头 0），`col == 行宽` 降到 6
+（其中 2 例是调用右括号，余项）。记录：
+[01-finished/yh-V风格诊断-D3-D4-D5-2026-11-17.md](01-finished/yh-V风格诊断-D3-D4-D5-2026-11-17.md)。
+- 余项收敛：`sizeof` 诊断落 `sizeof` 关键字（`sem_sizeof_at`）；编译期诊断误用落
+  `$compile_error`（`fc().c_ct_diag_first`）；编译期常量诊断落名字 token
+  （`sem_ident_val(idx, r, ident_tok)`）；`12-wraps-too-many` 从纯 `yh:` 变为带位置。
+- D3：`errors` 新增 `err_path_pos`（路径级，不画片段）与 `ice`/`fmt_ice`（内部错误，
+  带版本与 issue 指引）；`testkit`、`build/*`（module 声明、双模块冲突、导入环、
+  清单/导入诊断、LLVM 桥/首片、lowering 失败）、`check` 接口头全部改走 `errors`。
+  剩余直写只剩 `compiler/link/*`（链接器原文，规范 §6 明确不映射）。
+- D4：`说明:` 行（片段之后；无片段紧跟头行；空说明不输出）+ `table.vk_help`（18 个
+  高频值内核码）+ `check.ty_display`（递归类型显示）+ `sem_can_assign` 的
+  「期望 `X`，得到 `Y`」+ 未声明名字/未知类型的「是否想用」（有界编辑距离 ≤2）。
+  头行文案零变化，`fail-contains` 无需改。
+- D5（仅颜色）：`YH_DIAG_COLOR=always|never` > `NO_COLOR` > `isatty(2)`；只给
+  `错误`/`警告` 与 caret 上色；管道永远无色。多错误恢复与多行跨度仍另立方案。
+- 观测：`check.py` 新增 `tail_paren` 指标与 `--max-tail-paren` 硬门、`--color-check`
+  颜色三态、项目夹具 `command: test`（`yh test` 也要带片段）。
+- 门禁：`just build`、`just test`、`just selfhost-native` 全绿；`errors` 内建测试
+  20 例、诊断夹具 9 例、`--emit-asm` 抽样 6 例逐字节相同；与改动前编译器差分：
+  路径/文案 0 例变化、位置修正 95 例、新增说明行 15 例。
+
+## 2026-11-15：编译诊断 V 风格化（D0–D2）——片段 + 精确 caret 落地
+
+**结果**：`path:line:col: 错误:` 之后开始输出上下各 2 行源码与 `~~~`/`^` 精确
+下划线；147 例失败语料里「列号越出行尾」从 68 降到 0，片段覆盖 146/147。
+记录：[01-finished/yh-V风格诊断-D0-D2-2026-11-15.md](01-finished/yh-V风格诊断-D0-D2-2026-11-15.md)；
+契约：[03-design/yh-编译诊断规范.md](03-design/yh-编译诊断规范.md)。
+- `errors`：新增源槽（跟随 `src_ctx` 换指针）、`err_span`/`warn_span`、
+  `DiagCtx.plain`；`fmt_diag` 与旧单行头共用同一段拼装与 2047 字节截断点，
+  `YH_DIAG_PLAIN=1` 回退逐字节不变（147/147 头行一致）。
+- 渲染：行号栏最小宽 5、tab→4 空格、CRLF 去 `\r`、CJK 显示宽 2、长行围绕 caret
+  开窗补 `…`、4 KiB 缓冲写满仍以换行结束；16 个内建测试逐字节钉住这些规则。
+- `token`：`err_at`/`err_range`/`index_at_offset`/`real_index`。`real_index` 让诊断
+  **不落在合成 token**（换行补的隐式 `;`、EOF）上——旧「caret 在行尾 +1」的主因。
+- `check/diag.file_span`：跨文件诊断切路径 + 源码 + token 快照，报完恢复；
+  `convert.yh` 迁移后删除。`errors.bind_source_path` + `source_path_matches`
+  保证「路径与源码不同源时不给片段」，修掉模块构建里「`extra.yh` 行号配
+  `main.yh` 源码」的真实缺陷。
+- 位置审计：值内核错误取 `fc().c_expr_first`（`parse_expr_iso` 记录），编译期引擎
+  错误取 `ct_pos_*` 登记的 `$f(...)` 调用 token；函数/枚举/字段/类型/返回语句/
+  `$if`/`$for`/`len`/`sizeof`/重定义/依赖环等约 30 处调用点改为报构造首 token。
+- 观测工具：`tests/diagnostics/`（`check.py` + 6 个夹具 + 多文件项目夹具 +
+  自动生成的 `baseline.md`），不接入 `just test` 阻断链。
+- 门禁：`just build`、`just test`、`just selfhost-native`（project cases 125/125）
+  全绿；`--emit-asm` 抽样 6 例与改动前逐字节相同。
+- 未做（已进 `docs/todo.md`）：D3 旁路收编/ICE、D4 说明行与建议、D5 颜色与多错误；
+  另有 9 例「列号 = 行宽」待收敛（其中 5 例 caret 落在调用右括号 `)` 上）。
 
 **结果**：`duplicate symbol: is_error__yh_libs__sys_$yhllvmv1` 的根因找到并修掉，
 修法在本次发布即可生效（改构建脚本，改编译器自身逻辑对本次无效）。
