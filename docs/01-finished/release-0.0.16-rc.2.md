@@ -79,6 +79,19 @@ Windows shim），`publish` 未执行、未产生 Release。
 四端（linux-x64 / linux-arm64 / darwin-arm64 / windows-x64）由 `release.yml` 在 tag
 推送后构建，结果与本 tag 的资产清单以 Actions 日志与 Release 页为准。
 
+## 发布验收（用发布出去的二进制）
+
+- **四端**（`release.yml` run `44090325201`）：`linux-x64` / `linux-arm64` /
+  `darwin-arm64` / `windows-x64` 全部 success，`publish` 成功；Release 为
+  prerelease，8 个资产（四端 `yh-<tag>-<平台>.tar.gz` 与对应 `.sha256`）。
+  备注：`darwin-arm64` 首次排队约 15 分钟未拿到 runner 被取消（未进入任何 step），
+  `gh run rerun --failed` 后通过——与代码无关。`windows-x64` 本次绿，rc.1 的
+  `gen3-split-narrow-ports` / `f4-ct-facts-mirror` 链接失败已消除。
+- **发布二进制验收**（本机 darwin-arm64）：`rm -rf bin && just fetch-seed` 取到
+  `0.0.16-rc.2`（sha256 `bccbe79a…`，`--version` = `yh 0.0.16-rc.2`）；
+  随后 `just`（dev）/ `just test` / `just selfhost-native`（两代固定点）三门全绿，
+  `project cases 127/127`。
+
 ## 已知限制
 
 - Linux `DT_UNKNOWN` 分支只在 CI 的 Linux runner 上真实执行（开发机为 Darwin）。
