@@ -1343,43 +1343,6 @@ pub fn canon(base_off int, base_len int, rel *char,
     return 0
 }
 
-// POSIX realpath 的 C ABI 声明：把路径解析成真实绝对路径。
-// 语义：相对路径按当前工作目录解析、消除符号链接、折叠 "."/".." 与多余斜杠；
-// 路径不存在时返回 0（调用方据此回退）。Windows 端由
-// compiler/llvm/windows_shim.c 提供等价实现（GetFullPathNameA）。
-@[extern] fn realpath(path *char, resolved *char) *char
-
-// root_canon：把项目根规范成**真实绝对路径**，作为项目身份。
-//
-// 背景（2026-11-15 的 libs 重复装载）：项目身份原先按根路径字节比较，于是
-// 「同一个目录的两种拼写」被登记成两个项目——标准库自动发现给的是绝对路径，
-// `[dependencies] libs = {path = "../libs"}` 给的是相对路径，同一棵 libs 树被
-// 完整扫描两次；两个项目又各自读到 `project.name = "yh_libs"`，模块产物标签与
-// 符号后缀完全相同，同一个 `.o` 被加入链接两次（ld.lld 报 duplicate symbol，
-// Darwin 的 ld64 只是容忍）。
-//
-// 做法：realpath（绝对化 + 消 symlink）→ canon（统一 '/'、折叠 "."/".."、合并
-// 多余斜杠）→ 入池。realpath 失败（路径不存在）时保留原始拼写，让后续
-// 「找不到 project.toml」照旧报错。成功返回 0；out_off/out_len 给池内规范路径。
-pub fn root_canon(off int, plen int, out_off *int, out_len *int) int {
-    let real [4096]u8
-    if (realpath(pool_str(off), (&real[0]).to_type(*char)) == 0) {
-        out_off[0] = off
-        out_len[0] = plen
-        return 0
-    }
-    let n int = 0
-    for n < 4095 && real[n] != 0 {
-        n += 1
-    }
-    if (n <= 0 || n >= 1023) {
-        out_off[0] = off
-        out_len[0] = plen
-        return 0
-    }
-    return canon(0, 0, (&real[0]).to_type(*char), out_off, out_len)
-}
-
 // np_eq：两段池内字节是否完全相同（长度 + 逐字节）。
 // 用于比较不保证 NUL 结尾的身份串（模块产物标签、项目根）。
 pub fn np_eq(a_off int, a_len int, b_off int, b_len int) int {

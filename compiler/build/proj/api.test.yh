@@ -94,46 +94,30 @@ test "项目子表：依赖/C 输入/链接组/环境变量独立扩容" {
 }
 
 // ---------------------------------------------------------------------------
-// 项目身份规范化（2026-11-15 的 libs 重复装载）
+// 项目身份的**词法**规范化（`canon`）
 //
-// 身份 = 真实绝对路径：`realpath` 绝对化并消符号链接，再由 `canon` 统一分隔符、
-// 折叠 "."/".."。下面的用例钉住三个不变量：
-//   * 同一目录的「相对拼写」与「绝对拼写」得到同一份身份；
-//   * 身份总是绝对路径（以 '/' 开头）；
-//   * 路径不存在时保留原拼写，让后续「找不到 project.toml」照旧报错。
+// 项目身份 = `build.pj_root_key` = `link.realpath`（绝对化 + 消符号链接）+
+// 本模块的 `canon`（统一 '/'、折叠 "."/".."、合并多余斜杠）。realpath 那半段由
+// 夹具 `tests/modules/projects/depspell` 端到端覆盖（同一目录的两种拼写只装载
+// 一次、`[编译] core` 只出现一次）；这里钉住 canon 这半段的折叠规则。
 // ---------------------------------------------------------------------------
-test "root_canon：相对/绝对拼写规范成同一身份" {
+test "canon：折叠 ./.. 与多余斜杠、保留绝对量" {
     init()
-    let abs [4096]u8
-    $assert(realpath(".", (&abs[0]).to_type(*char)) != 0, "realpath(.) 失败")
-    let an int = 0
-    for an < 4095 && abs[an] != 0 {
-        an += 1
-    }
-    $assert(an > 0, "realpath 返回空路径")
-    let a_off int = support.tml_intern_str(&abs[0], 0, an)
-    $assert(a_off >= 0, "绝对路径入池")
-    let d_off int = support.tml_intern_str(".".to_type(*u8), 0, 1)
-    $assert(d_off >= 0, "相对路径入池")
-    let k1 int = 0
+    let o1 int = 0
     let l1 int = 0
-    let k2 int = 0
+    $assert(canon(0, 0, "./x/../y", &o1, &l1) == 0, "折叠相对路径")
+    $assert(l1 == 1 && support.pool_ctx().data[o1] == 'y', "相对路径折叠到 y")
+    let o2 int = 0
     let l2 int = 0
-    $assert(root_canon(a_off, an, &k1, &l1) == 0, "规范绝对路径")
-    $assert(root_canon(d_off, 1, &k2, &l2) == 0, "规范相对路径")
-    $assert(np_eq(k1, l1, k2, l2) == 1, "同一目录的两种拼写必须同身份")
-    $assert(l1 > 0 && support.pool_ctx().data[k1] == '/', "身份必须是绝对路径")
-}
-
-test "root_canon：不存在的路径保留原拼写" {
-    init()
-    let off int = support.tml_intern_str("no/such/project".to_type(*u8), 0, 15)
-    $assert(off >= 0, "路径入池")
-    let k int = 0
-    let l int = 0
-    $assert(root_canon(off, 15, &k, &l) == 0, "回退也必须成功")
-    $assert(k == off, "realpath 失败时保留原偏移")
-    $assert(l == 15, "realpath 失败时保留原长度")
+    $assert(canon(0, 0, "/a//b/../c", &o2, &l2) == 0, "折叠绝对路径")
+    $assert(l2 == 4 && support.pool_ctx().data[o2] == '/'
+        && support.pool_ctx().data[o2 + 1] == 'a'
+        && support.pool_ctx().data[o2 + 2] == '/'
+        && support.pool_ctx().data[o2 + 3] == 'c', "绝对路径折叠为 /a/c")
+    let o3 int = 0
+    let l3 int = 0
+    $assert(canon(0, 0, ".", &o3, &l3) == 0, "折叠当前目录")
+    $assert(l3 == 1 && support.pool_ctx().data[o3] == '.', "当前目录折叠为 .")
 }
 
 // ---------------------------------------------------------------------------

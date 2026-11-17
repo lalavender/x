@@ -118,7 +118,7 @@ api_build(req)
    - `<exe_dir>/../libs`；
    - `<exe_dir>/../share/yh/libs`。
 5. `pro_find_root(0, &len)`：从当前目录向上找 `project.toml`。
-6. `pj_load_root(root, len)`：`proj.root_canon` 把根规范成**真实绝对路径**
+6. `pj_load_root(root, len)`：`build.pj_root_key` 把根规范成**真实绝对路径**
    （`realpath` + `canon`）→ `proj.set_root_project` → `load_project`。
 7. `load_project(root, len)`：递归装载项目。
 
@@ -126,7 +126,7 @@ api_build(req)
 
 `compiler/build/api.yh`：
 
-0. `proj.root_canon(off, len, &koff, &klen)`：身份规范化——绝对化、消符号链接、
+0. `build.pj_root_key(off, len, &koff, &klen)`（`link.realpath` + `proj.canon`）：绝对化、消符号链接、
    折叠 `.`/`..`、统一分隔符；`realpath` 失败（路径不存在）保留原拼写，让后续
    「找不到 project.toml」照旧报错。此后函数体内一律使用规范身份。
 1. `proj.find_project_root()`：重复装载/依赖环检测（按规范身份逐字节比较）。

@@ -1366,6 +1366,38 @@ pub fn mb_emit_module(mod_off int, mod_len int, prov_off int, prov_len int,
 // mb_worker_parent_set：子进程入口记录父 pid（fork 后、开始编译前调用一次）。
 pub fn mb_worker_parent_set() void { mb_worker_parent = getppid() }
 
+// pj_root_key：把项目根规范成**真实绝对路径**并作为项目身份返回。
+//
+// 背景（2026-11-15 的 libs 重复装载）：项目身份原先按根路径字节比较，「同一个
+// 目录的两种拼写」被登记成两个项目——标准库自动发现给绝对路径、清单依赖给相对
+// 路径，同一棵 libs 树扫描两次；两个项目读到同一个 project.name，模块产物标签与
+// 符号后缀相同，同一个 `.o` 进链接两次（ld.lld 报 duplicate symbol）。
+//
+// 做法：`link.realpath`（相对按 cwd 解析、消 symlink、绝对化）→ `proj.canon`
+// （统一 '/'、折叠 "."/".."、合并多余斜杠）→ 入池。realpath 失败（路径不存在）
+// 时保留原拼写，让后续「找不到 project.toml」照旧报错。
+//
+// 为什么调用写在 `link` 而不是 `proj`：`link` 已经声明了 `realpath`（Windows 端由
+// compiler/llvm/windows_shim.c 的 GetFullPathNameA 提供）。`proj` 是纯逻辑模块，
+// 不引用 libc 符号——gen-split / ctfacts 这类「拷真实模块子集」的夹具不链接 yh 的
+// Windows shim，`proj` 一旦引用 realpath 就会在 Windows 上链接失败（0.0.16-rc.1 实测）。
+pub fn pj_root_key(root_off int, root_len int, out_off *int, out_len *int) int {
+    out_off[0] = root_off
+    out_len[0] = root_len
+    let real [4096]u8
+    if (link.realpath(proj.pool_str(root_off), (&real[0]).to_type(*char)) == 0) {
+        return 0
+    }
+    let n int = 0
+    for n < 4095 && real[n] != 0 {
+        n += 1
+    }
+    if (n <= 0 || n >= 1023) {
+        return 0
+    }
+    return proj.canon(0, 0, (&real[0]).to_type(*char), out_off, out_len)
+}
+
 // pj_load_root：装载**命令根项目**——根身份先规范化，再登记 + 装载。
 // 两步必须用同一份规范身份：`proj.is_root_project` 按字节比较，若 set_root_project
 // 记的是原始拼写、load_project 存的是规范路径，根项目会被当成依赖项目，
@@ -1373,7 +1405,7 @@ pub fn mb_worker_parent_set() void { mb_worker_parent = getppid() }
 pub fn pj_load_root(root_off int, root_len int) int {
     let k_off int = root_off
     let k_len int = root_len
-    if (proj.root_canon(root_off, root_len, &k_off, &k_len) != 0) {
+    if (pj_root_key(root_off, root_len, &k_off, &k_len) != 0) {
         return -1
     }
     proj.set_root_project(k_off, k_len)
@@ -1384,11 +1416,11 @@ pub fn pj_load_root(root_off int, root_len int) int {
 // 入口先做一次**身份规范化**：root 可能是相对拼写（cwd 派生）或绝对拼写
 // （标准库自动发现给的是 `<bin>/../libs`）。`find_project_root` 按字节判重，
 // 两种拼写会被当成两个项目——模块产物标签与符号后缀完全一样，同一个 `.o`
-// 进链接两次（见 proj.root_canon 的注释）。此后函数体内一律用规范路径。
+// 进链接两次（见 pj_root_key 的注释）。此后函数体内一律用规范路径。
 pub fn load_project(raw_off int, raw_len int) int {
     let root_off int = raw_off
     let root_len int = raw_len
-    if (proj.root_canon(raw_off, raw_len, &root_off, &root_len) != 0) {
+    if (pj_root_key(raw_off, raw_len, &root_off, &root_len) != 0) {
         return -1
     }
     let c_off int = 0

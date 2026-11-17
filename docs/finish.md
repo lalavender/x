@@ -13,7 +13,7 @@
 **结果**：`docs/todo.md` 该节四条（身份规范化、产物标签冲突诊断、链接对象去重、
 Linux `DT_UNKNOWN` 兜底）全部交付，只剩两条依赖新种子的后续项。记录：
 [01-finished/yh-项目装载身份与链接对象去重-2026-11-17.md](01-finished/yh-项目装载身份与链接对象去重-2026-11-17.md)。
-- 身份 = 真实绝对路径：`proj.root_canon`（`realpath` → 既有 `canon`）+
+- 身份 = 真实绝对路径：`build.pj_root_key`（`link.realpath` → 既有 `canon`）+
   `build.pj_load_root`；`load_project` 入口与 `yh test` 的设根处统一走它，
   「同一目录两种拼写 = 两个项目」消失。实测：`depspell` 夹具（`../lib` 与符号链接
   `../liblink`）新编译器 `[编译] core` 1 次、`yh run` 退出 14；旧编译器同一配置下
@@ -30,12 +30,12 @@ Linux `DT_UNKNOWN` 兜底）全部交付，只剩两条依赖新种子的后续�
   失效（`llvm-global-cache.py` 红）；改混 `proj.mod_dir_rel` 的项目相对目录后恢复。
 - 门禁：`just dev`、`just test`、`just selfhost-native` 全绿（`project cases 127/127`，
   含新增 `u8-dep-same-dir-two-spellings`、`u8-dup-project-tag`）；`../yh test link` 6 例、
-  `../yh test proj` 6 例（新增 `root_canon`/`mod_tag_conflict`/`mb_row_dup` 用例）；
+  `../yh test proj` 5 例（`canon`/`mod_tag_conflict`）、`../yh test link` 6 例（`mb_row_dup`）；
   两个 Linux 目标各编到 30 个模块（仅本机缺 Linux 闭包时停在链接）；`--emit-asm`
   抽样 5 例与改动前逐字节相同。
 - 文档同步：模块与项目管理设计（§5 目录枚举 `DT_UNKNOWN`、§7 身份与冲突诊断）、
   缓存设计 §4.2（模块键混**项目相对**目录）、编译流程 §3（装载步骤含 `pj_load_root`
-  与 `root_canon`）；`find_project_root` 注释写明调用方必须传规范身份。
+  与 `pj_root_key`）；`find_project_root` 注释写明调用方必须传规范身份。
 
 ## 2026-11-17：记录清理——`todo` 已交付项与已完成方案文档下线
 
