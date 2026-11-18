@@ -326,15 +326,35 @@ fn fmt_snippet(buf *u8, n int, limit int, line int, col int, width int) int {
     let start int = line_start_of(src, slen, line)
     let end int = line_end_of(src, slen, start)
     let total int = count_lines(src, slen)
-    // 行号栏宽：最小 5，末行号 5 位以上自动加宽
-    let shown_last int = line + 2
-    if (shown_last > total) { shown_last = total }
-    let gutter int = digits(shown_last)
-    if (gutter < 5) { gutter = 5 }
     // caret 目标字节：列号是 1 基字节列，越界夹到行尾
     let caret_at int = start + col - 1
     if (caret_at < start) { caret_at = start }
     if (caret_at > end) { caret_at = end }
+    // 多行跨度：caret 行之后仍需下划线的字节数（已去掉换行符）。
+    // 只有 width 越过本行行尾时才可能为非零；span_last 是跨度末行。
+    let span_left int = 0
+    if (width > 1) {
+        let consumed int = end - caret_at + 1
+        if (width > consumed) { span_left = width - consumed }
+    }
+    let span_last int = line
+    if (span_left > 0) {
+        let probe int = line
+        let left int = span_left
+        for probe < total && left > 0 {
+            probe += 1
+            let ps int = line_start_of(src, slen, probe)
+            let pe int = line_end_of(src, slen, ps)
+            left -= (pe - ps + 1)
+        }
+        span_last = probe
+    }
+    // 行号栏宽：最小 5，末行号 5 位以上自动加宽
+    let shown_last int = line + 2
+    if (span_last > shown_last) { shown_last = span_last }
+    if (shown_last > total) { shown_last = total }
+    let gutter int = digits(shown_last)
+    if (gutter < 5) { gutter = 5 }
     // 长行开窗：围绕 caret 保留 DIAG_LINE_COLS 显示列
     let win_start int = start
     let win_end int = end
@@ -401,6 +421,29 @@ fn fmt_snippet(buf *u8, n int, limit int, line int, col int, width int) int {
                 cur_start, c_to, 0, c_tail)
         }
         n = append_byte(buf, n, '\n')
+        // 多行跨度：本行仍在跨度内时补一行下划线（长度取剩余字节与行宽的小者）。
+        if (cur > line && span_left > 0) {
+            let uroom int = cur_end - cur_start
+            let utake int = span_left
+            if (utake > uroom) { utake = uroom }
+            let ucols int = text_width(src, cur_start, cur_start + utake)
+            n = append_pad(buf, n, limit, gutter)
+            n = append_str_limit(buf, n, limit, " | ")
+            if (diag().color != 0) {
+                n = append_sgr(buf, n, limit, "1;31")
+            }
+            let uk int = 0
+            for uk < ucols && n < limit {
+                n = append_byte(buf, n, '~')
+                uk += 1
+            }
+            if (diag().color != 0) {
+                n = append_sgr(buf, n, limit, "0")
+            }
+            n = append_byte(buf, n, '\n')
+            span_left -= uroom + 1
+            if (span_left < 0) { span_left = 0 }
+        }
         cur += 1
         cur_start = cur_end + 1
     }

@@ -2215,6 +2215,7 @@ pub fn sem_call_begin(callee *support.Res) int {
     if (table.ms().types[callee.type_id].kind == types.TY_FN) {
         support.fc().c_call_abi[support.fc().c_call_depth] = table.ms().sig_abi[table.ms().types[callee.type_id].sub]
     }
+    support.fc().c_call_lparen[support.fc().c_call_depth] = support.fc().c_pending_lparen
     support.fc().c_call_depth += 1
     if (callee.sym >= 0) {
         if (table.ms().syms[callee.sym].kind == table.SYM_FN) {
@@ -2289,12 +2290,16 @@ pub fn sem_call(callee *support.Res, r *support.Res) int {
         noreturn = 1
     }
     // vararg==2：类型化变参（末尾打包为切片）；==1：裸 C 变参（仅 prelude）
+    // 多行跨度：从本层调用的 '(' 到 ')'（`c_call_lparen` 由 parse 在调用点记录）。
+    let lparen int = support.fc().c_call_lparen[support.fc().c_call_depth]
     if (vararg == 2) {
         if (na < np) {
-            return token.err_tok("实参个数少于固定参数")
+            return token.err_call_span(lparen, token.ctx().pos + 1,
+                "实参个数少于固定参数")
         }
     } else if (na < np || (na > np && vararg == 0)) {
-        return token.err_tok("实参个数与函数签名不符")
+        return token.err_call_span(lparen, token.ctx().pos + 1,
+            "实参个数与函数签名不符")
     }
     // 实参类型检查
     let first int = table.ms().sig_first[sig]
@@ -2313,7 +2318,14 @@ pub fn sem_call(callee *support.Res, r *support.Res) int {
                 let arg_tid int = support.fc().c_args[base + i].type_id
                 if (table.ms().types[arg_tid].kind != types.TY_FN
                     || table.ms().sig_abi[table.ms().types[arg_tid].sub] != support.ABI_C) {
-                    return token.err_tok("C ABI 回调实参必须是 extern 函数")
+                    // 位置指回**调用表达式的首 token**：`err_tok` 此刻已越过实参列表、
+                    // 游标停在 ')' 上（曾出现 caret 落在右括号）。c_expr_first 由
+                    // parse_expr_iso 在隔离表达式入口记录，嵌套调用不会覆盖。
+                    let anchor int = support.fc().c_expr_first
+                    if (anchor < 0) {
+                        return token.err_tok("C ABI 回调实参必须是 extern 函数")
+                    }
+                    return token.err_at(anchor, "C ABI 回调实参必须是 extern 函数")
                 }
             }
             // 数组实参按指针形参退化
@@ -4051,6 +4063,7 @@ pub fn sem_init_tables() int {
     support.fc().c_call_base = support.alloc((4 * 64).to_type(u64)).to_type(*int)
     support.fc().c_call_abi = support.alloc((4 * 64).to_type(u64)).to_type(*int)
     support.fc().c_call_direct = support.alloc((4 * 64).to_type(u64)).to_type(*int)
+    support.fc().c_call_lparen = support.alloc((4 * 64).to_type(u64)).to_type(*int)
     support.fc().c_arg_agg = support.alloc((4 * 256).to_type(u64)).to_type(*int)
     support.fc().c_aggparam_indirect = support.alloc((4 * 64).to_type(u64)).to_type(*int)
     support.fc().c_aggparam_src = support.alloc((4 * 64).to_type(u64)).to_type(*int)

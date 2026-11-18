@@ -204,6 +204,14 @@ fn pj_load_env_config(pj int, sec int) int {
     return 0
 }
 
+// PJ_SCAN_ERROR_LIMIT：索引阶段（读模块头）允许继续扫描的错误条数上限。
+// 超过上限后不再扫描其余文件，避免一次坏改动刷出上百条同源错误。
+let PJ_SCAN_ERROR_LIMIT int = 8
+
+// pj_scan_source：扫一个源码目录（递归），把 .yh 文件读进索引。
+// 单个文件失败后**继续扫同目录的其它条目**（错误恢复）：每个坏文件各自报一条
+// 位置诊断，最多 PJ_SCAN_ERROR_LIMIT 条，达到上限后停止并给一条说明。
+// 本轮只做索引阶段的多错误上报；完整语义检查（check）仍是首错即停。
 fn pj_scan_source(dir_off int, dir_len int, pj int) int {
     let entries list.List = list.make(sizeof(PJDirEntry).to_type(u64))
     if (pj_os_dir_list(proj.pool_str(dir_off), &entries) != 0) {
@@ -212,17 +220,23 @@ fn pj_scan_source(dir_off int, dir_len int, pj int) int {
     }
     pj_dir_sort(&entries)
     let total int = entries.count.to_type(int)
+    let failed int = 0
     let e int = 0
     for e < total {
         let item *PJDirEntry = list.element_at(&entries, e.to_type(u64)).to_type(*PJDirEntry)
         if (pj_scan_entry(dir_off, dir_len, item.name_off,
             item.name_len, item.is_dir, pj) != 0) {
-            list.release(&entries)
-            return -1
+            failed += 1
+            if (failed >= PJ_SCAN_ERROR_LIMIT) {
+                list.release(&entries)
+                errors.note("已停止继续扫描：错误数达到上限（8 条）")
+                return -1
+            }
         }
         e += 1
     }
     list.release(&entries)
+    if (failed != 0) { return -1 }
     return 0
 }
 

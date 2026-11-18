@@ -5,7 +5,8 @@
 - `check.py`：语料扫描（统计有片段/有 caret/列号越界/跨文件）与夹具断言。
 - `baseline.md`：由 `check.py` 生成的当前基线快照（**自动生成，不要手改**）。
 - `cases/`：诊断夹具。`*.yh` + 同名 `*.expect` 断言头行与 caret 几何；
-  `two-file-module/` 是多文件项目夹具，断言「头行文件与片段内容同属一个文件」。
+  `two-file-module/` 是多文件项目夹具，断言「头行文件与片段内容同属一个文件」；
+  `multi-file-errors/` 断言索引阶段的多错误上报（`.expect` 的 `heads: 2`）。
 
 ## 重新生成基线快照
 
@@ -55,6 +56,7 @@ tools/py tests/diagnostics/check.py --compiler ./yh --color-check
 | `head-file` | （项目夹具）头行文件名，必须是出错的那个文件 |
 | `snippet-contains` | （项目夹具）片段里必须出现的源码文本 |
 | `command` | （项目夹具）`build`（缺省）或 `test`（验收 `yh test` 的诊断） |
+| `heads` | （项目夹具）诊断头行条数；用于多文件错误恢复断言（缺省不断言） |
 
 ## 与 `just test` 的关系
 

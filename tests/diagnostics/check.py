@@ -364,6 +364,12 @@ def check_project_case(compiler, case_dir, work):
     diag = parse_diag(proc.stderr)
     if not diag["heads"]:
         return [f"{case_dir.name}: 没有诊断头行（输出 {proc.stderr.splitlines()[:1]}）"]
+    # heads：多文件错误恢复的条数断言（缺省不断言，兼容单错夹具）
+    if "heads" in expect:
+        want_heads = int(expect["heads"])
+        if len(diag["heads"]) != want_heads:
+            problems.append(f"{case_dir.name}: 诊断头行数期望 {want_heads}，"
+                            f"实际 {len(diag['heads'])}")
     head = diag["heads"][0]
     want_file = expect.get("head-file")
     if want_file:

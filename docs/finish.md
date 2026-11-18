@@ -8,6 +8,25 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-17：V 诊断两项余工收尾（右括号 caret、多行跨度、索引阶段多错误）
+
+**结果**：`docs/todo.md` 的 V 诊断「余项」与「D5 剩余」落地。记录：
+[01-finished/yh-编译诊断-余项与多行多错-2026-11-17.md](01-finished/yh-编译诊断-余项与多行多错-2026-11-17.md)。
+- 尾括号余项：`28`（C ABI 回调实参）改用 `c_expr_first` 作锚点，caret 落在实参上；
+  `88`（编译期实参数量）改用 `token.err_at(call_token, …)`，caret 落在 `$` 上。
+  语料 `tail_paren` 从 2 降到 **0**。
+- 多行跨度：`errors/render.yh` 的 `fmt_snippet` 在跨度越过首行行尾时逐行补下划线；
+  新增 `token.err_call_span`（不夹行尾）+ `FibCtx.c_call_lparen`（parse 在调用点记录
+  `(`），实参个数不符的诊断改为整段调用跨度。夹具
+  `tests/yh-run/fail/217-call-arity-multiline.yh`。
+- 多错误上报：`pj_scan_source` 单文件失败后继续扫其它条目，上限
+  `PJ_SCAN_ERROR_LIMIT = 8`（到限给一条 `yh:` 说明）。夹具
+  `tests/diagnostics/cases/multi-file-errors/`（`.expect` 新增 `heads: 2`）。
+  语义检查阶段仍首错即停，留在 `docs/todo.md`。
+- 门禁：语料 148（片段 148 / caret 148 / 越界 0 / 末字符 5 / `tail_paren` 0）、
+  夹具 12 个问题 0、`../yh test errors` 20 例、`just test`、`just selfhost-native`
+  （`project cases 127/127`）全绿。
+
 ## 2026-11-17：0.0.16 发布（rc.1 失败 → rc.2 → 正式版）
 
 **结果**：0.0.16 正式版已发布（GitHub `Latest`，8 资产）。四端构建全绿，发布二进制

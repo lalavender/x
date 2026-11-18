@@ -5,11 +5,11 @@
 
 ## 汇总
 
-- 失败语料: 147
-- 带源码片段: 147
-- 带 caret: 147
-- 列号越出行尾(>行宽): 0/147 (0.0%)
-- 列号=行宽(指向末字符): 6（其中落在 `)` 上: 2）
+- 失败语料: 148
+- 带源码片段: 148
+- 带 caret: 148
+- 列号越出行尾(>行宽): 0/148 (0.0%)
+- 列号=行宽(指向末字符): 5（其中落在 `)` 上: 0）
 - 跨文件头: 0
 - 无位置头: 0
 
@@ -103,13 +103,14 @@
 | 214-array-length-not-const-arithmetic.yh | 是 | 是 | 12 | 35 | n |
 | 215-array-length-literal-bounds.yh | 是 | 是 | 17 | 26 | ] |
 | 216-array-length-literal-overflow.yh | 是 | 是 | 22 | 31 | ] |
+| 217-call-arity-multiline.yh | 是 | 是 | 15 | 15 | ( |
 | 22-cabi-empty-enum.yh | 是 | 是 | 10 | 18 | C |
 | 23-cabi-slice-field.yh | 是 | 是 | 5 | 16 | v |
 | 24-noreturn-nonvoid.yh | 是 | 是 | 4 | 18 | i |
 | 25-noreturn-fallthrough.yh | 是 | 是 | 4 | 27 | i |
 | 26-noreturn-return.yh | 是 | 是 | 4 | 19 | i |
 | 27-noreturn-break-loop.yh | 是 | 是 | 4 | 27 | i |
-| 28-cabi-callback-needs-extern.yh | 是 | 是 | 34 | 34 | ) |
+| 28-cabi-callback-needs-extern.yh | 是 | 是 | 20 | 34 | p |
 | 29-cabi-array-parameter.yh | 是 | 是 | 12 | 29 | v |
 | 30-cabi-hfa-parameter.yh | 是 | 是 | 13 | 29 | v |
 | 31-cabi-slice-parameter.yh | 是 | 是 | 12 | 28 | v |
@@ -152,7 +153,7 @@
 | 85-comptime-for-assign.yh | 是 | 是 | 11 | 13 | = |
 | 86-comptime-expansion-trace.yh | 是 | 是 | 17 | 52 | $ |
 | 87-comptime-recursion-budget.yh | 是 | 是 | 20 | 30 | $ |
-| 88-comptime-body-call-arity.yh | 是 | 是 | 23 | 23 | ) |
+| 88-comptime-body-call-arity.yh | 是 | 是 | 12 | 23 | $ |
 | 89-comptime-body-call-type.yh | 是 | 是 | 20 | 21 | x |
 | 90-comptime-function-diagnostic-path.yh | 是 | 是 | 9 | 53 | $ |
 | 91-comptime-function-assert-path.yh | 是 | 是 | 5 | 47 | $ |
