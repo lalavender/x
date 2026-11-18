@@ -227,11 +227,10 @@ WINDOWS_SKIP = {
     "net0-sys-socket-loopback": "Winsock 未接线（W2-7 的 socket 桩返回 -ENOSYS）",
     "net1-net-tcp-loopback": "Winsock 未接线（W2-7 的 socket 桩返回 -ENOSYS）",
     "cabi-automatic-values-and-callbacks": "C 互操作桩依赖宿主 libc/libm（W1-2b-2）",
-    "r2b-ast-check-module": "fixture 走宿主 libc（strtod）浮点解析（W1-2b-2）",
-    "llvm-target-identity": "fixture 走宿主 libc（strtod）浮点解析（W1-2b-2）",
-    "llvm-front-zero-output": "fixture 走宿主 libc（strtod）浮点解析（W1-2b-2）",
-    "llvm-checked-snapshot": "fixture 走宿主 libc（strtod）浮点解析（W1-2b-2）",
-    "llvm-snapshot-lowering": "fixture 走宿主 libc（strtod）浮点解析（W1-2b-2）",
+    "r2b-ast-check-module": "fixture 走宿主 libc（strtod）浮点解析（W1-2b-2）；"
+                            "2026-11-17 CI 复核仍失败（同批 3 例已可跑）",
+    "llvm-checked-snapshot": "fixture 走宿主 libc（strtod）浮点解析（W1-2b-2）；"
+                             "2026-11-17 CI 复核仍失败（同批 3 例已可跑）",
     "r3-system-compat-build": "system() 是 POSIX shell 语义，Windows 无等价物",
     "r3-system-compat-check": "system() 是 POSIX shell 语义，Windows 无等价物",
     "r3-system-compat-run": "system() 是 POSIX shell 语义，Windows 无等价物",
@@ -240,7 +239,7 @@ WINDOWS_SKIP = {
     "link-shared-group": "共享库（.so/.dylib）不是 COFF 目标；Windows 用 .lib/.dll",
     "u3-c-paths-with-spaces-use-argv": "C 互操作桩依赖宿主 libc/libm（W1-2b-2）",
     "u8-dup-module-path-import": "同名模块+路径导入的 Windows 对象缓存提交仍有遗留"
-                                  "（rc.2 记录，见 docs/todo.md）",
+                                  "（rc.2 记录）；2026-11-17 CI 复核仍失败（期望退出码 30，实得 1）",
     "u8-dep-same-dir-two-spellings": "fixture 用符号链接表达「同一目录的两种拼写」；"
                                     "Windows 检出默认不物化 symlink（需开发者模式/管理员）",
 }

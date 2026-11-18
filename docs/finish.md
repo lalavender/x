@@ -8,6 +8,19 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-17：清理 WINDOWS_SKIP（CI 实测判定）+ 忽略 `.openidea/`
+
+**结果**：`tests/modules/build-check.py` 的 `WINDOWS_SKIP` 从 18 条降到 **15** 条。
+- 判定方法：分支 `t/win-skip-audit` 试删 6 条 + `workflow_dispatch` 跑 ci.yml
+  （run `44232573422`），Windows 结果 130/133。
+- 删（实测 OK）：`llvm-target-identity`、`llvm-front-zero-output`、
+  `llvm-snapshot-lowering`。
+- 留并补复核说明：`r2b-ast-check-module`、`llvm-checked-snapshot`（strtod 族，
+  同批另 3 例已可跑）、`u8-dup-module-path-import`（期望退出码 30、实得 1）。
+- 其余 12 条是 Windows 目标的能力缺口（零 CRT 无 libm、Winsock 未接线、POSIX
+  system/dup2、envp 未构造、COFF 无共享库、C 桩缺工具链、symlink 检出），保持。
+- 顺带：`.gitignore` 增加 `.openidea/`（IDE 每用户状态）。
+
 ## 2026-11-17：编译器性能测试启动——基线复核 + PC4c 前置断言
 
 **结果**：重测当前编译耗时基线，并补上 PC4c 要求的边界断言。记录：
