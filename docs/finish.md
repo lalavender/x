@@ -8,6 +8,21 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-17：编译器性能测试启动——基线复核 + PC4c 前置断言
+
+**结果**：重测当前编译耗时基线，并补上 PC4c 要求的边界断言。记录：
+[01-finished/yh-编译器性能-基线复核与PC4c前置-2026-11-17.md](01-finished/yh-编译器性能-基线复核与PC4c前置-2026-11-17.md)。
+- 复核：编译器耗时工具 `tools/compiler-performance.py` 已在 `73ec7fd` 删除，PL1d2b /
+  PC2d 的「占比」类指标没有现成采集口径（只能临时打点或整机墙钟 A/B）。
+- 基线（本机 darwin-arm64，0.0.16，`YH_CACHE=off just build` 冷编 3 次）：冷编
+  **6.28 s**（6.28/6.09/6.32），`just dev` 热编 **0.68 s**；「单函数改动」未复测
+  （`touch` 不改内容等于热编）。
+- 改动：`ir_fc_visit_type` 的 `order[count[0]]` 与 `ir_fc_mark_symbol` 的
+  `global_used[gi]` 加容量断言（越界返回 -1），作为 scratch 复用的前置。
+- 门禁：`just dev`、`just test`、`just selfhost-native`（`project cases 127/127`）全绿。
+- 仍开：PL1d2b（待定口径）、PC4c 主项（需复现 lowering 失败）、PC2d、PL3b/LC1/LC2
+  （需 Linux）、PC7（ADR-0020 暂缓）。
+
 ## 2026-11-17：V 诊断两项余工收尾（右括号 caret、多行跨度、索引阶段多错误）
 
 **结果**：`docs/todo.md` 的 V 诊断「余项」与「D5 剩余」落地。记录：
