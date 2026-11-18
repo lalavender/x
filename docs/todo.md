@@ -392,72 +392,6 @@ rc tag 发 prerelease 并带四端种子，正式 tag 必须落在 `llvm` 上。
   `tools/fetch-release-seed.py` 只**写**本地摘要、不比对 Release 的 `.sha256` 资产；
   断言仍未接入验收脚本。
 
-## P0 发布质量：平台、CI 与分发
-
-> **交叉编译任务已撤下（2026-11-06）**：Linux→Darwin 交叉（用户程序与编译器
-> 候选）、跨宿主自举与 Darwin 交叉边界相关条目已从本文件删除，等待重新立项。
-> 重新计划时的现状取证：Linux 交叉产 Mach-O 对纯 `.yh` 程序可用（需显式 SDKROOT），
-> 带 `[c] sources` 报「C 目标文件架构与当前 target 不符」、交叉产编译器候选与
-> macOS→Linux 方向均不可用；细节见
-> [Darwin 交叉遗留边界](03-design/yh-Darwin交叉编译遗留边界.md)
-> 与[架构设计 §8.2](03-design/yh-架构设计.md)。
->
-> **2026-11-10 Windows 平台设计整体搁置（用户决定）**：B1a 只记录分层决策、
-> 不落地实现；B1b/B1c/B1d/B2b 标 ⏸。恢复时按 B1a 的「编译器接 UCRT、
-> 用户程序默认零 CRT」执行。
-
-### B. 平台矩阵（原 F3/F4）
-
-四格现状：Linux/x64、Linux/ARM64、Darwin/ARM64、Windows/x64 已交付（CI 四端绿、
-种子随 Release 发布）；Darwin/x64 与 Windows/ARM64 未接入。交叉编译任务已撤下
-（见本节前说明），因此 B2a 只在**原生 runner** 上验收。
-
-- [ ] **B1a 零 CRT vs UCRT 决策（P0，⏸ 已决策、随 Windows 搁置实现）**：
-  **2026-11-10 决策：分层**。编译器工具链链接 UCRT，解决 `strtod`（浮点字面量
-  解析，见 `check/api.yh:3838`）与 `malloc/free` 等宿主依赖；**用户程序默认仍
-  零 CRT**（只链 kernel32），需要 `libs/math`/网络时按链接组显式 opt-in
-  `ucrtbase`/`ws2_32`。`WINDOWS_SKIP` 中 5 例 `strtod` fixture 随编译器接 UCRT
-  解除；math/socket/system/dup2 类留到用户程序 opt-in 落地后逐个删。
-  注意：Windows 零 CRT 下带浮点字面量的程序目前**编不过**，不只是 math 不可用。
-- [ ] **B1b Winsock 接线（P0，⏸ 2026-11-10 搁置）**：`libs/sys/socket.windows.yh` 与
-  `libs/net/tcp.windows.yh` 一律返回 `-ENOSYS`，Windows 上 `net`/`http` 不可用。
-  需要 WSAStartup、SOCKET 进 fd 表、`SO_*` 换 Winsock 取值、`ioctlsocket` 的非阻塞
-  语义，并补 `// platform: windows` 的 loopback 用例（`net0`/`net1` 现被跳过）。
-- [ ] **B1c COFF 整库加载 + Win32 导出面扩展（P2，⏸ 2026-11-10 搁置）**：
-  `[link-options-windows-x64].whole` 被 lld-link 忽略（未实现 `/wholearchive`），
-  当前靠「桥入口均被直接引用」绕过，裁剪清单会静默少符号；
-  `vendor/windows-sdk/manifest.json` 只覆盖 KERNEL32 的 38 条导出，扩面需改 `.def`
-  → 同步 `exports`/`def_sha256` → 重新生成 `.lib`，目前无成文流程条目。
-- [ ] **B1d Windows 工程债（P1/P2，⏸ 2026-11-10 搁置）**：① windows job 补跑 `test-windows-target`
-  （原排除理由是「`--emit-asm` stdout 在零 CRT 下不支持」，实测已可用，PE 目标门
-  目前只有 linux-arm64 交叉侧覆盖）；② 补 Windows 性能基线（`perf.yml` 只有
-  macos-15 一端）；③ `windows-2022` pin 的长期方案（闭包 CMake 生成器写死
-  「Visual Studio 17 2022」，需改动态检测）。
-- [ ] **B2a macOS/x86_64 原生接入（P1）**：目标与 SDK 已就绪（`gen/target_info.yh:24`、
-  `ir/ssa_module_00_model.yh:173` 的 key=4、`libSystem.tbd` 的 `targets` 含
-  `x86_64-macos`），缺的是接线：`[link-darwin-x64]` 链接组（`compiler/project.toml`
-  只有 `link-darwin-arm64`）、x64 Darwin 闭包（`tools/llvm-darwin-host.py` 的
-  `HOST`/`SDK_PREFIX` 写死 aarch64）、`tests/selfhost/darwin/llvm-darwin-*.py` 的 arm64 断言
-  参数化、种子与取种（`justfile:78` 与 `tools/fetch-release-seed.py` 的 `PLATFORMS`）、
-  Intel Mac runner job（`macos-13`，需确认支持窗口）。验收必须在 Intel Mac 原生跑
-  + 原生自举，交叉产物不算数。
-- [ ] **B2b Windows/ARM64 可行性立项（P2，⏸ 2026-11-10 搁置，先证明再动手）**：① 目标身份
-  （`aarch64-pc-windows-msvc` 未登记：`target_resolve` 只认 x64、`target_host_info`
-  的 windows+arm64 直接 `return -1`、IR 第二份目标表无 key=6）；② ABI（现有 win64
-  分类按 x64 规则写死「1/2/4/8 字节→INTEGER，其余 MEMORY」，ARM64 的 HFA/寄存器
-  规则不同，需 clang oracle 核对）；③ SDK（`manifest.json` 锁 `machine 34404`、
-  `tools/windows-sdk.py` 的 `VALID_MACHINES` 只认 `0x8664`、`chkstk.c` 是 x64 asm）；
-  ④ arm64-windows 目标包（LLVM/lld/桥）；⑤ GitHub `windows-11-arm` 托管 runner
-  可用性（硬前置，可能直接卡死）。
-
-### C. 分发与工具链体验
-
-- [ ] **C3 SDK 27 兼容（P1，识别/回退已落地）**：固定 lld 21.1.8 的 TextAPI
-  不认识 SDK 27 的 `arm64e.x1` 目标（上游 PR #222721，LLVM 23.1.3+ 才支持）。
-  2026-11-10 已在选 SDK 时检测并自动改用兼容的 26.x SDK（显式 SDKROOT 也回退
-  并告警；找不到兼容 SDK 时给出可操作诊断）。**剩余真支持**：回移上游补丁到
-  21.1.8 闭包，或升级固定 LLVM 到 23.1.3+。
-
 ## P1 标准库与工具链
 
 ### E. os/sys 与 libc
@@ -830,7 +764,12 @@ LA0–LA3 已完成，历史与证据见 [finish.md](finish.md) 与
   增量由函数 check/IR 缓存承担，后端继续整模块发射（ADR-0020）。
 - **自研机器 IR / 寄存器分配 / 动态加载 libLLVM**：与 ADR-0014 冲突；JIT、LTO、
   32 位、ARM64EC 等无消费者扩展同样不做。
-- **以 WSL 代替 Windows 原生支持**：B1 需 Windows 原生构建与运行。
+- **以 WSL 代替 Windows 原生支持**：Windows 目标需原生构建与运行（原 B1 任务线已于
+  2026-11-17 撤销，见本节末条）。
 - **固定 SDK 预编译分发（原 C1）**：2026-11-03 用户决定闭包不上传 Release，
   由构建机经 `just llvm-host` 自行准备；代价是冷启动成本（见「Windows 闭包 CI
   冷启动成本」）。
+
+- **平台矩阵与分发任务线（原「P0 发布质量：平台、CI 与分发」，B1a/B1b/B1c/B1d/
+  B2a/B2b/C3）**：2026-11-17 用户决定整条任务撤销，条目已从本文件移除。
+  取证与边界留在 [Darwin 交叉遗留边界](03-design/yh-Darwin交叉编译遗留边界.md)。
