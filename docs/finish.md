@@ -8,6 +8,25 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-17：0.0.16 发布（rc.1 失败 → rc.2 → 正式版）
+
+**结果**：0.0.16 正式版已发布（GitHub `Latest`，8 资产）。四端构建全绿，发布二进制
+三门验收通过。记录：[release-0.0.16.md](01-finished/release-0.0.16.md)。
+- 内容：编译诊断 V 风格化收尾（D0–D5）、项目装载身份与链接对象去重四条修复、
+  记录清理。
+- `0.0.16-rc.1`（run `44085761083`）**未发布**：Windows 门红
+  （`gen3-split-narrow-ports` / `f4-ct-facts-mirror` 链接失败——`proj` 引用 libc
+  `realpath`，这两个夹具拷真实模块子集、不链接 yh 的 Windows shim），`publish`
+  跳过；tag 保留，见 [release-0.0.16-rc.1.md](01-finished/release-0.0.16-rc.1.md)。
+- 修复 `bbc5afa`：realpath 那一步移到 `build.pj_root_key`（`link.realpath` →
+  `proj.canon`），`proj` 恢复纯逻辑模块。`0.0.16-rc.2`（run `44090325201`）四端
+  全绿，prerelease 8 资产。
+- 正式版 `6128a8f` + tag `0.0.16`（run `44116167597`）：四端 success、`publish`
+  成功、非 prerelease。
+- 发布二进制验收（darwin-arm64）：`rm -rf bin && just fetch-seed` 取到 0.0.16
+  （sha256 `bf952c2c…`，`--version` = `yh 0.0.16`）；`just` / `just test` /
+  `just selfhost-native` 全绿（`project cases 127/127`）。
+
 ## 2026-11-17：随 0.0.16 种子落地两条收尾（删 `YH_STDLIB` 补丁、回退 argv 拆分）
 
 **结果**：`docs/todo.md` 装载身份节余下两条完成——构建脚本的 `YH_STDLIB=../libs`

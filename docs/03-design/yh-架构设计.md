@@ -609,8 +609,10 @@ TaskCtx 按所有者拆（SemaCtx→check / ParseCtx→parse / SourceCtx→suppo
 它比 `rg` 多给出「受影响的函数集合」，便于判断一次拆分要改多少处。
 
 **与 ADR 的对应**：链 A = F4 + F3 剩余；链 B = GEN4。两者均已完成（2026-11-07），
-`gen` 已删除（模块数 19 → 18）；2026-11-09 `cmdline` 并入 `main` 后为 17，
-当前 76 条依赖边。
+`gen` 已删除（模块数 19 → 18）；2026-11-09 `cmdline` 并入 `main` 后为 17；
+0.0.15 起拆出 `types`/`table`/`errors` 后为 20（模块清单见
+[模块职责-当前实现](yh-模块职责-当前实现.md)）。原句「当前 76 条依赖边」是
+2026-11-09 的实测值，之后新增的 import 未复测。
 
 现有 `import gen` 的边按符号实际归属 1:1 改写为 `import support`/`token`/
 `check`；除表中列出的边外不得新增。过渡期临时边

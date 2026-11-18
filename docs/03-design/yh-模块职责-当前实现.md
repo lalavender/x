@@ -1,9 +1,8 @@
 # yh 编译器模块职责（当前实现）
 
-基线：`llvm` 分支（0.0.12 + C0–C6 + GEN1–GEN4 + F4 + 模块归组），
-**20 个模块 / 179 个文件 / 64,371 行**（2026-11-11 实测 `just code-stats`，含 `types`/`table` 拆分）。
-实测：2026-11-10（`just code-stats`；`arch-check` 已于 2026-11-09 删除，
-`cmdline` 已并入 `main`，`cache` 已下沉 `build/cache/`）；依赖边以
+基线：`llvm` 分支（0.0.16），**20 个模块 / 181 个文件 / 66,211 行**
+（2026-11-17 实测 `just code-stats`；模块集合与 2026-11-11 相同，含 `types`/`table`
+拆分，`cmdline` 已并入 `main`，`cache` 已下沉 `build/cache/`）；依赖边以
 [架构设计 §3.1](yh-架构设计.md) 为准。
 
 本文是「每个模块干什么」的唯一清单；分层理由与历史决策见
@@ -18,13 +17,13 @@ L4  link（链接驱动）
 L3  backend（LLVM IR 发射）
 L2  lower（IR 降低）       parse（语法分析）   builtin（内建登记）
 L1  check（语义中心）      comptime（CT 执行器） ast（语法树）  proj（项目模型）
-L0  types  support  table  token  ir  cache  lex
+L0  errors  types  support  table  token  ir  cache  lex
 ```
 
 依赖只能**向下**（箭头指向被依赖方），以本文表格与
 [架构设计 §3.1](yh-架构设计.md) 为准；`tools/arch-check.py` 已于 2026-11-09 删除，
 不再有自动门禁，越界靠 code review 发现。`types` 与 `ir` 无依赖；`support` 只依赖
-`types`/`errors`，三者（`types`/`support`/`ir`）是所有模块的公共底座。
+`types`/`errors`，四者（`errors`/`types`/`support`/`ir`）是所有模块的公共底座（`errors` 最深：不 import 任何模块）。
 
 ## 2. 逐模块职责
 
@@ -32,6 +31,7 @@ L0  types  support  table  token  ir  cache  lex
 
 | 模块 | 规模 | 依赖 | 职责与关键入口 |
 | --- | --- | --- | --- |
+| **errors** | 3 / 1,101 | — | 诊断基座（最底层，不 import 任何模块）：`DiagCtx`（`diag()`）与位置级 `err_span`/`warn_span`/`err_lc`/`warn_lc`、路径级 `err_path`/`err_path_pos`；源槽与片段渲染（`set_source_slot`/`set_path_slot`/`bind_source_path`、`fmt_diag`/`fmt_snippet`：CJK 宽 2、tab→4 空格、CRLF 去 `\r`、长行开窗）、`说明:` 行（`err_span_note`）、ICE（`ice`/`fmt_ice`）与颜色三态（`set_color`）、`set_plain`/`set_version` |
 | **types** | 1 / 83 | — | 语言类型模型（叶子）：`TY_*` 类型种类常量、类型表行 `CType`、字段表行 `SField`、具名类型行 `TName`。只有数据形状与种类编码，不持有存储实例；存储与增删在 `support.ModelStore` 与 `check` 的类型规则 |
 | **table** | 3 / 1,316 | types, support, errors, token | 编译期语义存储（V `ast.Table` 对等层，ADR-0027）：`ModelStore`/`CSym` + 表操作（`ms()`/`ty_push`/`sym_lookup`/`sig_add`/`fn_abi`/`cabi_*`）+ 值规则（`vk_fold_*`/`sem_fold_*`/`vk_can_assign`/`vk_msg`）+ 字符串标签/枚举成员表（`data_str_*`/`em_*`）+ 静态数据目录（`static_data_*`/`StaticData*`，ADR-0028）+ `SYM_*/F_*/VK_*` |
 | **support** | 1 / 1,300 | types, errors | 叶子内核（依赖 `types` 与诊断底座 `errors`），**纯平台无关**。①基础设施：源缓冲 `src_ctx`、名字池 `pool_ctx`、诊断转发、`append_*`/`alloc`、会话开关 `session()`、目标身份 `TargetInfo`/`cfg()`。②跨层共享态：`ModuleSym`(`msym()`)、`FrontCtx`(`fc()`)、`Res`。（语义存储已全部迁 `table`，ADR-0027/0028；`base.yh`/`task_ctx.yh` 的单例已并入本文件）（平台变体已全部迁出：FileScope/ABI/front_stage 见 ADR-0024，console/argv 见 ADR-0025，clock 删除见 ADR-0026） |
@@ -70,7 +70,7 @@ L0  types  support  table  token  ir  cache  lex
 | **link** | 7 / 4,390 | backend, proj, support | 链接驱动：Darwin（内嵌 lld / 系统 `ld`）、Windows（`lld-link`）、进程调用与输出捕获、链接键与链接缓存。位于 build 之下（不得 import build） |
 | **build** | 21 / 7,826 | ast, backend, builtin, cache, check, comptime, ir, lex, link, lower, parse, proj, support, token | 构建编排：会话初始化、模块图与调度（含 fork worker）、函数级 IR 缓存、LLVM 流水线与产物发布、全局缓存管理（`yh cache` 实现） |
 | **testkit** | 1 / 1,650 | ast, build, link, parse, proj, support, time, token | `yh test` 的发现 / 构建 / 逐例执行 / 报告；逐例超时用 `time.monotonic_ns`（ADR-0026） |
-| **main**（目录 `cmd/yh/`） | 21 / 1,393 | build, check, lex, libs, link, parse, proj, support, testkit | CLI 声明/解析（唯一允许 `libs/cli` 的模块）、中文帮助、`YH_VERSION_TEXT`（`--version` 唯一来源）与分派：`build`/`run`/`test`/`cache`/`list`/单文件编译…；只做「请求 → 调 build/check」，不实现业务。入口宿主适配 `console.*`/`argv.*`（控制台 UTF-8、Windows argv 重建，ADR-0025 自 support 迁入） |
+| **main**（目录 `cmd/yh/`） | 21 / 1,453 | build, check, lex, libs, link, parse, proj, support, testkit | CLI 声明/解析（唯一允许 `libs/cli` 的模块）、中文帮助、`YH_VERSION_TEXT`（`--version` 唯一来源）与分派：`build`/`run`/`test`/`cache`/`list`/单文件编译…；只做「请求 → 调 build/check」，不实现业务。入口宿主适配 `console.*`/`argv.*`（控制台 UTF-8、Windows argv 重建，ADR-0025 自 support 迁入）。2026-11-17 起 `argv.<平台>.yh` 与 `argv.yh` 同属 `main`：0.0.14 期的 `yh_argv_impl` 拆分已回退（入口桩按已有声明判重） |
 
 ## 3. 依赖方向（实测 76 条边，2026-11-10）
 
@@ -126,9 +126,12 @@ L0  types  support  table  token  ir  cache  lex
 ## 6. 规模速查
 
 ### 6. 规模速查（2026-11-08 实测）
-> 2026-11-11 说明：本节表为 2026-11-08 快照，未随 S4-4 重排。最新实测（`just code-stats`，
-> 2026-11-11）：总计 **179 文件 / 64,371 行**；`check` 21 / 9,852、`parse` 14 / 7,760、
-> `support` 1 / 1,279（`support` 已缩为单文件，表中 28 文件为拆分前数值）。
+> 2026-11-17 说明：最新实测（`just code-stats`，2026-11-17）：总计 **181 文件 / 66,211 行**
+> （代码 56,033、纯注释 6,933、注释占比 12.3%）；`check` 22 / 10,255、`parse` 14 / 7,781、
+> `build` 34 / 10,990、`cmd` 21 / 1,453（`argv.*` 回退后）、`support` 1 / 1,289。
+> 2026-11-11 说明（保留）：本节表为 2026-11-08 快照，未随 S4-4 重排；当时总计
+> **179 文件 / 64,371 行**，`check` 21 / 9,852、`parse` 14 / 7,760、`support` 1 / 1,279
+> （`support` 已缩为单文件，表中 28 文件为拆分前数值）。
 
 
 | 模块 | 文件 | 行数 | 模块 | 文件 | 行数 |
